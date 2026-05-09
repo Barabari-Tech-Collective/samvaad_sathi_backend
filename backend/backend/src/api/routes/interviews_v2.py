@@ -71,6 +71,11 @@ FOLLOW_UP_STRATEGY = "llm_transcription_based"
 router = fastapi.APIRouter(prefix="/v2", tags=["interviews-v2"])
 
 
+def _supplements_enabled_for_track(track: str | None) -> bool:
+    normalized_track = (track or "").strip().lower()
+    return not normalized_track.startswith("non-tech:")
+
+
 def _normalize_non_tech_job_name(job_name: str | None) -> str:
     raw = (job_name or "").strip()
     if not raw:
@@ -344,6 +349,7 @@ async def generate_questions_v2(
             interview_id=interview.id,
             supplement_service=supplement_service,
             ensure_generate=True,
+            track=interview.track,
         )
         _validate_supplements_response(items=supplements_map, source="generate-questions")
         response_items: list[dict[str, object]] = []
@@ -380,6 +386,7 @@ async def generate_questions_v2(
             interview_id=interview.id,
             supplement_service=supplement_service,
             ensure_generate=True,
+            track=interview.track,
         )
         _validate_supplements_response(items=supplements_map, source="generate-questions-cached")
         response_items = [
@@ -519,6 +526,7 @@ async def generate_non_tech_questions_v2(
             interview_id=interview.id,
             supplement_service=supplement_service,
             ensure_generate=True,
+            track=interview.track,
         )
         _validate_supplements_response(items=supplements_map, source="generate-non-tech-questions")
         response_items: list[dict[str, object]] = []
@@ -553,6 +561,7 @@ async def generate_non_tech_questions_v2(
             interview_id=interview.id,
             supplement_service=supplement_service,
             ensure_generate=True,
+            track=interview.track,
         )
         _validate_supplements_response(items=supplements_map, source="generate-non-tech-questions-cached")
         response_items = [
@@ -648,6 +657,7 @@ async def get_structure_practice_questions(
         interview_id=interview.id,
         supplement_service=supplement_service,
         ensure_generate=False,  # Don't generate, just fetch existing
+        track=interview.track,
     )
     
     # Prepare questions data for hint generation
@@ -719,6 +729,8 @@ async def generate_supplements_v2(
     interview = await interview_repo.get_by_id(interview_id=interview_id)
     if interview is None or interview.user_id != current_user.id:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+    if not _supplements_enabled_for_track(interview.track):
+        return QuestionSupplementsResponse(interview_id=interview.id, supplements=[])
 
     supplement_service = QuestionSupplementService(async_session=interview_repo.async_session)
     supplements = await supplement_service.generate_for_interview(
@@ -746,6 +758,8 @@ async def get_supplements_v2(
     interview = await interview_repo.get_by_id(interview_id=interview_id)
     if interview is None or interview.user_id != current_user.id:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+    if not _supplements_enabled_for_track(interview.track):
+        return QuestionSupplementsResponse(interview_id=interview.id, supplements=[])
 
     supplement_service = QuestionSupplementService(async_session=interview_repo.async_session)
     supplements = await supplement_service.get_for_interview(interview_id=interview.id)
@@ -760,7 +774,10 @@ async def _get_supplement_map(
     interview_id: int,
     supplement_service: QuestionSupplementService,
     ensure_generate: bool = False,
+    track: str | None = None,
 ) -> dict[int, QuestionSupplementOut]:
+    if not _supplements_enabled_for_track(track):
+        return {}
     try:
         if ensure_generate:
             supplements = await supplement_service.generate_for_interview(
@@ -1527,4 +1544,3 @@ async def analyze_structure_practice_answer(
         llm_model=llm_model,
         llm_latency_ms=latency_ms,
     )
-

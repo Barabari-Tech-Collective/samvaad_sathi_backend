@@ -75,7 +75,7 @@ class SpeechAndStructureScore(BaseSchemaModel):
 
 class ScoreSummary(BaseSchemaModel):
     """Overall score summary with knowledge and speech metrics."""
-    knowledgeCompetence: KnowledgeCompetenceScore
+    knowledgeCompetence: KnowledgeCompetenceScore | None = None
     speechAndStructure: SpeechAndStructureScore
 
 

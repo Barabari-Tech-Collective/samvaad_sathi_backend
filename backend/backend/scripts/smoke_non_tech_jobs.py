@@ -105,6 +105,8 @@ def main() -> None:
             raise SystemExit(f"Expected one question per blueprint category, got: {categories}")
         if len(categories) != len(set(categories)):
             raise SystemExit(f"Expected unique category coverage, got duplicates: {categories}")
+        if any(item.get("supplement") for item in q_items):
+            raise SystemExit("Expected no supplements for non-tech interviews")
 
         follow_up_ready = [q for q in q_items if q.get("followUpStrategy") or q.get("follow_up_strategy")]
         if len(follow_up_ready) < 2:
@@ -177,6 +179,8 @@ def main() -> None:
         report_body = safe_json(r) if r else {}
         score_summary = report_body.get("scoreSummary") or report_body.get("score_summary") or {}
         speech = score_summary.get("speechAndStructure") or score_summary.get("speech_and_structure") or {}
+        if score_summary.get("knowledgeCompetence") is not None or score_summary.get("knowledge_competence") is not None:
+            raise SystemExit("Expected non-tech summary report to omit knowledge competence score")
         if r is None or r.status_code != 200 or speech.get("score") is None:
             raise SystemExit(f"HR non-tech summary report missing speech score: {report_body}")
 
@@ -185,6 +189,8 @@ def main() -> None:
         report_v2_body = safe_json(r) if r else {}
         report_v2_summary = report_v2_body.get("scoreSummary") or report_v2_body.get("score_summary") or {}
         report_v2_speech = report_v2_summary.get("speechAndStructure") or report_v2_summary.get("speech_and_structure") or {}
+        if report_v2_summary.get("knowledgeCompetence") is not None or report_v2_summary.get("knowledge_competence") is not None:
+            raise SystemExit("Expected non-tech V2 summary report to omit knowledge competence score")
         if r is None or r.status_code != 200 or report_v2_speech.get("score") is None:
             raise SystemExit(f"HR non-tech V2 summary report missing speech score: {report_v2_body}")
 

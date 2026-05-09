@@ -25,6 +25,7 @@ router = fastapi.APIRouter(prefix="/v2", tags=["summary-report-v2"])
 @router.post(
     "/summary-report",
     response_model=SummaryReportResponseLite,
+    response_model_exclude_none=True,
     status_code=200,
     summary="Generate a V2 summary report (Lite version)",
     description=(
@@ -81,6 +82,7 @@ async def generate_summary_report_v2(
 @router.get(
     "/summary-report/{interview_id}",
     response_model=SummaryReportResponseLite,
+    response_model_exclude_none=True,
     status_code=200,
     summary="Fetch a previously saved V2 summary report",
     description="Retrieves a persisted V2 Lite summary report for the interview if present.",

@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 router = fastapi.APIRouter(prefix="", tags=["interviews"])
 
 
+def _supplements_enabled_for_track(track: str | None) -> bool:
+    normalized_track = (track or "").strip().lower()
+    return not normalized_track.startswith("non-tech:")
+
+
 @router.post(
     path="/interviews/create",
     name="interviews:create",
@@ -457,6 +462,7 @@ async def list_interview_questions(
         interview_id=interview_id,
         async_session=question_repo.async_session,
         ensure_generate=True,
+        track=interview.track,
     )
     
     return QuestionsListResponse(
@@ -758,6 +764,7 @@ async def resume_interview(
         interview_id=interview.id,
         async_session=question_repo.async_session,
         ensure_generate=True,
+        track=interview.track,
     )
     
     # Convert to response format
@@ -788,7 +795,15 @@ async def resume_interview(
     )
 
 
-async def _get_supplement_map(*, interview_id: int, async_session, ensure_generate: bool = False) -> dict[int, "QuestionSupplementOut"]:
+async def _get_supplement_map(
+    *,
+    interview_id: int,
+    async_session,
+    ensure_generate: bool = False,
+    track: str | None = None,
+) -> dict[int, "QuestionSupplementOut"]:
+    if not _supplements_enabled_for_track(track):
+        return {}
     supplement_service = QuestionSupplementService(async_session=async_session)
     try:
         if ensure_generate:

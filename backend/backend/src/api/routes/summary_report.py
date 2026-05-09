@@ -23,6 +23,7 @@ router = fastapi.APIRouter(tags=["report"])
 @router.post(
     "/summary-report",
     response_model=SummaryReportResponse,
+    response_model_exclude_none=True,
     status_code=200,
     summary="Generate a summary report (independent of final report)",
     description=(
@@ -79,6 +80,7 @@ async def generate_summary_report(
 @router.get(
     "/summary-report/{interview_id}",
     response_model=SummaryReportResponse,
+    response_model_exclude_none=True,
     status_code=200,
     summary="Fetch a previously saved summary report",
     description="Retrieves a persisted summary report for the interview if present.",
@@ -115,6 +117,7 @@ async def get_summary_report(
 @router.get(
     "/summary-reports",
     response_model=SummaryReportsListResponse,
+    response_model_exclude_none=True,
     status_code=200,
     summary="Get user's last x summary reports",
     description="Retrieves the user's most recent summary reports with interview IDs and tracks.",
