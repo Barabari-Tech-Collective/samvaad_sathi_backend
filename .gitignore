@@ -52,6 +52,12 @@ venv.bak/
 # VS Code
 .vscode/
 
+# Local agent/editor/task tooling
+.agents/
+.codex
+.cursor/
+.taskmaster/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
@@ -108,11 +114,6 @@ coverage.xml
 # OS specific
 .DS_Store
 Thumbs.db
-
-# Task Master
-.taskmaster/tasks/
-.taskmaster/reports/
-
 
 backend/.env.example
 backend/backend/scripts/explore_aurora_data.py
