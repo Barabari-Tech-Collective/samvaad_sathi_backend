@@ -1,16 +1,17 @@
 graph TD
-    User[Candidate / User]
-    
-    subgraph "Samvaad Sathi System"
-        API["Backend API<br/>(FastAPI / Async)"]
-        Auth["Identity Provider<br/>(Authentication & Authorization)"]
-        DB[("Primary Database<br/>(PostgreSQL)")]
-        LLM["LLM Provider<br/>(Generative AI & Analysis)"]
-        Storage["Object Storage<br/>(Audio & Resumes)"]
-    end
+    User[Candidate or dashboard user]
+    Frontend[Frontend client]
+    API[FastAPI backend]
+    JWT[Local JWT and refresh sessions]
+    Cognito[Optional AWS Cognito OIDC]
+    DB[(PostgreSQL)]
+    OpenAI[OpenAI LLM, Whisper, TTS]
+    Eleven[ElevenLabs TTS]
 
-    User -->|HTTPS/REST| API
-    API -->|Validate Token| Auth
-    API -->|Persist Data| DB
-    API -->|Generate Questions/Analyze| LLM
-    API -->|Store Uploads| Storage
+    User --> Frontend
+    Frontend -->|HTTPS REST| API
+    API -->|Bearer token validation| JWT
+    API -.->|Hosted UI login when configured| Cognito
+    API -->|Async SQLAlchemy| DB
+    API -->|Questions, analysis, transcription, pronunciation TTS| OpenAI
+    API -->|Text-to-speech conversion| Eleven

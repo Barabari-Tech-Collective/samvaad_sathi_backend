@@ -1,36 +1,26 @@
 graph TD
-    subgraph "Data Acquisition"
-        User((User)) -->|Upload Audio/Resume| API[FastAPI Gateway]
-        NPTEL[(NPTEL2020 Dataset)]
-    end
+    User[User]
+    API[FastAPI API]
+    Validate[Auth, request, and ownership validation]
+    TempAudio[Temporary audio file]
+    Whisper[OpenAI Whisper API]
+    LLM[OpenAI LLM APIs]
+    TTS[OpenAI or ElevenLabs TTS]
+    DB[(PostgreSQL)]
 
-    subgraph "Data Management Layer"
-        API -->|Validation| Validator{Quality Check}
-        Validator -->|Pass| Norm["Normalization<br/>(16kHz Mono)"]
-        Validator -->|Fail| Reject[Reject Request]
-        
-        Norm -->|Store Raw| ObjStore["Object Storage<br/>(S3/MinIO)"]
-        Norm -->|Store Meta| DB[(PostgreSQL)]
-    end
+    User -->|Resume, interview, audio, practice requests| API
+    API --> Validate
+    Validate -->|Users, sessions, interviews, questions, attempts| DB
+    Validate -->|Reports, practice sessions, analytics events| DB
+    Validate -->|Audio bytes| TempAudio
+    TempAudio --> Whisper
+    Whisper -->|Transcription JSON| DB
+    API --> LLM
+    LLM -->|Questions, analyses, reports, hints| DB
+    API --> TTS
+    TTS -->|Generated audio response| User
 
-    subgraph "Inference Pipeline (Phase 2)"
-        ObjStore -->|Stream| FeatureExt["Feature Extraction<br/>(Librosa)"]
-        ObjStore -->|Stream| Whisper["Whisper ASR<br/>(Base Model)"]
-        
-        Whisper -->|Text| LLM["LLM Analysis<br/>(OpenRouter)"]
-        Whisper -->|Phonemes| Pronunc["Pronunciation Scorer<br/>(GOP/MDD)"]
-        FeatureExt -->|Prosody| PacePause["Pace & Pause<br/>Analysis"]
-        
-        LLM --> DB
-        Pronunc --> DB
-        PacePause --> DB
-    end
-
-    subgraph "Training & Adaptation (Phase 3)"
-        direction TB
-        NPTEL -->|Curated Audio| Trainer[Fine-Tuning Engine]
-        ObjStore -.->|Anonymized Samples| Trainer
-        
-        Trainer -->|PEFT/LoRA| Adapter[Accent Adapter]
-        Adapter -.->|Update Weights| Whisper
-    end
+    PlannedStorage[S3/MinIO object storage - planned only]
+    PlannedTraining[Custom ASR fine-tuning - planned only]
+    TempAudio -. future .-> PlannedStorage
+    PlannedStorage -. future .-> PlannedTraining

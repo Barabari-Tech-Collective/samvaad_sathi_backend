@@ -1,83 +1,57 @@
 graph TD
-    subgraph "Presentation Layer (API)"
-        Router_Auth[Auth Router]
-        Router_User[User Router]
-        Router_Resume[Resume Router]
-        Router_Interview[Interview Router]
-        Router_Audio[Audio Router]
-        Router_Analysis[Analysis Router]
-        Router_Report[Report Router]
+    subgraph API Layer
+        Users[users.py]
+        Resume[resume.py]
+        Interviews[interviews.py and interviews_v2.py]
+        Audio[audio.py]
+        Analysis[analysis.py]
+        Reports[report.py and summary reports]
+        Practice[speech_pacing.py and practice routes]
+        Analytics[analytics.py and analytics_v2.py]
     end
 
-    subgraph "Business Logic Layer (Services)"
-        direction TB
-        
-        subgraph "Core Services"
-            Service_Orch[Interview Orchestrator]
-            Service_Syllabus[Syllabus & Question Gen]
-            Service_FollowUp[Follow-up Logic]
-        end
-        
-        subgraph "Media Processing"
-            Service_Audio["Audio Processor<br/>(Transcription)"]
-        end
-        
-        subgraph "Analysis Engine"
-            Service_Content[Content Analysis]
-            Service_Pace[Pace Analysis]
-            Service_Pause[Pause Analysis]
-        end
-        
-        subgraph "Reporting"
-            Service_Report[Report Generator]
-            Service_Summary[Summary Aggregator]
-        end
-        
-        Service_LLM[LLM Interface]
+    subgraph Service Layer
+        LLM[llm.py]
+        Syllabus[syllabus_service.py]
+        Supplements[question_supplements.py]
+        FollowUp[follow_up.py]
+        AudioProc[audio_processor.py and whisper.py]
+        AnalysisSvc[analysis, pace, pause, structure analysis]
+        ReportSvc[report and summary report services]
+        AnalyticsSvc[analytics and analytics_events]
+        TTS[pronunciation_tts.py and elevenlabs_tts.py]
     end
 
-    subgraph "Data Access Layer"
-        Repo_Base[Base Repository]
-        Repo_User[User Repository]
-        Repo_Interview[Interview Repository]
-        Repo_Analysis[Analysis Repository]
+    subgraph Data Layer
+        Repos[CRUD repositories]
+        Models[SQLAlchemy models]
+        Migrations[Alembic migrations]
+        Postgres[(PostgreSQL)]
     end
 
-    %% API to Service Connections
-    Router_Auth --> Repo_User
-    Router_User --> Repo_User
-    Router_Resume --> Service_Syllabus
-    Router_Interview --> Service_Orch
-    Router_Audio --> Service_Audio
-    Router_Analysis --> Service_Content
-    Router_Report --> Service_Report
+    Users --> Repos
+    Resume --> LLM
+    Interviews --> Syllabus
+    Interviews --> Supplements
+    Interviews --> FollowUp
+    Audio --> AudioProc
+    Analysis --> AnalysisSvc
+    Reports --> ReportSvc
+    Practice --> TTS
+    Practice --> AnalysisSvc
+    Analytics --> AnalyticsSvc
 
-    %% Service Inter-dependencies
-    Service_Orch --> Service_Syllabus
-    Service_Orch --> Service_FollowUp
-    Service_Orch --> Service_LLM
-    
-    Service_Syllabus --> Service_LLM
-    Service_FollowUp --> Service_LLM
-    
-    Service_Audio --> Service_LLM
-    Service_Audio --> Service_Pace
-    Service_Audio --> Service_Pause
-    
-    Service_Content --> Service_LLM
-    
-    Service_Report --> Service_Summary
-    Service_Summary --> Repo_Analysis
-    Service_Summary --> Repo_Interview
+    LLM --> OpenAI[OpenAI]
+    AudioProc --> OpenAI
+    TTS --> OpenAI
+    TTS --> ElevenLabs[ElevenLabs]
 
-    %% Service to Data Connections
-    Service_Orch --> Repo_Interview
-    Service_Audio --> Repo_Analysis
-    Service_Content --> Repo_Analysis
-    Service_Pace --> Repo_Analysis
-    Service_Pause --> Repo_Analysis
-    
-    %% Inheritance/Usage
-    Repo_User -.-> Repo_Base
-    Repo_Interview -.-> Repo_Base
-    Repo_Analysis -.-> Repo_Base
+    Syllabus --> Repos
+    Supplements --> Repos
+    FollowUp --> Repos
+    AnalysisSvc --> Repos
+    ReportSvc --> Repos
+    AnalyticsSvc --> Repos
+    Repos --> Models
+    Models --> Migrations
+    Repos --> Postgres

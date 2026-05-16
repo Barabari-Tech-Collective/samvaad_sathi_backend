@@ -1,104 +1,107 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Samvaad Sathi Architecture</title>
-    <script type="module">
-        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-        mermaid.initialize({ startOnLoad: true });
-    </script>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            line-height: 1.6;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-            color: #333;
-        }
-        h1, h2 {
-            color: #2c3e50;
-        }
-        .diagram-container {
-            margin-bottom: 40px;
-            border: 1px solid #eee;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Samvaad Sathi Architecture</title>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true });
+  </script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 24px;
+      color: #1f2933;
+    }
+    h1, h2 { color: #102a43; }
+    .diagram-container {
+      margin: 0 0 32px;
+      border: 1px solid #d9e2ec;
+      padding: 18px;
+      border-radius: 8px;
+    }
+  </style>
 </head>
 <body>
-    <h1>Samvaad Sathi System Architecture</h1>
-    
-    <div class="diagram-container">
-        <h2>High-Level System Context</h2>
-        <p>This diagram illustrates how the Samvaad Sathi Backend interacts with external users and systems.</p>
-        <div class="mermaid">
+  <h1>Samvaad Sathi System Architecture</h1>
+  <p>Markdown and Mermaid sources in this directory are the authoritative documentation. PNG files are generated artifacts.</p>
+
+  <div class="diagram-container">
+    <h2>System Context</h2>
+    <div class="mermaid">
 graph TD
-    User[Candidate / User]
-    
-    subgraph "Samvaad Sathi System"
-        API[Backend API]
-        Auth[Auth Service\n(Cognito)]
-        DB[(Database\nAurora/Supabase)]
-        LLM[LLM Provider\n(OpenAI/Anthropic)]
-    end
+    User[Candidate or dashboard user]
+    Frontend[Frontend client]
+    API[FastAPI backend]
+    JWT[Local JWT and refresh sessions]
+    Cognito[Optional AWS Cognito OIDC]
+    DB[(PostgreSQL)]
+    OpenAI[OpenAI LLM, Whisper, TTS]
+    Eleven[ElevenLabs TTS]
 
-    User -->|HTTPS/REST| API
-    API -->|Authenticate| Auth
-    API -->|Read/Write| DB
-    API -->|Generate/Analyze| LLM
-        </div>
+    User --> Frontend
+    Frontend -->|HTTPS REST| API
+    API -->|Bearer token validation| JWT
+    API -.->|Hosted UI login when configured| Cognito
+    API -->|Async SQLAlchemy| DB
+    API -->|Questions, analysis, transcription, pronunciation TTS| OpenAI
+    API -->|Text-to-speech conversion| Eleven
     </div>
+  </div>
 
-    <div class="diagram-container">
-        <h2>Component Architecture</h2>
-        <p>This diagram details the internal structure of the backend, highlighting the flow of data from the API through services to the data layer.</p>
-        <div class="mermaid">
+  <div class="diagram-container">
+    <h2>Component Architecture</h2>
+    <div class="mermaid">
 graph TD
-    subgraph "API Layer"
-        Router_Interview[Interview Router]
-        Router_Audio[Audio Router]
-        Router_Analysis[Analysis Router]
-        Router_Report[Report Router]
+    subgraph API Layer
+        Users[users.py]
+        Resume[resume.py]
+        Interviews[interviews.py and interviews_v2.py]
+        Audio[audio.py]
+        Analysis[analysis.py]
+        Reports[report.py and summary reports]
+        Practice[speech_pacing.py and practice routes]
+        Analytics[analytics.py and analytics_v2.py]
     end
 
-    subgraph "Service Layer"
-        Service_Orch[Interview Orchestrator]
-        Service_Audio[Audio Processor\n(Whisper)]
-        Service_LLM[LLM Service]
-        Service_Metrics[Metrics Engine\n(Pace/Pause)]
-        Service_Report[Report Generator]
+    subgraph Service Layer
+        LLM[llm.py]
+        Syllabus[syllabus_service.py]
+        Supplements[question_supplements.py]
+        FollowUp[follow_up.py]
+        AudioProc[audio_processor.py and whisper.py]
+        AnalysisSvc[analysis, pace, pause, structure analysis]
+        ReportSvc[report and summary report services]
+        AnalyticsSvc[analytics and analytics_events]
+        TTS[pronunciation_tts.py and elevenlabs_tts.py]
     end
 
-    subgraph "Data Layer"
-        Repo_Interview[Interview Repository]
-        Repo_User[User Repository]
-        Repo_Analysis[Analysis Repository]
+    subgraph Data Layer
+        Repos[CRUD repositories]
+        Models[SQLAlchemy models]
+        Migrations[Alembic migrations]
+        Postgres[(PostgreSQL)]
     end
 
-    %% Relationships
-    Router_Interview --> Service_Orch
-    Router_Audio --> Service_Audio
-    Router_Analysis --> Service_Metrics
-    Router_Report --> Service_Report
-
-    Service_Orch --> Service_LLM
-    Service_Orch --> Repo_Interview
-    
-    Service_Audio --> Service_LLM
-    Service_Audio --> Repo_Analysis
-    
-    Service_Metrics --> Repo_Analysis
-    
-    Service_Report --> Repo_Interview
-    Service_Report --> Repo_Analysis
-
-    %% External Dependencies
-    Service_LLM -.->|API Call| External_AI[External AI Models]
-        </div>
+    Users --> Repos
+    Resume --> LLM
+    Interviews --> Syllabus
+    Interviews --> Supplements
+    Interviews --> FollowUp
+    Audio --> AudioProc
+    Analysis --> AnalysisSvc
+    Reports --> ReportSvc
+    Practice --> TTS
+    Practice --> AnalysisSvc
+    Analytics --> AnalyticsSvc
+    Repos --> Models
+    Models --> Migrations
+    Repos --> Postgres
     </div>
+  </div>
 </body>
 </html>

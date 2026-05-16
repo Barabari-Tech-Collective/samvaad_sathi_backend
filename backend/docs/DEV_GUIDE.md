@@ -1,36 +1,33 @@
 # Development Guide
 
-## Recent Additions (Auth + Sessions)
-- User JWT authentication endpoints added:
-  - `POST /api/users` (register)
-  - `POST /api/login` (login)
-  - `GET /api/me` (requires `Authorization: Bearer <token>`)
-- Session persistence implemented via `Session` model and `SessionCRUDRepository`.
-- Existing Account auth retained:
-  - `POST /api/auth/signup`, `POST /api/auth/signin`
-  - Accounts listing and management under `/api/accounts`
-- JWT generator extended to support `User` tokens (`generate_access_token_for_user`).
-- Async SQLAlchemy session configured to avoid `MissingGreenlet` by controlling `expire_on_commit`.
-- ORM models imported at startup so relationship references (e.g., `Interview`) resolve correctly.
-- Added smoke scripts under `scripts/` (smoke_test.py, run_all_smoke.py, smoke_v2_follow_up.py) to quickly validate endpoints locally.
+This guide describes how to work on the current Samvaad Sathi backend. It intentionally omits the original template workflow and only documents what this repository uses now.
 
-## Environment Configuration
-The app reads env vars from `.env` at:
-- `backend/backend/.env`
+## Prerequisites
 
-Suggested development values:
+- Python with `pip`
+- PostgreSQL, either managed or local through `backend/docker-compose.local.yml`
+- Docker, if using the containerized API
+- OpenAI API key for LLM, Whisper, and pronunciation TTS features
+- ElevenLabs API key only if testing `/api/tts/convert`
+
+Note: `pyproject.toml` declares Python `>=3.13`, while the Docker image currently uses `python:3.12-slim` and installs `requirements.txt`. Align these before a production release if package metadata will be enforced.
+
+## Environment
+
+The settings class loads `backend/.env`. Docker Compose in `backend/backend/docker-compose.yml` also points to `../.env`.
+
+Minimum development values:
+
 ```env
-# App
 ENVIRONMENT=DEV
 BACKEND_SERVER_HOST=127.0.0.1
 BACKEND_SERVER_PORT=8000
 BACKEND_SERVER_WORKERS=1
 
-# DB (use 5433 if running the provided docker compose; otherwise 5432)
 POSTGRES_SCHEMA=postgresql
 POSTGRES_HOST=localhost
-POSTGRES_PORT=5433
-POSTGRES_DB=app
+POSTGRES_PORT=5432
+POSTGRES_DB=defaultdb
 POSTGRES_USERNAME=postgres
 POSTGRES_PASSWORD=postgres
 DB_TIMEOUT=30
@@ -41,85 +38,140 @@ IS_DB_ECHO_LOG=False
 IS_DB_EXPIRE_ON_COMMIT=False
 IS_DB_FORCE_ROLLBACK=False
 
-# CORS
 IS_ALLOWED_CREDENTIALS=True
-
-# Auth/JWT
 API_TOKEN=dev-api-token
 AUTH_TOKEN=dev-auth-token
 JWT_TOKEN_PREFIX=Bearer
 JWT_SECRET_KEY=change_this_dev_secret
 JWT_SUBJECT=access
 JWT_ALGORITHM=HS256
-# Access token expiry minutes = JWT_MIN * JWT_HOUR * JWT_DAY
 JWT_MIN=1
 JWT_HOUR=60
 JWT_DAY=1
+REFRESH_TOKEN_EXPIRY_MINUTES=43200
 
-# Hashing (passlib)
 HASHING_ALGORITHM_LAYER_1=bcrypt
 HASHING_ALGORITHM_LAYER_2=argon2
 HASHING_SALT=change_this_salt
+SESSION_SECRET_KEY=change_this_session_secret
+
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TIMEOUT_SECONDS=150
+MAX_AUDIO_SIZE_MB=25
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=hpp4J3VqNfWAUOO0d1Us
 ```
 
-## Local Development (Windows PowerShell)
-1) Start Postgres via docker compose (inside `backend/`):
-```powershell
-cd D:\samvaad_sathi_backend\backend
-docker compose up -d db
-```
-Optionally start Adminer (DB UI). If 8081 is busy, change its port in `backend/docker-compose.yaml`:
-```powershell
-docker compose up -d db_editor
+## Local Workflow
+
+Start PostgreSQL:
+
+```bash
+docker compose -f backend/docker-compose.local.yml up -d postgres
 ```
 
-2) Create database once:
-```powershell
-docker exec -it db psql -U postgres -d postgres -c "CREATE DATABASE app;"
+Install runtime dependencies and run migrations:
+
+```bash
+cd backend/backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+alembic upgrade head
 ```
 
-3) Run the API (inside `backend/backend/`):
-```powershell
-cd D:\samvaad_sathi_backend\backend\backend
-.\venv\Scripts\Activate.ps1
-python -m uvicorn src.main:backend_app --reload
-```
-Swagger UI: http://127.0.0.1:8000/docs
+Run the API:
 
-## API Reference (Summary)
-- Users
-  - `POST /api/users` – Register new user (email, password, name). Returns token.
-  - `POST /api/login` – Login (email, password). Returns token.
-  - `GET /api/me` – Current user info (requires `Authorization: Bearer <token>`)
-
-- Accounts (legacy module retained)
-  - `POST /api/auth/signup` – Account signup
-  - `POST /api/auth/signin` – Account signin
-  - `GET /api/accounts` – List accounts
-  - `GET /api/accounts/{id}` – Get account by ID
-  - `PATCH /api/accounts/{id}` – Update account (query params)
-  - `DELETE /api/accounts?id=` – Delete account by ID
-
-## Smoke Tests
-- Full sweep (includes V2 follow-up flow): `python scripts/run_all_smoke.py`
-- Base auth/interview path only: `python scripts/smoke_test.py`
-- V2 follow-up workflow only: `python scripts/smoke_v2_follow_up.py`
-- Override target service with `SMOKE_BASE_URL` / `SMOKE_API_PREFIX`
-
-Example:
-```powershell
-D:\samvaad_sathi_backend\backend\backend\venv\Scripts\python.exe D:\samvaad_sathi_backend\backend\backend\scripts\run_all_smoke.py
+```bash
+python3 -m uvicorn src.main:backend_app --reload
 ```
 
-## Implementation Notes
-- Async DB session is created with `expire_on_commit` configurable via `.env` (`IS_DB_EXPIRE_ON_COMMIT`). Setting this to `False` in dev avoids attribute refresh that can trigger `MissingGreenlet`.
-- All ORM models are imported during startup so SQLAlchemy can resolve relationship strings like `Interview`.
-- JWT tokens use `python-jose` and are validated with the configured `JWT_SECRET_KEY` and `JWT_ALGORITHM`.
+Swagger UI: `http://127.0.0.1:8000/docs`
 
-- Analysis & Reports (Auth Required)
-  - `POST /api/complete-analysis` – Aggregate analyses for a question attempt
-  - `POST /api/domain-base-analysis` – Domain knowledge analysis
-  - `POST /api/communication-based-analysis` – Communication quality analysis
-  - `POST /api/analyze-pace` – Pace analysis
-  - `POST /api/analyze-pause` – Pause analysis
-  - `POST /api/final-report` – Generate and persist session-level report
+## Docker Workflow
+
+```bash
+cd backend/backend
+docker compose up -d --build
+docker compose logs -f api
+```
+
+The Docker API service loads `backend/.env`, exposes port `8000`, and uses `uvicorn src.main:backend_app --host 0.0.0.0 --port 8000`.
+
+## Database Rules
+
+- Use Alembic for schema changes: update models, generate a revision, review it, then run `alembic upgrade head`.
+- Do not rely on startup table creation for normal development. `src/repository/events.py` only uses `create_all(checkfirst=True)` when no `alembic_version` table exists.
+- Do not run destructive database reset commands against shared or production databases.
+- The app uses `src/repository/database.py` for the active async engine and session factory.
+- `src/repository/supabase_database.py` is not wired into app startup.
+
+Common commands:
+
+```bash
+cd backend/backend
+python3 scripts/db_manager.py status
+python3 scripts/db_manager.py migrate
+alembic current
+alembic heads
+alembic revision --autogenerate -m "describe change"
+alembic upgrade head
+```
+
+## Auth Rules
+
+- Most business routes depend on `get_current_user` and require `Authorization: Bearer <token>`.
+- Local registration/login returns both access and refresh tokens.
+- Refresh tokens are stored in the `session` table and rotated by `/api/auth/cognito/refresh`.
+- Cognito login is optional. It creates or finds a local `User`, then mints the app's normal JWT.
+
+## API Rules
+
+- Every route is mounted under `/api`.
+- New frontend work should use V2 routes where available:
+  - `/api/v2/interviews/*`
+  - `/api/v2/summary-report`
+  - `/api/v2/analytics/*`
+  - `/api/v2/job-profiles`
+- V1 routes are still supported for existing clients.
+- `/api/final-report` is legacy; use summary report endpoints for current reporting.
+- Route ownership checks matter: never expose an interview, question attempt, practice session, or report without validating the authenticated user.
+
+## Audio and AI Rules
+
+- Audio formats: MP3, WAV, M4A, FLAC.
+- Audio size limit: 25 MB in `audio_processor.py`; duration cap: 10 minutes.
+- Audio files are written to temporary files for processing and deleted after use.
+- The database stores transcription JSON and a generated reference name, not durable audio storage.
+- OpenAI failures should return structured errors or fallback content when the calling service supports it.
+- Easy interview difficulty uses static questions; medium/hard/expert use LLM generation with fallback.
+
+## Tests
+
+Run automated tests:
+
+```bash
+cd backend/backend
+pytest
+```
+
+Run smoke tests against a live API:
+
+```bash
+python3 scripts/run_all_smoke.py
+python3 scripts/smoke_test.py
+python3 scripts/smoke_v2_follow_up.py
+python3 scripts/smoke_structure_practice.py
+python3 scripts/smoke_pacing_practice.py
+python3 scripts/smoke_analytics.py
+```
+
+Set `SMOKE_BASE_URL` and `SMOKE_API_PREFIX` to target non-default hosts.
+
+## Documentation Rules
+
+- Keep endpoint docs synchronized with route decorators in `src/api/routes`.
+- Keep file-purpose docs synchronized with `backend/docs/SOURCE_FILE_GUIDE.md`.
+- Mark compatibility code as legacy instead of presenting it as the recommended path.
+- Do not document planned object storage, fine-tuning, or training systems as live behavior.

@@ -1,172 +1,78 @@
-# Database Persistence and Multi-Instance Support
+# Database Persistence
 
-## Overview
+The backend uses PostgreSQL through async SQLAlchemy. Data is persistent across application restarts. Schema changes should be managed through Alembic.
 
-The database configuration has been updated to ensure persistence across application restarts and support for multiple concurrent instances.
+## Active Database Path
 
-## Key Changes Made
+- Active engine: `src/repository/database.py`
+- Session dependency: `src/api/dependencies/session.py`
+- Repository dependency: `src/api/dependencies/repository.py`
+- Startup initialization: `src/repository/events.py`
+- Alembic config: `alembic.ini`
+- Migrations: `src/repository/migrations/versions/`
 
-### 1. Removed Destructive Table Recreation
-**Before**: Every application startup would drop all tables and recreate them:
-```python
-await connection.run_sync(Base.metadata.drop_all)  # DESTRUCTIVE!
-await connection.run_sync(Base.metadata.create_all)
-```
+`src/repository/supabase_database.py` exists as a compatibility helper but is not the engine used by application startup.
 
-**After**: Safe initialization that preserves existing data:
-```python
-# Check if Alembic migrations are set up
-if has_alembic_version:
-    # Use proper migrations for schema management
-    logger.info("Database managed by Alembic migrations")
-else:
-    # Fallback: create tables only if they don't exist
-    await connection.run_sync(Base.metadata.create_all, checkfirst=True)
-```
+## Startup Behavior
 
-### 2. Session Factory for Better Concurrency
-**Before**: Single shared session instance:
-```python
-self.async_session: SQLAlchemyAsyncSession = SQLAlchemyAsyncSession(...)
-```
+On startup, `initialize_db_tables()` checks whether the `alembic_version` table exists.
 
-**After**: Session factory that creates new sessions per request:
-```python
-self.async_session_factory = sqlalchemy_async_sessionmaker(...)
+- If Alembic is present, startup skips table creation and expects migrations to manage schema.
+- If Alembic is absent, startup falls back to `Base.metadata.create_all(checkfirst=True)` for compatibility.
+- Startup also applies a small idempotent compatibility patch for older schemas around interview completion fields and `analytics_event`.
 
-def get_session(self) -> SQLAlchemyAsyncSession:
-    return self.async_session_factory()
-```
+It does not drop tables.
 
-### 3. Database Management Tools
-- `scripts/db_manager.py`: CLI tool for database operations
-- `scripts/test_db_persistence.py`: Test script for verification
-
-## Database Management Commands
-
-### Check Database Status
-```powershell
-python scripts/db_manager.py status
-```
-
-### Initialize Database (First Time Setup)
-```powershell
-python scripts/db_manager.py init
-```
-
-### Run Database Migrations
-```powershell
-python scripts/db_manager.py migrate
-```
-
-### Reset Database (Development Only)
-```powershell
-python scripts/db_manager.py reset
-```
-
-## Testing Persistence
-
-### Test Database Persistence
-```powershell
-python scripts/test_db_persistence.py
-```
-
-### Test with Cleanup
-```powershell
-python scripts/test_db_persistence.py --cleanup
-```
-
-## Multi-Instance Support
-
-The updated configuration supports multiple application instances:
-
-1. **Connection Pooling**: Each instance maintains its own connection pool
-2. **Session Isolation**: Each request gets its own database session
-3. **Transaction Safety**: Proper rollback handling for failed operations
-4. **Supabase Optimizations**: Connection recycling and SSL requirements
-
-## Best Practices
-
-### For Development
-1. Use `python scripts/db_manager.py status` to check database state
-2. Use Alembic migrations for schema changes: `alembic revision --autogenerate -m "description"`
-3. Run migrations with: `python scripts/db_manager.py migrate`
-
-### For Production
-1. **Never** use `db_manager.py reset` in production
-2. Always run migrations before deploying: `alembic upgrade head`
-3. Monitor connection pool metrics
-4. Set appropriate pool sizes in environment variables
-
-### For Testing
-1. Use separate test databases
-2. Run `test_db_persistence.py` to verify setup
-3. Test with multiple instances running simultaneously
-
-## Environment Variables
-
-Ensure these are properly configured in your `.env` file:
+## Required Environment
 
 ```env
-# Database Connection
-POSTGRES_HOST=your-project-ref.supabase.co
+POSTGRES_SCHEMA=postgresql
+POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
-POSTGRES_DB=postgres
+POSTGRES_DB=defaultdb
 POSTGRES_USERNAME=postgres
-POSTGRES_PASSWORD=your-supabase-password
-
-# Connection Pool Settings
-DB_POOL_SIZE=5                    # Base pool size
-DB_MAX_POOL_CON=5                # Maximum pool connections
-DB_POOL_OVERFLOW=10              # Additional overflow connections
-DB_TIMEOUT=30                    # Connection timeout
-
-# Session Behavior
-IS_DB_EXPIRE_ON_COMMIT=False     # Don't expire objects on commit
-IS_DB_FORCE_ROLLBACK=False       # Don't force rollback
-IS_DB_ECHO_LOG=False             # Set to True for SQL query logging
+POSTGRES_PASSWORD=postgres
+DB_TIMEOUT=30
+DB_POOL_SIZE=5
+DB_MAX_POOL_CON=5
+DB_POOL_OVERFLOW=10
+IS_DB_ECHO_LOG=False
+IS_DB_EXPIRE_ON_COMMIT=False
+IS_DB_FORCE_ROLLBACK=False
 ```
 
-## Migration Workflow
+The active engine builds a `postgresql+asyncpg://...` URI and passes an SSL context to asyncpg. Certificate verification is currently disabled in code for managed-Postgres compatibility; revisit this before strict production hardening.
 
-### Creating New Migrations
-```powershell
-# 1. Make changes to your SQLAlchemy models
-# 2. Generate migration
-alembic revision --autogenerate -m "Add new feature"
+## Commands
 
-# 3. Review generated migration in src/repository/migrations/versions/
-# 4. Apply migration
+```bash
+cd backend/backend
+python3 scripts/db_manager.py status
+python3 scripts/db_manager.py migrate
+alembic current
+alembic heads
+alembic history
+alembic revision --autogenerate -m "describe change"
 alembic upgrade head
 ```
 
-### Checking Migration Status
-```powershell
-alembic current              # Current revision
-alembic heads               # Latest available revision
-alembic history             # Full migration history
+Development-only reset:
+
+```bash
+python3 scripts/db_manager.py reset
 ```
 
-## Troubleshooting
+Do not run reset against shared or production databases.
 
-### Database Connection Issues
-1. Check Supabase project status in Supabase dashboard
-2. Verify network connectivity and firewall settings
-3. Confirm credentials and SSL configuration
+## Migration Rules
 
-### Migration Issues
-1. Check `alembic current` vs `alembic heads`
-2. Review migration files for conflicts
-3. Use `python scripts/db_manager.py status` for overview
+- Update SQLAlchemy models first.
+- Generate an Alembic revision.
+- Review generated operations before applying them.
+- Keep migrations idempotent where possible.
+- Do not use startup fallback table creation as a substitute for migrations.
+- When adding a model, make sure it is imported where metadata discovery needs it.
 
-### Performance Issues
-1. Monitor connection pool utilization
-2. Adjust pool settings based on load
-3. Use `IS_DB_ECHO_LOG=True` to debug slow queries
+## Concurrency
 
-## Security Considerations
-
-1. **SSL Required**: All connections use SSL for Supabase
-2. **Connection Validation**: `pool_pre_ping=True` validates connections
-3. **Session Isolation**: Each request gets isolated session
-4. **Credential Management**: Use environment variables, not hardcoded values
+`AsyncDatabase` uses an async session factory. Request dependencies should create isolated sessions and close them after use. Repositories should not share one long-lived session across requests.

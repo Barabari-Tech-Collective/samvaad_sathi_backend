@@ -1,26 +1,30 @@
-# Structure Practice API - Section-by-Section Flow
+# Structure Practice API
 
-## Overview
-Structure practice now uses a section-by-section approach where you record audio for each part of the framework (C-T-E-T-D, STAR, or GCDIO) separately, receiving progressive hints along the way.
+Structure practice lets a user answer one interview question section by section. The backend detects or assigns a framework, returns the sections in order, accepts one audio recording per section, transcribes it with Whisper, and analyzes the combined answer.
 
-## API Flow
+Base path: `/api/v2`
 
-### 1. Create Structure Practice Session
+## Frameworks
 
-**Endpoint:** `POST /api/v2/structure-practice/session`
+- C-T-E-T-D: `Context`, `Theory`, `Example`, `Trade-offs`, `Decision`
+- STAR: `Situation`, `Task`, `Action`, `Result`
+- GCDIO: `Goal`, `Constraints`, `Decision`, `Implementation`, `Outcome`
 
-**Request:**
-```bash
-curl -X POST "http://localhost:8000/api/v2/structure-practice/session" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "track": "JavaScript Developer",
-    "difficulty": "easy"
-  }'
+## Create Session
+
+`POST /api/v2/structure-practice/session`
+
+Request:
+
+```json
+{
+  "track": "JavaScript Developer",
+  "difficulty": "easy"
+}
 ```
 
-**Response:**
+Response shape:
+
 ```json
 {
   "practiceId": 6,
@@ -28,14 +32,14 @@ curl -X POST "http://localhost:8000/api/v2/structure-practice/session" \
   "track": "JavaScript Developer",
   "questions": [
     {
-      "text": "Explain the concept of closures in JavaScript and provide a practical use case.",
+      "text": "Explain closures in JavaScript and provide a practical use case.",
       "index": 0,
       "question_id": 1231,
-      "structure_hint": "Use C-T-E-T-D: explain the context of scope in JS, define closure theory, show a practical example, discuss trade-offs like memory considerations, and conclude with when to use closures.",
+      "structure_hint": "Use C-T-E-T-D...",
       "framework": "C-T-E-T-D",
       "sections": ["Context", "Theory", "Example", "Trade-offs", "Decision"],
       "current_section": "Context",
-      "current_hint": "Start with Context: Set the stage. Explain the background, scenario, or environment where this concept applies."
+      "current_hint": "Start with Context..."
     }
   ],
   "status": "active",
@@ -43,22 +47,28 @@ curl -X POST "http://localhost:8000/api/v2/structure-practice/session" \
 }
 ```
 
----
+## Submit Section Audio
 
-### 2. Submit Section Audio (Repeat for Each Section)
+`POST /api/v2/structure-practice/{practice_id}/question/{question_index}/section/{section_name}/submit`
 
-**Endpoint:** `POST /api/v2/structure-practice/{practice_id}/question/{question_index}/section/{section_name}/submit`
+Multipart form fields:
 
-**Example - Submit Context Section:**
+- `file`: audio file
+- `language`: optional, defaults to `en`
+- `time_spent_seconds`: optional integer
+
+Example:
+
 ```bash
 curl -X POST "http://localhost:8000/api/v2/structure-practice/6/question/0/section/Context/submit" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -F "file=@/path/to/context_answer.mp3" \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@context_answer.mp3" \
   -F "language=en" \
   -F "time_spent_seconds=30"
 ```
 
-**Response:**
+Response shape:
+
 ```json
 {
   "answerId": 1,
@@ -68,69 +78,22 @@ curl -X POST "http://localhost:8000/api/v2/structure-practice/6/question/0/secti
   "sectionsComplete": 1,
   "totalSections": 5,
   "nextSection": "Theory",
-  "nextSectionHint": "Great start! Now move to Theory. Define the core concept. Explain how it works, key principles, or the underlying mechanism.",
+  "nextSectionHint": "Great start! Now move to Theory...",
   "isComplete": false,
   "message": "Section 'Context' recorded successfully (whisper-1, 5432ms). Continue to Theory."
 }
 ```
 
-**Example - Submit Theory Section:**
-```bash
-curl -X POST "http://localhost:8000/api/v2/structure-practice/6/question/0/section/Theory/submit" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -F "file=@/path/to/theory_answer.mp3" \
-  -F "language=en" \
-  -F "time_spent_seconds=45"
-```
+Submit sections in framework order. The backend validates section names against the framework.
 
-**Response:**
-```json
-{
-  "answerId": 2,
-  "practiceId": 6,
-  "questionIndex": 0,
-  "sectionName": "Theory",
-  "sectionsComplete": 2,
-  "totalSections": 5,
-  "nextSection": "Example",
-  "nextSectionHint": "Good progress! Next is Example. Provide a concrete example. Show working code, a real scenario, or a practical demonstration.",
-  "isComplete": false,
-  "message": "Section 'Theory' recorded successfully (whisper-1, 4821ms). Continue to Example."
-}
-```
+## Analyze Submitted Sections
 
-**Continue for remaining sections:** Example → Trade-offs → Decision
+`POST /api/v2/structure-practice/{practice_id}/question/{question_index}/analyze`
 
-**Final Section Response (Decision):**
-```json
-{
-  "answerId": 5,
-  "practiceId": 6,
-  "questionIndex": 0,
-  "sectionName": "Decision",
-  "sectionsComplete": 5,
-  "totalSections": 5,
-  "nextSection": null,
-  "nextSectionHint": null,
-  "isComplete": true,
-  "message": "Excellent! You've completed all sections of the C-T-E-T-D framework. Your answer will now be analyzed."
-}
-```
+Analysis can run after all sections are submitted or while the answer is incomplete. Missing sections are returned with `status="missing"`.
 
----
+Response shape:
 
-### 3. Analyze Complete Answer
-
-**Endpoint:** `POST /api/v2/structure-practice/{practice_id}/question/{question_index}/analyze`
-
-**Request:**
-```bash
-curl -X POST "http://localhost:8000/api/v2/structure-practice/6/question/0/analyze" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json"
-```
-
-**Response:**
 ```json
 {
   "answerId": 5,
@@ -144,88 +107,38 @@ curl -X POST "http://localhost:8000/api/v2/structure-practice/6/question/0/analy
         "status": "complete",
         "answerRecorded": true,
         "timeSpentSeconds": 30
-      },
-      {
-        "name": "Theory",
-        "status": "complete",
-        "answerRecorded": true,
-        "timeSpentSeconds": 45
-      },
-      {
-        "name": "Example",
-        "status": "complete",
-        "answerRecorded": true,
-        "timeSpentSeconds": 60
-      },
-      {
-        "name": "Trade-offs",
-        "status": "partial",
-        "answerRecorded": true,
-        "timeSpentSeconds": 25
-      },
-      {
-        "name": "Decision",
-        "status": "complete",
-        "answerRecorded": true,
-        "timeSpentSeconds": 20
       }
     ],
     "completionPercentage": 90,
     "sectionsComplete": 5,
     "totalSections": 5,
-    "progressMessage": "Excellent work! You covered all sections. Trade-offs could be expanded with more depth."
+    "progressMessage": "Strong answer structure..."
   },
   "timePerSection": [
-    {"sectionName": "Context", "seconds": 30},
-    {"sectionName": "Theory", "seconds": 45},
-    {"sectionName": "Example", "seconds": 60},
-    {"sectionName": "Trade-offs", "seconds": 25},
-    {"sectionName": "Decision", "seconds": 20}
+    {"sectionName": "Context", "seconds": 30}
   ],
-  "keyInsight": "Strong technical explanation with good examples. Consider elaborating more on memory implications and performance trade-offs of closures in production code.",
+  "keyInsight": "Add more detail on trade-offs.",
   "analyzedAt": "2026-01-15T18:15:00Z",
-  "llmModel": "gpt-5-chat-latest",
+  "llmModel": "gpt-4o-mini",
   "llmLatencyMs": 4200
 }
 ```
 
----
+## Implementation Files
 
-## Frameworks
+- `src/api/routes/interviews_v2.py`: session, section submit, and analysis endpoints
+- `src/models/schemas/structure_practice.py`: request and response schemas
+- `src/models/db/structure_practice.py`: practice session and answer models
+- `src/repository/crud/structure_practice.py`: structure-practice persistence
+- `src/services/progressive_hints.py`: framework detection, sections, and next-section hints
+- `src/services/structure_analysis.py`: LLM-backed analysis of combined section answers
+- `src/services/audio_processor.py`: audio validation and temporary-file handling
+- `src/services/whisper.py`: Whisper transcription
 
-### C-T-E-T-D (Technical Questions)
-Sections: **Context → Theory → Example → Trade-offs → Decision**
+## Rules
 
-### STAR (Behavioral Questions)
-Sections: **Situation → Task → Action → Result**
-
-### GCDIO (System Design / Architecture)
-Sections: **Goal → Constraints → Decision → Implementation → Outcome**
-
----
-
-## Error Responses
-
-### Invalid Section Name
-```json
-{
-  "detail": "Invalid section_name 'InvalidSection' for framework C-T-E-T-D. Valid sections: ['Context', 'Theory', 'Example', 'Trade-offs', 'Decision']"
-}
-```
-
-### Question Index Out of Range
-```json
-{
-  "detail": "question_index 10 out of range for this practice session"
-}
-```
-
----
-
-## Notes
-
-1. **Progressive Hints**: Each submission returns a hint for the next section
-2. **Framework Detection**: Automatically detects which framework based on question type
-3. **Section Order**: Submit sections in order (Context → Theory → Example → Trade-offs → Decision)
-4. **Time Tracking**: Track time per section for detailed analysis
-5. **Analysis**: Call analyze endpoint only after all sections are submitted
+- Requires authentication.
+- The practice session must belong to the authenticated user.
+- Supported audio formats are MP3, WAV, M4A, and FLAC.
+- One section submission stores one `StructurePracticeAnswer`.
+- Re-analysis reads all submitted sections for the target question and combines them in framework order.
