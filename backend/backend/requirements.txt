@@ -60,3 +60,6 @@ python-slugify
 trio
 httpx
 boto3
+
+# Python 3.13+ standard library audioop backport
+audioop-lts; python_version >= '3.13'
