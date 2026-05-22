@@ -39,10 +39,8 @@ class JobProfileActivityResponse(BaseModel):
 class JobProfileUploadResponse(BaseModel):
     success: bool
     originalFileName: str
-    storedFileName: str
     fileType: str
     fileSize: int
-    filePath: str
 
 class JobProfileExtractSkillsRequest(BaseModel):
     jobDescription: str
