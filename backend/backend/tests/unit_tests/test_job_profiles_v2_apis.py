@@ -32,7 +32,12 @@ from src.models.schemas.job_profile import (
     JobProfileExtractSkillsResponse,
     JobProfileGenerateQuestionsRequest,
     JobProfileGenerateQuestionsResponse,
-    JobProfileGeneratedQuestionItem
+    JobProfileGeneratedQuestionItem,
+    JobProfileQuestionsListResponse,
+    JobProfileQuestionItem,
+    JobProfileQuestionLevelCounts,
+    JobProfileAddQuestionRequest,
+    JobProfileAddQuestionResponse
 )
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.file_processor import validate_file
@@ -314,6 +319,123 @@ async def generate_questions_v2(
     )
 
 
+@_app.get(
+    path="/api/v2/job-profiles/{job_profile_id}/questions",
+    response_model=JobProfileQuestionsListResponse,
+    status_code=200,
+)
+async def get_job_profile_questions_v2(
+    job_profile_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileQuestionsListResponse:
+    # 1. Validate job_profile_id exists
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+
+    # 2. Fetch all questions linked to job_profile_id
+    db_questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+
+    # 3. Calculate level counts
+    level_counts = {
+        "level_1": 0,
+        "level_2": 0,
+        "level_3": 0,
+        "level_4": 0,
+    }
+    for q in db_questions:
+        if q.level == 1:
+            level_counts["level_1"] += 1
+        elif q.level == 2:
+            level_counts["level_2"] += 1
+        elif q.level == 3:
+            level_counts["level_3"] += 1
+        elif q.level == 4:
+            level_counts["level_4"] += 1
+
+    # 4. Map questions to response format
+    questions_list = [
+        JobProfileQuestionItem(
+            question_id=str(q.id),
+            question=q.question_text,
+            level=q.level,
+            difficulty=q.difficulty,
+            type=q.question_type,
+            is_ai_generated=q.is_ai_generated,
+            created_at=q.created_at,
+        )
+        for q in db_questions
+    ]
+
+    return JobProfileQuestionsListResponse(
+        job_profile_id=str(job_profile_id),
+        total_questions=len(db_questions),
+        level_counts=JobProfileQuestionLevelCounts(**level_counts),
+        questions=questions_list,
+    )
+
+
+@_app.post(
+    path="/api/v2/job-profiles/{job_profile_id}/questions",
+    response_model=JobProfileAddQuestionResponse,
+    status_code=201,
+)
+async def add_job_profile_question_v2(
+    job_profile_id: int,
+    payload: JobProfileAddQuestionRequest,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileAddQuestionResponse:
+    # 1. Validate job_profile_id exists
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+
+    # 2. Validate question text is not empty
+    question_text = payload.question.strip() if payload.question else ""
+    if not question_text:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Question text cannot be empty",
+        )
+
+    # 3. Validate level is between 1 and 4
+    if payload.level not in [1, 2, 3, 4]:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Invalid level. Level must be 1, 2, 3, or 4.",
+        )
+
+    # 4. Save question in job_profile_question table
+    db_question = await job_profile_repo.add_job_profile_question(
+        job_profile_id=job_profile_id,
+        question_text=question_text,
+        level=payload.level,
+        difficulty=payload.difficulty,
+        question_type=payload.type,
+        is_ai_generated=payload.is_ai_generated,
+    )
+
+    # 5. Return created question
+    return JobProfileAddQuestionResponse(
+        question_id=str(db_question.id),
+        job_profile_id=str(job_profile_id),
+        question=db_question.question_text,
+        level=db_question.level,
+        difficulty=db_question.difficulty,
+        type=db_question.question_type,
+        is_ai_generated=db_question.is_ai_generated,
+        message="Question added successfully",
+    )
+
+
 client = TestClient(_app)
 
 # Mock model helper representing ORM
@@ -580,4 +702,150 @@ def test_generate_questions_negative_count():
     response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
     assert response.status_code == 400
     assert "Count cannot be negative" in response.json()["detail"]
+
+
+def test_get_questions_success():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated, created_at):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+            self.created_at = created_at
+
+    t1 = datetime.datetime(2026, 5, 26, 10, 0, 0, tzinfo=datetime.timezone.utc)
+    t2 = datetime.datetime(2026, 5, 26, 10, 5, 0, tzinfo=datetime.timezone.utc)
+
+    db_questions = [
+        MockQuestion(1, 123, "Question 1", 1, "easy", "tech", True, t1),
+        MockQuestion(2, 123, "Question 2", 2, "medium", "behavioral", True, t2)
+    ]
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=db_questions)
+
+    response = client.get("/api/v2/job-profiles/123/questions")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["job_profile_id"] == "123"
+    assert data["total_questions"] == 2
+    assert data["level_counts"]["level_1"] == 1
+    assert data["level_counts"]["level_2"] == 1
+    assert data["level_counts"]["level_3"] == 0
+    assert data["level_counts"]["level_4"] == 0
+    assert len(data["questions"]) == 2
+    assert data["questions"][0]["question_id"] == "1"
+    assert data["questions"][0]["question"] == "Question 1"
+    assert data["questions"][0]["level"] == 1
+    assert data["questions"][1]["level"] == 2
+    assert "2026-05-26T10:00:00" in data["questions"][0]["created_at"]
+
+
+def test_get_questions_profile_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    response = client.get("/api/v2/job-profiles/999/questions")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_get_questions_empty_list():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=[])
+
+    response = client.get("/api/v2/job-profiles/123/questions")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["job_profile_id"] == "123"
+    assert data["total_questions"] == 0
+    assert data["level_counts"]["level_1"] == 0
+    assert data["questions"] == []
+
+
+def test_add_question_success():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    created_q = MockQuestion(51, 123, "Explain closures in JavaScript.", 2, "medium", "theoretical", False)
+    _mock_repo.add_job_profile_question = AsyncMock(return_value=created_q)
+
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False
+    }
+
+    response = client.post("/api/v2/job-profiles/123/questions", json=payload)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["question_id"] == "51"
+    assert data["job_profile_id"] == "123"
+    assert data["question"] == "Explain closures in JavaScript."
+    assert data["level"] == 2
+    assert data["difficulty"] == "medium"
+    assert data["type"] == "theoretical"
+    assert data["is_ai_generated"] is False
+    assert data["message"] == "Question added successfully"
+
+
+def test_add_question_profile_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False
+    }
+    response = client.post("/api/v2/job-profiles/999/questions", json=payload)
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_add_question_empty_text():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    payload = {
+        "question": "   ",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False
+    }
+    response = client.post("/api/v2/job-profiles/123/questions", json=payload)
+    assert response.status_code == 400
+    assert "cannot be empty" in response.json()["detail"]
+
+
+def test_add_question_invalid_level():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 5,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False
+    }
+    response = client.post("/api/v2/job-profiles/123/questions", json=payload)
+    assert response.status_code == 400
+    assert "Invalid level" in response.json()["detail"]
+
+
 

@@ -1,3 +1,4 @@
+from src.models.db import JobProfileQuestion
 from typing import List, Optional
 import sqlalchemy
 from sqlalchemy import select, func
@@ -134,4 +135,40 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         for obj in db_objs:
             await self.async_session.refresh(obj)
         return db_objs
+
+    async def get_job_profile_questions(self, job_profile_id: int) -> list[JobProfileQuestion]:
+        from src.models.db.job_profile_question import JobProfileQuestion
+        stmt = (
+            sqlalchemy.select(JobProfileQuestion)
+            .where(JobProfileQuestion.job_profile_id == job_profile_id)
+            .order_by(JobProfileQuestion.level.asc(), JobProfileQuestion.created_at.asc())
+        )
+        query = await self.async_session.execute(statement=stmt)
+        return list(query.scalars().all())
+
+    async def add_job_profile_question(
+        self,
+        *,
+        job_profile_id: int,
+        question_text: str,
+        level: int,
+        difficulty: str,
+        question_type: str = "theoretical",
+        is_ai_generated: bool = False
+    ) -> JobProfileQuestion:
+        from src.models.db.job_profile_question import JobProfileQuestion
+        obj = JobProfileQuestion(
+            job_profile_id=job_profile_id,
+            question_text=question_text,
+            level=level,
+            difficulty=difficulty,
+            question_type=question_type,
+            is_ai_generated=is_ai_generated
+        )
+        self.async_session.add(obj)
+        await self.async_session.commit()
+        await self.async_session.refresh(obj)
+        return obj
+
+
 

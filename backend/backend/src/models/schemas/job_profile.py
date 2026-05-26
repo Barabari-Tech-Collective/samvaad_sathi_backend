@@ -101,3 +101,47 @@ class JobProfileGenerateQuestionsResponse(BaseModel):
     total_questions: int
     questions: List[JobProfileGeneratedQuestionItem]
 
+
+# --- Get Questions Schemas ---
+class JobProfileQuestionLevelCounts(BaseModel):
+    level_1: int = 0
+    level_2: int = 0
+    level_3: int = 0
+    level_4: int = 0
+
+class JobProfileQuestionItem(BaseModel):
+    question_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+    created_at: datetime.datetime
+
+class JobProfileQuestionsListResponse(BaseModel):
+    job_profile_id: str
+    total_questions: int
+    level_counts: JobProfileQuestionLevelCounts
+    questions: List[JobProfileQuestionItem]
+
+
+# --- Add Question Schemas ---
+class JobProfileAddQuestionRequest(BaseModel):
+    question: str
+    level: int
+    difficulty: str
+    type: str = "theoretical"
+    is_ai_generated: bool = False
+
+class JobProfileAddQuestionResponse(BaseModel):
+    question_id: str
+    job_profile_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+    message: str
+
+
+

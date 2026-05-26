@@ -15,7 +15,12 @@ from src.models.schemas.job_profile import (
     JobProfileExtractSkillsResponse,
     JobProfileGenerateQuestionsRequest,
     JobProfileGenerateQuestionsResponse,
-    JobProfileGeneratedQuestionItem
+    JobProfileGeneratedQuestionItem,
+    JobProfileQuestionsListResponse,
+    JobProfileQuestionItem,
+    JobProfileQuestionLevelCounts,
+    JobProfileAddQuestionRequest,
+    JobProfileAddQuestionResponse
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
@@ -323,5 +328,128 @@ async def generate_questions_v2(
         total_questions=len(response_items),
         questions=response_items
     )
+
+
+@router.get(
+    path="/job-profiles/{job_profile_id}/questions",
+    name="job-profiles:get-questions",
+    response_model=JobProfileQuestionsListResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Get all generated questions for a job profile",
+)
+async def get_job_profile_questions_v2(
+    job_profile_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileQuestionsListResponse:
+    # 1. Validate job_profile_id exists
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+
+    # 2. Fetch all questions linked to job_profile_id
+    db_questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+
+    # 3. Calculate level counts
+    level_counts = {
+        "level_1": 0,
+        "level_2": 0,
+        "level_3": 0,
+        "level_4": 0,
+    }
+    for q in db_questions:
+        if q.level == 1:
+            level_counts["level_1"] += 1
+        elif q.level == 2:
+            level_counts["level_2"] += 1
+        elif q.level == 3:
+            level_counts["level_3"] += 1
+        elif q.level == 4:
+            level_counts["level_4"] += 1
+
+    # 4. Map questions to response format
+    questions_list = [
+        JobProfileQuestionItem(
+            question_id=str(q.id),
+            question=q.question_text,
+            level=q.level,
+            difficulty=q.difficulty,
+            type=q.question_type,
+            is_ai_generated=q.is_ai_generated,
+            created_at=q.created_at,
+        )
+        for q in db_questions
+    ]
+
+    return JobProfileQuestionsListResponse(
+        job_profile_id=str(job_profile_id),
+        total_questions=len(db_questions),
+        level_counts=JobProfileQuestionLevelCounts(**level_counts),
+        questions=questions_list,
+    )
+
+
+@router.post(
+    path="/job-profiles/{job_profile_id}/questions",
+    name="job-profiles:add-question",
+    response_model=JobProfileAddQuestionResponse,
+    status_code=fastapi.status.HTTP_201_CREATED,
+    summary="Add a custom question to a job profile",
+)
+async def add_job_profile_question_v2(
+    job_profile_id: int,
+    payload: JobProfileAddQuestionRequest,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileAddQuestionResponse:
+    # 1. Validate job_profile_id exists
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+
+    # 2. Validate question text is not empty
+    question_text = payload.question.strip() if payload.question else ""
+    if not question_text:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Question text cannot be empty",
+        )
+
+    # 3. Validate level is between 1 and 4
+    if payload.level not in [1, 2, 3, 4]:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Invalid level. Level must be 1, 2, 3, or 4.",
+        )
+
+    # 4. Save question in job_profile_question table
+    db_question = await job_profile_repo.add_job_profile_question(
+        job_profile_id=job_profile_id,
+        question_text=question_text,
+        level=payload.level,
+        difficulty=payload.difficulty,
+        question_type=payload.type,
+        is_ai_generated=payload.is_ai_generated,
+    )
+
+    # 5. Return created question
+    return JobProfileAddQuestionResponse(
+        question_id=str(db_question.id),
+        job_profile_id=str(job_profile_id),
+        question=db_question.question_text,
+        level=db_question.level,
+        difficulty=db_question.difficulty,
+        type=db_question.question_type,
+        is_ai_generated=db_question.is_ai_generated,
+        message="Question added successfully",
+    )
+
+
 
 
