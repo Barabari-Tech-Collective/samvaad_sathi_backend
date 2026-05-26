@@ -170,5 +170,21 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(obj)
         return obj
 
+    async def get_question_by_id(self, question_id: int) -> Optional[JobProfileQuestion]:
+        from src.models.db.job_profile_question import JobProfileQuestion
+        stmt = sqlalchemy.select(JobProfileQuestion).where(JobProfileQuestion.id == question_id)
+        query = await self.async_session.execute(statement=stmt)
+        return query.scalar_one_or_none()
+
+    async def update_job_profile_question(self, question: JobProfileQuestion, update_data: dict) -> JobProfileQuestion:
+        for key, value in update_data.items():
+            if hasattr(question, key) and value is not None:
+                setattr(question, key, value)
+        self.async_session.add(question)
+        await self.async_session.commit()
+        await self.async_session.refresh(question)
+        return question
+
+
 
 

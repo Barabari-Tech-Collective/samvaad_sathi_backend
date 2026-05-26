@@ -144,4 +144,22 @@ class JobProfileAddQuestionResponse(BaseModel):
     message: str
 
 
+# --- Update Question Schemas ---
+class JobProfileUpdateQuestionRequest(BaseModel):
+    question: Optional[str] = None
+    level: Optional[int] = None
+    difficulty: Optional[str] = None
+    type: Optional[str] = None
+
+class JobProfileUpdateQuestionResponse(BaseModel):
+    question_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+    message: str
+
+
+
 

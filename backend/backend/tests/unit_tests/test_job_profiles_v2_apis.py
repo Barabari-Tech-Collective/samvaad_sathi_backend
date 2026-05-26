@@ -37,7 +37,9 @@ from src.models.schemas.job_profile import (
     JobProfileQuestionItem,
     JobProfileQuestionLevelCounts,
     JobProfileAddQuestionRequest,
-    JobProfileAddQuestionResponse
+    JobProfileAddQuestionResponse,
+    JobProfileUpdateQuestionRequest,
+    JobProfileUpdateQuestionResponse
 )
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.file_processor import validate_file
@@ -433,6 +435,69 @@ async def add_job_profile_question_v2(
         type=db_question.question_type,
         is_ai_generated=db_question.is_ai_generated,
         message="Question added successfully",
+    )
+
+
+@_app.patch(
+    path="/api/v2/job-profile-questions/{question_id}",
+    response_model=JobProfileUpdateQuestionResponse,
+    status_code=200,
+)
+async def update_job_profile_question_v2(
+    question_id: int,
+    payload: JobProfileUpdateQuestionRequest,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileUpdateQuestionResponse:
+    # 1. Validate question_id exists
+    question = await job_profile_repo.get_question_by_id(question_id=question_id)
+    if not question:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Question with ID {question_id} not found",
+        )
+
+    # 2. Validate question text is not empty if provided
+    update_data = {}
+    if payload.question is not None:
+        question_text = payload.question.strip()
+        if not question_text:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="Question text cannot be empty",
+            )
+        update_data["question_text"] = question_text
+
+    # 3. Validate level is between 1 and 4 if provided
+    if payload.level is not None:
+        if payload.level not in [1, 2, 3, 4]:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="Invalid level. Level must be 1, 2, 3, or 4.",
+            )
+        update_data["level"] = payload.level
+
+    if payload.difficulty is not None:
+        update_data["difficulty"] = payload.difficulty
+
+    if payload.type is not None:
+        update_data["question_type"] = payload.type
+
+    # 4. Save updated question
+    updated_question = await job_profile_repo.update_job_profile_question(
+        question=question,
+        update_data=update_data
+    )
+
+    # 5. Return updated response
+    return JobProfileUpdateQuestionResponse(
+        question_id=str(updated_question.id),
+        question=updated_question.question_text,
+        level=updated_question.level,
+        difficulty=updated_question.difficulty,
+        type=updated_question.question_type,
+        is_ai_generated=updated_question.is_ai_generated,
+        message="Question updated successfully",
     )
 
 
@@ -846,6 +911,96 @@ def test_add_question_invalid_level():
     response = client.post("/api/v2/job-profiles/123/questions", json=payload)
     assert response.status_code == 400
     assert "Invalid level" in response.json()["detail"]
+
+
+def test_update_question_success():
+    class MockQuestion:
+        def __init__(self, id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, "Old question text", 1, "easy", "theoretical", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    updated_q = MockQuestion(1, "Explain closures in JavaScript with examples.", 2, "medium", "theoretical", True)
+    _mock_repo.update_job_profile_question = AsyncMock(return_value=updated_q)
+
+    payload = {
+        "question": "Explain closures in JavaScript with examples.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical"
+    }
+
+    response = client.patch("/api/v2/job-profile-questions/1", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["question_id"] == "1"
+    assert data["question"] == "Explain closures in JavaScript with examples."
+    assert data["level"] == 2
+    assert data["difficulty"] == "medium"
+    assert data["type"] == "theoretical"
+    assert data["is_ai_generated"] is True
+    assert data["message"] == "Question updated successfully"
+
+
+def test_update_question_not_found():
+    _mock_repo.get_question_by_id = AsyncMock(return_value=None)
+    payload = {
+        "question": "Some text",
+        "level": 2,
+        "difficulty": "medium"
+    }
+    response = client.patch("/api/v2/job-profile-questions/999", json=payload)
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_update_question_empty_text():
+    class MockQuestion:
+        def __init__(self, id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, "Old question text", 1, "easy", "theoretical", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    payload = {
+        "question": "   "
+    }
+    response = client.patch("/api/v2/job-profile-questions/1", json=payload)
+    assert response.status_code == 400
+    assert "cannot be empty" in response.json()["detail"]
+
+
+def test_update_question_invalid_level():
+    class MockQuestion:
+        def __init__(self, id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, "Old question text", 1, "easy", "theoretical", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    payload = {
+        "level": 5
+    }
+    response = client.patch("/api/v2/job-profile-questions/1", json=payload)
+    assert response.status_code == 400
+    assert "Invalid level" in response.json()["detail"]
+
 
 
 

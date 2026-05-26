@@ -20,7 +20,9 @@ from src.models.schemas.job_profile import (
     JobProfileQuestionItem,
     JobProfileQuestionLevelCounts,
     JobProfileAddQuestionRequest,
-    JobProfileAddQuestionResponse
+    JobProfileAddQuestionResponse,
+    JobProfileUpdateQuestionRequest,
+    JobProfileUpdateQuestionResponse
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
@@ -449,6 +451,72 @@ async def add_job_profile_question_v2(
         is_ai_generated=db_question.is_ai_generated,
         message="Question added successfully",
     )
+
+
+@router.patch(
+    path="/job-profile-questions/{question_id}",
+    name="job-profiles:update-question",
+    response_model=JobProfileUpdateQuestionResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Update a custom or AI question for a job profile",
+)
+async def update_job_profile_question_v2(
+    question_id: int,
+    payload: JobProfileUpdateQuestionRequest,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileUpdateQuestionResponse:
+    # 1. Validate question_id exists
+    question = await job_profile_repo.get_question_by_id(question_id=question_id)
+    if not question:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Question with ID {question_id} not found",
+        )
+
+    # 2. Validate question text is not empty if provided
+    update_data = {}
+    if payload.question is not None:
+        question_text = payload.question.strip()
+        if not question_text:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="Question text cannot be empty",
+            )
+        update_data["question_text"] = question_text
+
+    # 3. Validate level is between 1 and 4 if provided
+    if payload.level is not None:
+        if payload.level not in [1, 2, 3, 4]:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="Invalid level. Level must be 1, 2, 3, or 4.",
+            )
+        update_data["level"] = payload.level
+
+    if payload.difficulty is not None:
+        update_data["difficulty"] = payload.difficulty
+
+    if payload.type is not None:
+        update_data["question_type"] = payload.type
+
+    # 4. Save updated question
+    updated_question = await job_profile_repo.update_job_profile_question(
+        question=question,
+        update_data=update_data
+    )
+
+    # 5. Return updated response
+    return JobProfileUpdateQuestionResponse(
+        question_id=str(updated_question.id),
+        question=updated_question.question_text,
+        level=updated_question.level,
+        difficulty=updated_question.difficulty,
+        type=updated_question.question_type,
+        is_ai_generated=updated_question.is_ai_generated,
+        message="Question updated successfully",
+    )
+
 
 
 
