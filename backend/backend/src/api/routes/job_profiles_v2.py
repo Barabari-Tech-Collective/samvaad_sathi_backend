@@ -1,6 +1,7 @@
 import fastapi
 from fastapi import File, UploadFile
 from typing import List, Optional
+import logging
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.job_profile import (
@@ -11,11 +12,18 @@ from src.models.schemas.job_profile import (
     JobProfileActivityResponse,
     JobProfileUploadResponse,
     JobProfileExtractSkillsRequest,
-    JobProfileExtractSkillsResponse
+    JobProfileExtractSkillsResponse,
+    JobProfileGenerateQuestionsRequest,
+    JobProfileGenerateQuestionsResponse,
+    JobProfileGeneratedQuestionItem
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
 from src.repository.crud.job_profile import JobProfileCRUDRepository
+from src.services.llm import generate_interview_questions_with_llm
+from src.services.syllabus_service import syllabus_service
+
+logger = logging.getLogger(__name__)
 
 router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles"])
 
@@ -160,5 +168,160 @@ async def extract_skills(
         
     extracted_skills = extract_skills_from_text(payload.jobDescription)
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
+
+
+@router.post(
+    path="/job-profiles/{job_profile_id}/questions/generate",
+    name="job-profiles:generate-questions",
+    response_model=JobProfileGenerateQuestionsResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Generate AI interview questions for a Job Profile",
+)
+async def generate_questions_v2(
+    job_profile_id: int,
+    payload: JobProfileGenerateQuestionsRequest,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileGenerateQuestionsResponse:
+    # 1. Fetch job profile details & validate existence
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if profile is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+
+    # 2. Level to difficulty map
+    level_map = {
+        1: "easy",
+        2: "medium",
+        3: "hard",
+        4: "expert"
+    }
+
+    # 3. Validate levels and counts
+    total_requested = 0
+    for l in payload.levels:
+        if l.level not in level_map:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid level {l.level}. Level must be 1, 2, 3, or 4."
+            )
+        if l.count < 0:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid count {l.count} for level {l.level}. Count cannot be negative."
+            )
+        total_requested += l.count
+
+    if total_requested == 0:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Total question count must be greater than zero."
+        )
+
+    # 4. Generate questions using existing LLM system
+    generated_questions_data = []
+
+    skills_list = profile.skills or []
+    track = profile.job_name
+    context_text = profile.job_description
+
+    for l in payload.levels:
+        if l.count == 0:
+            continue
+
+        difficulty = level_map[l.level]
+        
+        # Prepare syllabus and question ratio using existing syllabus service
+        role = syllabus_service._role_manager.derive_role(track)
+        topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
+        
+        topics = {
+            "tech": topic_bank.tech,
+            "tech_allied": topic_bank.tech_allied,
+            "behavioral": topic_bank.behavioral,
+            "archetypes": topic_bank.archetypes,
+            "depth_guidelines": topic_bank.depth_guidelines,
+        }
+        
+        # Extract tech-allied topics from job description
+        topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
+            resume_text=context_text,
+            skills=skills_list,
+            fallback_topics=topics.get("tech_allied", []),
+        )
+        
+        question_ratio = syllabus_service.compute_question_ratio(
+            years_experience=None,
+            has_resume_text=bool(context_text),
+            has_skills=bool(skills_list),
+        )
+        
+        ratio = {
+            "tech": question_ratio.tech,
+            "tech_allied": question_ratio.tech_allied,
+            "behavioral": question_ratio.behavioral,
+        }
+        
+        influence = {
+            "target_role": role,
+            "difficulty": difficulty,
+            "skills": skills_list,
+            "experience_level": profile.experience_level,
+        }
+
+        logger.info(
+            f"Generating {l.count} questions for Job Profile {job_profile_id} at Level {l.level} ({difficulty})"
+        )
+
+        questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
+            track=track,
+            context_text=context_text,
+            count=l.count,
+            difficulty=difficulty,
+            syllabus_topics=topics,
+            ratio=ratio,
+            influence=influence,
+        )
+
+        if error or not structured_items:
+            logger.error(f"Failed to generate questions for Level {l.level}: {error}")
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate questions for Level {l.level}: {error or 'No questions generated'}"
+            )
+
+        for item in structured_items:
+            generated_questions_data.append({
+                "job_profile_id": profile.id,
+                "question_text": item["text"],
+                "level": l.level,
+                "difficulty": difficulty,
+                "question_type": item.get("category", "theoretical"),
+                "is_ai_generated": True
+            })
+
+    # 5. Save generated questions into database
+    db_questions = await job_profile_repo.create_job_profile_questions(generated_questions_data)
+
+    # 6. Format and return response
+    response_items = [
+        JobProfileGeneratedQuestionItem(
+            question_id=str(q.id),
+            question=q.question_text,
+            level=q.level,
+            difficulty=q.difficulty,
+            type=q.question_type,
+            is_ai_generated=q.is_ai_generated
+        )
+        for q in db_questions
+    ]
+
+    return JobProfileGenerateQuestionsResponse(
+        job_profile_id=str(profile.id),
+        total_questions=len(response_items),
+        questions=response_items
+    )
 
 

@@ -18,7 +18,7 @@ import pytest
 import fastapi
 from fastapi import File, UploadFile
 from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Import schemas and repository
 from src.models.schemas.job_profile import (
@@ -29,7 +29,10 @@ from src.models.schemas.job_profile import (
     JobProfileActivityResponse,
     JobProfileUploadResponse,
     JobProfileExtractSkillsRequest,
-    JobProfileExtractSkillsResponse
+    JobProfileExtractSkillsResponse,
+    JobProfileGenerateQuestionsRequest,
+    JobProfileGenerateQuestionsResponse,
+    JobProfileGeneratedQuestionItem
 )
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.file_processor import validate_file
@@ -160,14 +163,167 @@ async def extract_skills(
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
 
 
+@_app.post(
+    path="/api/v2/job-profiles/{job_profile_id}/questions/generate",
+    response_model=JobProfileGenerateQuestionsResponse,
+    status_code=200,
+)
+async def generate_questions_v2(
+    job_profile_id: int,
+    payload: JobProfileGenerateQuestionsRequest,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileGenerateQuestionsResponse:
+    # 1. Fetch job profile details & validate existence
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if profile is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+
+    # 2. Level to difficulty map
+    level_map = {
+        1: "easy",
+        2: "medium",
+        3: "hard",
+        4: "expert"
+    }
+
+    # 3. Validate levels and counts
+    total_requested = 0
+    for l in payload.levels:
+        if l.level not in level_map:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid level {l.level}. Level must be 1, 2, 3, or 4."
+            )
+        if l.count < 0:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid count {l.count} for level {l.level}. Count cannot be negative."
+            )
+        total_requested += l.count
+
+    if total_requested == 0:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Total question count must be greater than zero."
+        )
+
+    # 4. Generate questions using existing LLM system
+    generated_questions_data = []
+
+    skills_list = profile.skills or []
+    track = profile.job_name
+    context_text = profile.job_description
+
+    from src.services.syllabus_service import syllabus_service
+    from src.services.llm import generate_interview_questions_with_llm
+
+    for l in payload.levels:
+        if l.count == 0:
+            continue
+
+        difficulty = level_map[l.level]
+        
+        # Prepare syllabus and question ratio using existing syllabus service
+        role = syllabus_service._role_manager.derive_role(track)
+        topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
+        
+        topics = {
+            "tech": topic_bank.tech,
+            "tech_allied": topic_bank.tech_allied,
+            "behavioral": topic_bank.behavioral,
+            "archetypes": topic_bank.archetypes,
+            "depth_guidelines": topic_bank.depth_guidelines,
+        }
+        
+        # Extract tech-allied topics from job description
+        topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
+            resume_text=context_text,
+            skills=skills_list,
+            fallback_topics=topics.get("tech_allied", []),
+        )
+        
+        question_ratio = syllabus_service.compute_question_ratio(
+            years_experience=None,
+            has_resume_text=bool(context_text),
+            has_skills=bool(skills_list),
+        )
+        
+        ratio = {
+            "tech": question_ratio.tech,
+            "tech_allied": question_ratio.tech_allied,
+            "behavioral": question_ratio.behavioral,
+        }
+        
+        influence = {
+            "target_role": role,
+            "difficulty": difficulty,
+            "skills": skills_list,
+            "experience_level": profile.experience_level,
+        }
+
+        questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
+            track=track,
+            context_text=context_text,
+            count=l.count,
+            difficulty=difficulty,
+            syllabus_topics=topics,
+            ratio=ratio,
+            influence=influence,
+        )
+
+        if error or not structured_items:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate questions for Level {l.level}: {error or 'No questions generated'}"
+            )
+
+        for item in structured_items:
+            generated_questions_data.append({
+                "job_profile_id": profile.id,
+                "question_text": item["text"],
+                "level": l.level,
+                "difficulty": difficulty,
+                "question_type": item.get("category", "theoretical"),
+                "is_ai_generated": True
+            })
+
+    # 5. Save generated questions into database
+    db_questions = await job_profile_repo.create_job_profile_questions(generated_questions_data)
+
+    # 6. Format and return response
+    response_items = [
+        JobProfileGeneratedQuestionItem(
+            question_id=str(q.id),
+            question=q.question_text,
+            level=q.level,
+            difficulty=q.difficulty,
+            type=q.question_type,
+            is_ai_generated=q.is_ai_generated
+        )
+        for q in db_questions
+    ]
+
+    return JobProfileGenerateQuestionsResponse(
+        job_profile_id=str(profile.id),
+        total_questions=len(response_items),
+        questions=response_items
+    )
+
+
 client = TestClient(_app)
 
 # Mock model helper representing ORM
 class MockJobProfileModel:
-    def __init__(self, id, job_name, job_description, created_at=None):
+    def __init__(self, id, job_name, job_description, created_at=None, skills=None, experience_level=None):
         self.id = id
         self.job_name = job_name
         self.job_description = job_description or ""
+        self.skills = skills
+        self.experience_level = experience_level
         self.created_at = created_at or datetime.datetime.now(datetime.timezone.utc)
         self.updated_at = self.created_at
 
@@ -329,3 +485,99 @@ def test_extract_skills_empty_payload():
     payload = {"jobDescription": ""}
     response = client.post("/api/v2/job-profiles/extract-skills", json=payload)
     assert response.status_code == 422
+
+
+# 9. POST /api/v2/job-profiles/{job_profile_id}/questions/generate
+def test_generate_questions_success():
+    profile = MockJobProfileModel(
+        id=123,
+        job_name="Python Developer",
+        job_description="Looking for an experienced Python developer with React skills.",
+        skills=["Python", "React"],
+        experience_level="Mid"
+    )
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    mock_items = [
+        {"text": "What is Django?", "category": "tech"},
+        {"text": "Explain React state management.", "category": "tech_allied"}
+    ]
+
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    saved_questions = [
+        MockQuestion(1, 123, "What is Django?", 1, "easy", "tech", True),
+        MockQuestion(2, 123, "Explain React state management.", 1, "easy", "tech_allied", True)
+    ]
+    _mock_repo.create_job_profile_questions = AsyncMock(return_value=saved_questions)
+
+    payload = {
+        "levels": [
+            {"level": 1, "count": 2}
+        ]
+    }
+    with patch("src.services.llm.generate_interview_questions_with_llm", new_callable=AsyncMock) as mock_generate:
+        mock_generate.return_value = (["What is Django?", "Explain React state management."], None, 150, "gpt-4o-mini", mock_items)
+        response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_profile_id"] == "123"
+        assert data["total_questions"] == 2
+        assert data["questions"][0]["question_id"] == "1"
+        assert data["questions"][0]["question"] == "What is Django?"
+        assert data["questions"][0]["level"] == 1
+        assert data["questions"][0]["difficulty"] == "easy"
+        assert data["questions"][0]["type"] == "tech"
+        assert data["questions"][0]["is_ai_generated"] is True
+
+        _mock_repo.get_by_id.assert_called_with(job_profile_id=123)
+        mock_generate.assert_called_once()
+        _mock_repo.create_job_profile_questions.assert_called_once()
+
+
+def test_generate_questions_profile_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    payload = {
+        "levels": [
+            {"level": 1, "count": 2}
+        ]
+    }
+    response = client.post("/api/v2/job-profiles/999/questions/generate", json=payload)
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_generate_questions_invalid_level():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    payload = {
+        "levels": [
+            {"level": 5, "count": 2}
+        ]
+    }
+    response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
+    assert response.status_code == 400
+    assert "Invalid level" in response.json()["detail"]
+
+
+def test_generate_questions_negative_count():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    payload = {
+        "levels": [
+            {"level": 1, "count": -5}
+        ]
+    }
+    response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
+    assert response.status_code == 400
+    assert "Count cannot be negative" in response.json()["detail"]
+

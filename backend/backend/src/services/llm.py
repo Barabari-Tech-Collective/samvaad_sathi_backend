@@ -741,7 +741,7 @@ async def generate_interview_questions_with_llm(
     # Prepare a sampled syllabus so we don't send the entire topic bank to the LLM
     topics = syllabus_topics or {}
     r = ratio or {"tech": 2, "tech_allied": 2, "behavioral": 1}
-    total = max(1, min(10, int(count or 3)))
+    total = max(1, min(50, int(count or 3)))
     # Normalize ratio to total questions (we use it only as guidance for sampling size)
     r_tech = max(0, int(r.get("tech", 0)))
     r_allied = max(0, int(r.get("tech_allied", 0)))

@@ -35,7 +35,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
     async def create_profile(self, title: str, description: Optional[str] = None) -> JobProfile:
         new_profile = JobProfile(job_name=title, job_description=description or "")
         self.async_session.add(new_profile)
-        await self.async_session.flush()
+        await self.async_session.commit()
+        await self.async_session.refresh(new_profile)
         return new_profile
 
     async def delete_profile(self, profile_id: int) -> bool:
@@ -44,6 +45,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         profile = result.scalar_one_or_none()
         if profile:
             await self.async_session.delete(profile)
+            await self.async_session.commit()
             return True
         return False
 
@@ -113,3 +115,23 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         await self.async_session.delete(profile)
         await self.async_session.commit()
         return True
+
+    async def create_job_profile_questions(self, questions: list[dict]) -> list[JobProfileQuestion]:
+        from src.models.db.job_profile_question import JobProfileQuestion
+        db_objs = []
+        for q in questions:
+            obj = JobProfileQuestion(
+                job_profile_id=q["job_profile_id"],
+                question_text=q["question_text"],
+                level=q["level"],
+                difficulty=q["difficulty"],
+                question_type=q.get("question_type", "theoretical"),
+                is_ai_generated=q.get("is_ai_generated", True)
+            )
+            self.async_session.add(obj)
+            db_objs.append(obj)
+        await self.async_session.commit()
+        for obj in db_objs:
+            await self.async_session.refresh(obj)
+        return db_objs
+

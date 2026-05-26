@@ -78,3 +78,26 @@ class JobProfilesListResponse(BaseSchemaModel):
 class JobProfileDeleteResponse(BaseSchemaModel):
     deleted: bool
     job_profile_id: int
+
+
+# --- Generate Questions Schemas ---
+class JobProfileQuestionLevelRequest(BaseModel):
+    level: int
+    count: int
+
+class JobProfileGenerateQuestionsRequest(BaseModel):
+    levels: List[JobProfileQuestionLevelRequest]
+
+class JobProfileGeneratedQuestionItem(BaseModel):
+    question_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+
+class JobProfileGenerateQuestionsResponse(BaseModel):
+    job_profile_id: str
+    total_questions: int
+    questions: List[JobProfileGeneratedQuestionItem]
+
