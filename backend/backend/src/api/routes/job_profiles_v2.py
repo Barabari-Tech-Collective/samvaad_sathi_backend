@@ -34,7 +34,7 @@ from src.services.syllabus_service import syllabus_service
 
 logger = logging.getLogger(__name__)
 
-router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles"])
+router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles-v2"])
 
 @router.get(
     path="/job-profiles/recent-activity",
@@ -83,11 +83,10 @@ async def get_job_profiles_summary(
     summary="List all Job Profiles",
 )
 async def list_job_profiles(
-    category: Optional[str] = fastapi.Query(None, description="Filter by category (matches title temporarily)"),
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileListResponse:
-    profiles = await job_profile_repo.list_profiles(category=category)
+    profiles = await job_profile_repo.list_profiles()
     return JobProfileListResponse(items=profiles, total=len(profiles))
 
 @router.post(
@@ -102,7 +101,14 @@ async def create_job_profile(
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileResponse:
-    profile = await job_profile_repo.create_profile(job_name=payload.job_name, job_description=payload.job_description)
+    profile = await job_profile_repo.create_profile(
+        job_name=payload.job_name,
+        job_description=payload.job_description,
+        company_name=payload.company_name,
+        experience_level=payload.experience_level,
+        skills=payload.skills,
+        additional_context=payload.additional_context,
+    )
     return JobProfileResponse.model_validate(profile)
 
 

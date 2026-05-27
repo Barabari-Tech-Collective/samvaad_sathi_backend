@@ -23,18 +23,28 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             "rejected": 0
         }
 
-    async def list_profiles(self, category: Optional[str] = None) -> List[JobProfile]:
+    async def list_profiles(self) -> List[JobProfile]:
         query = select(JobProfile).order_by(JobProfile.created_at.desc())
-        
-        if category:
-            # Filter by job_name as a fallback for category
-            query = query.where(JobProfile.job_name.ilike(f"%{category}%"))
-            
         result = await self.async_session.execute(query)
         return list(result.scalars().all())
 
-    async def create_profile(self, job_name: str, job_description: Optional[str] = None) -> JobProfile:
-        new_profile = JobProfile(job_name=job_name, job_description=job_description or "")
+    async def create_profile(
+        self,
+        job_name: str,
+        job_description: Optional[str] = None,
+        company_name: Optional[str] = None,
+        experience_level: Optional[str] = None,
+        skills: Optional[List[str]] = None,
+        additional_context: Optional[str] = None,
+    ) -> JobProfile:
+        new_profile = JobProfile(
+            job_name=job_name,
+            job_description=job_description or "",
+            company_name=company_name,
+            experience_level=experience_level,
+            skills=skills,
+            additional_context=additional_context,
+        )
         self.async_session.add(new_profile)
         await self.async_session.commit()
         await self.async_session.refresh(new_profile)

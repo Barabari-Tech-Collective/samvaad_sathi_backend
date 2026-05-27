@@ -8,7 +8,10 @@ from src.models.schemas.base import BaseSchemaModel
 class JobProfileBase(BaseSchemaModel):
     job_name: str
     job_description: Optional[str] = None
-    category: Optional[str] = "Technology"
+    company_name: Optional[str] = None
+    experience_level: Optional[str] = None
+    skills: Optional[List[str]] = None
+    additional_context: Optional[str] = None
 
 class JobProfileCreateV2(JobProfileBase):
     pass

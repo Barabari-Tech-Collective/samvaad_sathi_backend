@@ -112,7 +112,14 @@ async def create_job_profile(
     current_user=fastapi.Depends(_fake_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
 ) -> JobProfileResponse:
-    profile = await job_profile_repo.create_profile(job_name=payload.job_name, job_description=payload.job_description)
+    profile = await job_profile_repo.create_profile(
+        job_name=payload.job_name,
+        job_description=payload.job_description,
+        company_name=payload.company_name,
+        experience_level=payload.experience_level,
+        skills=payload.skills,
+        additional_context=payload.additional_context,
+    )
     return JobProfileResponse.model_validate(profile)
 
 
@@ -748,9 +755,20 @@ def test_list_job_profiles_with_category_filter():
 # 4. POST /api/v2/job-profiles
 def test_create_job_profile():
     mock_created = MockJobProfileModel(100, "Frontend Engineer", "Builds modern interfaces")
+    mock_created.company_name = "Google"
+    mock_created.experience_level = "Senior"
+    mock_created.skills = ["React", "CSS"]
+    mock_created.additional_context = "Urgent hire"
     _mock_repo.create_profile = AsyncMock(return_value=mock_created)
 
-    payload = {"jobName": "Frontend Engineer", "jobDescription": "Builds modern interfaces"}
+    payload = {
+        "jobName": "Frontend Engineer",
+        "jobDescription": "Builds modern interfaces",
+        "companyName": "Google",
+        "experienceLevel": "Senior",
+        "skills": ["React", "CSS"],
+        "additionalContext": "Urgent hire"
+    }
     response = client.post("/api/v2/job-profiles", json=payload)
     
     assert response.status_code == 201
@@ -758,7 +776,18 @@ def test_create_job_profile():
     assert data["id"] == 100
     assert data["jobName"] == "Frontend Engineer"
     assert data["jobDescription"] == "Builds modern interfaces"
-    _mock_repo.create_profile.assert_called_once_with(job_name="Frontend Engineer", job_description="Builds modern interfaces")
+    assert data["companyName"] == "Google"
+    assert data["experienceLevel"] == "Senior"
+    assert data["skills"] == ["React", "CSS"]
+    assert data["additionalContext"] == "Urgent hire"
+    _mock_repo.create_profile.assert_called_once_with(
+        job_name="Frontend Engineer",
+        job_description="Builds modern interfaces",
+        company_name="Google",
+        experience_level="Senior",
+        skills=["React", "CSS"],
+        additional_context="Urgent hire"
+    )
 
 
 
