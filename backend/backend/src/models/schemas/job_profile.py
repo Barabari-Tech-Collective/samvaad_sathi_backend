@@ -5,9 +5,10 @@ import pydantic
 from src.models.schemas.base import BaseSchemaModel
 
 # --- feature/roles-page-api schemas ---
-class JobProfileBase(BaseModel):
-    title: str
-    description: Optional[str] = None
+class JobProfileBase(BaseSchemaModel):
+    job_name: str
+    job_description: Optional[str] = None
+    category: Optional[str] = "Technology"
 
 class JobProfileCreateV2(JobProfileBase):
     pass
@@ -16,36 +17,33 @@ class JobProfileResponse(JobProfileBase):
     id: int
     created_at: datetime.datetime
 
-    class Config:
-        from_attributes = True
-
-class JobProfileSummaryResponse(BaseModel):
-    totalRoles: int
-    pendingReview: int
+class JobProfileSummaryResponse(BaseSchemaModel):
+    total_roles: int
+    pending_review: int
     approved: int
     rejected: int
 
-class JobProfileListResponse(BaseModel):
+class JobProfileListResponse(BaseSchemaModel):
     items: List[JobProfileResponse]
     total: int
 
-class JobProfileActivityResponse(BaseModel):
+class JobProfileActivityResponse(BaseSchemaModel):
     id: int
     title: str
     action: str
     message: str
-    createdAt: datetime.datetime
+    created_at: datetime.datetime
 
-class JobProfileUploadResponse(BaseModel):
+class JobProfileUploadResponse(BaseSchemaModel):
     success: bool
-    originalFileName: str
-    fileType: str
-    fileSize: int
+    original_file_name: str
+    file_type: str
+    file_size: int
 
-class JobProfileExtractSkillsRequest(BaseModel):
-    jobDescription: str
+class JobProfileExtractSkillsRequest(BaseSchemaModel):
+    job_description: str
 
-class JobProfileExtractSkillsResponse(BaseModel):
+class JobProfileExtractSkillsResponse(BaseSchemaModel):
     skills: List[str]
 
 # --- upstream/master schemas ---

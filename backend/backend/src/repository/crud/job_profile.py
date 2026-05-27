@@ -33,8 +33,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         result = await self.async_session.execute(query)
         return list(result.scalars().all())
 
-    async def create_profile(self, title: str, description: Optional[str] = None) -> JobProfile:
-        new_profile = JobProfile(job_name=title, job_description=description or "")
+    async def create_profile(self, job_name: str, job_description: Optional[str] = None) -> JobProfile:
+        new_profile = JobProfile(job_name=job_name, job_description=job_description or "")
         self.async_session.add(new_profile)
         await self.async_session.commit()
         await self.async_session.refresh(new_profile)

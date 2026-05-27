@@ -112,8 +112,8 @@ async def create_job_profile(
     current_user=fastapi.Depends(_fake_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
 ) -> JobProfileResponse:
-    profile = await job_profile_repo.create_profile(title=payload.title, description=payload.description)
-    return JobProfileResponse.from_orm(profile)
+    profile = await job_profile_repo.create_profile(job_name=payload.job_name, job_description=payload.job_description)
+    return JobProfileResponse.model_validate(profile)
 
 
 
@@ -130,9 +130,9 @@ async def upload_job_description(
     extension, size = await validate_file(file)
     return JobProfileUploadResponse(
         success=True,
-        originalFileName=file.filename or "",
-        fileType=extension.replace(".", ""),
-        fileSize=size,
+        original_file_name=file.filename or "",
+        file_type=extension.replace(".", ""),
+        file_size=size,
     )
 
 
@@ -148,9 +148,9 @@ async def upload_knowledge_questions(
     extension, size = await validate_file(file)
     return JobProfileUploadResponse(
         success=True,
-        originalFileName=file.filename or "",
-        fileType=extension.replace(".", ""),
-        fileSize=size,
+        original_file_name=file.filename or "",
+        file_type=extension.replace(".", ""),
+        file_size=size,
     )
 
 
@@ -163,12 +163,12 @@ async def extract_skills(
     payload: JobProfileExtractSkillsRequest,
     current_user=fastapi.Depends(_fake_current_user),
 ) -> JobProfileExtractSkillsResponse:
-    if not payload.jobDescription.strip():
+    if not payload.job_description.strip():
         raise fastapi.HTTPException(
             status_code=422,
-            detail="jobDescription cannot be empty"
+            detail="job_description cannot be empty"
         )
-    extracted_skills = extract_skills_from_text(payload.jobDescription)
+    extracted_skills = extract_skills_from_text(payload.job_description)
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
 
 
@@ -725,8 +725,8 @@ def test_list_job_profiles():
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 2
-    assert data["items"][0]["title"] == "Python Developer"
-    assert data["items"][1]["title"] == "Java Architect"
+    assert data["items"][0]["jobName"] == "Python Developer"
+    assert data["items"][1]["jobName"] == "Java Architect"
     _mock_repo.list_profiles.assert_called_once_with(category=None)
 
 
@@ -741,7 +741,7 @@ def test_list_job_profiles_with_category_filter():
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 1
-    assert data["items"][0]["title"] == "Python Developer"
+    assert data["items"][0]["jobName"] == "Python Developer"
     _mock_repo.list_profiles.assert_called_with(category="Python")
 
 
@@ -750,15 +750,15 @@ def test_create_job_profile():
     mock_created = MockJobProfileModel(100, "Frontend Engineer", "Builds modern interfaces")
     _mock_repo.create_profile = AsyncMock(return_value=mock_created)
 
-    payload = {"title": "Frontend Engineer", "description": "Builds modern interfaces"}
+    payload = {"jobName": "Frontend Engineer", "jobDescription": "Builds modern interfaces"}
     response = client.post("/api/v2/job-profiles", json=payload)
     
     assert response.status_code == 201
     data = response.json()
     assert data["id"] == 100
-    assert data["title"] == "Frontend Engineer"
-    assert data["description"] == "Builds modern interfaces"
-    _mock_repo.create_profile.assert_called_once_with(title="Frontend Engineer", description="Builds modern interfaces")
+    assert data["jobName"] == "Frontend Engineer"
+    assert data["jobDescription"] == "Builds modern interfaces"
+    _mock_repo.create_profile.assert_called_once_with(job_name="Frontend Engineer", job_description="Builds modern interfaces")
 
 
 

@@ -102,8 +102,8 @@ async def create_job_profile(
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileResponse:
-    profile = await job_profile_repo.create_profile(title=payload.title, description=payload.description)
-    return JobProfileResponse.from_orm(profile)
+    profile = await job_profile_repo.create_profile(job_name=payload.job_name, job_description=payload.job_description)
+    return JobProfileResponse.model_validate(profile)
 
 
 
@@ -125,9 +125,9 @@ async def upload_job_description(
     extension, size = await validate_file(file)
     return JobProfileUploadResponse(
         success=True,
-        originalFileName=file.filename or "",
-        fileType=extension.replace(".", ""),
-        fileSize=size,
+        original_file_name=file.filename or "",
+        file_type=extension.replace(".", ""),
+        file_size=size,
     )
 
 
@@ -149,9 +149,9 @@ async def upload_knowledge_questions(
     extension, size = await validate_file(file)
     return JobProfileUploadResponse(
         success=True,
-        originalFileName=file.filename or "",
-        fileType=extension.replace(".", ""),
-        fileSize=size,
+        original_file_name=file.filename or "",
+        file_type=extension.replace(".", ""),
+        file_size=size,
     )
 
 @router.post(
@@ -169,13 +169,13 @@ async def extract_skills(
     Extracts skills from the provided job description text.
     Currently uses keyword-based matching against a predefined skills list.
     """
-    if not payload.jobDescription.strip():
+    if not payload.job_description.strip():
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="jobDescription cannot be empty"
+            detail="job_description cannot be empty"
         )
         
-    extracted_skills = extract_skills_from_text(payload.jobDescription)
+    extracted_skills = extract_skills_from_text(payload.job_description)
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
 
 
