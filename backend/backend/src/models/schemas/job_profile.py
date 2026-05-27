@@ -161,5 +161,24 @@ class JobProfileUpdateQuestionResponse(BaseModel):
     message: str
 
 
+# --- Regenerate Question Schemas ---
+class JobProfileRegenerateQuestionResponse(BaseModel):
+    question_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+    message: str
+
+
+# --- Delete Question Schemas ---
+class JobProfileDeleteQuestionResponse(BaseModel):
+    message: str
+    question_id: str
+
+
+
+
 
 

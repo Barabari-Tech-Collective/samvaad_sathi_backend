@@ -22,7 +22,9 @@ from src.models.schemas.job_profile import (
     JobProfileAddQuestionRequest,
     JobProfileAddQuestionResponse,
     JobProfileUpdateQuestionRequest,
-    JobProfileUpdateQuestionResponse
+    JobProfileUpdateQuestionResponse,
+    JobProfileRegenerateQuestionResponse,
+    JobProfileDeleteQuestionResponse
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
@@ -516,6 +518,156 @@ async def update_job_profile_question_v2(
         is_ai_generated=updated_question.is_ai_generated,
         message="Question updated successfully",
     )
+
+
+@router.post(
+    path="/job-profile-questions/{question_id}/regenerate",
+    name="job-profiles:regenerate-question",
+    response_model=JobProfileRegenerateQuestionResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Regenerate a single AI question for a job profile",
+)
+async def regenerate_job_profile_question_v2(
+    question_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileRegenerateQuestionResponse:
+    # 1. Validate question_id exists
+    question = await job_profile_repo.get_question_by_id(question_id=question_id)
+    if not question:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Question with ID {question_id} not found",
+        )
+
+    # 2. Fetch linked job profile
+    profile = await job_profile_repo.get_by_id(job_profile_id=question.job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="Job profile for this question not found",
+        )
+
+    # 3. Extract and map configuration
+    track = profile.job_name
+    context_text = profile.job_description or ""
+    skills_list = profile.skills or []
+
+    level_map = {
+        1: "easy",
+        2: "medium",
+        3: "hard",
+        4: "expert"
+    }
+    difficulty = level_map.get(question.level, "easy")
+
+    # 4. Prepare syllabus and ratio
+    role = syllabus_service._role_manager.derive_role(track)
+    topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
+
+    topics = {
+        "tech": topic_bank.tech,
+        "tech_allied": topic_bank.tech_allied,
+        "behavioral": topic_bank.behavioral,
+        "archetypes": topic_bank.archetypes,
+        "depth_guidelines": topic_bank.depth_guidelines,
+    }
+    topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
+        resume_text=context_text,
+        skills=skills_list,
+        fallback_topics=topics.get("tech_allied", []),
+    )
+
+    question_ratio = syllabus_service.compute_question_ratio(
+        years_experience=None,
+        has_resume_text=bool(context_text),
+        has_skills=bool(skills_list),
+    )
+    ratio = {
+        "tech": question_ratio.tech,
+        "tech_allied": question_ratio.tech_allied,
+        "behavioral": question_ratio.behavioral,
+    }
+
+    influence = {
+        "target_role": role,
+        "difficulty": difficulty,
+        "skills": skills_list,
+        "experience_level": profile.experience_level,
+    }
+
+    # 5. Generate new question using existing LLM service
+    questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
+        track=track,
+        context_text=context_text,
+        count=1,
+        difficulty=difficulty,
+        syllabus_topics=topics,
+        ratio=ratio,
+        influence=influence,
+    )
+
+    if error or not structured_items:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to regenerate question: {error or 'No question returned from LLM'}"
+        )
+
+    new_item = structured_items[0]
+
+    # 6. Replace and update old question text
+    update_data = {
+        "question_text": new_item["text"],
+        "question_type": new_item.get("category", "theoretical"),
+        "is_ai_generated": True
+    }
+    updated_question = await job_profile_repo.update_job_profile_question(
+        question=question,
+        update_data=update_data
+    )
+
+    # 7. Return updated response
+    return JobProfileRegenerateQuestionResponse(
+        question_id=str(updated_question.id),
+        question=updated_question.question_text,
+        level=updated_question.level,
+        difficulty=updated_question.difficulty,
+        type=updated_question.question_type,
+        is_ai_generated=updated_question.is_ai_generated,
+        message="Question regenerated successfully",
+    )
+
+
+@router.delete(
+    path="/job-profile-questions/{question_id}",
+    name="job-profiles:delete-question",
+    response_model=JobProfileDeleteQuestionResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Delete a single question for a job profile",
+)
+async def delete_job_profile_question_v2(
+    question_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileDeleteQuestionResponse:
+    # 1. Validate question_id exists
+    question = await job_profile_repo.get_question_by_id(question_id=question_id)
+    if not question:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Question with ID {question_id} not found",
+        )
+
+    # 2. Delete the question
+    await job_profile_repo.delete_job_profile_question(question=question)
+
+    # 3. Return success response
+    return JobProfileDeleteQuestionResponse(
+        message="Question deleted successfully",
+        question_id=str(question_id),
+    )
+
+
 
 
 

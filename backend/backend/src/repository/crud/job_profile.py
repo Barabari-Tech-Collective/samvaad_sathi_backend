@@ -185,6 +185,11 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(question)
         return question
 
+    async def delete_job_profile_question(self, question: JobProfileQuestion) -> None:
+        await self.async_session.delete(question)
+        await self.async_session.commit()
+
+
 
 
 
