@@ -6,8 +6,15 @@ from src.models.schemas.base import BaseSchemaModel
 
 # --- feature/roles-page-api schemas ---
 class JobProfileBase(BaseSchemaModel):
-    job_name: str
-    job_description: Optional[str] = None
+    job_name: str = pydantic.Field(
+        validation_alias=pydantic.AliasChoices("job_name", "jobName", "title"),
+        serialization_alias="jobName"
+    )
+    job_description: Optional[str] = pydantic.Field(
+        default=None,
+        validation_alias=pydantic.AliasChoices("job_description", "jobDescription", "description"),
+        serialization_alias="jobDescription"
+    )
     company_name: Optional[str] = None
     experience_level: Optional[str] = None
     skills: Optional[List[str]] = None
@@ -19,6 +26,16 @@ class JobProfileCreateV2(JobProfileBase):
 class JobProfileResponse(JobProfileBase):
     id: int
     created_at: datetime.datetime
+
+    @pydantic.computed_field
+    @property
+    def title(self) -> str:
+        return self.job_name
+
+    @pydantic.computed_field
+    @property
+    def description(self) -> Optional[str]:
+        return self.job_description
 
 class JobProfileSummaryResponse(BaseSchemaModel):
     total_roles: int

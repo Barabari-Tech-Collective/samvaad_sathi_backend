@@ -24,7 +24,8 @@ from src.models.schemas.job_profile import (
     JobProfileUpdateQuestionRequest,
     JobProfileUpdateQuestionResponse,
     JobProfileRegenerateQuestionResponse,
-    JobProfileDeleteQuestionResponse
+    JobProfileDeleteQuestionResponse,
+    JobProfileDeleteResponse
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
@@ -110,6 +111,28 @@ async def create_job_profile(
         additional_context=payload.additional_context,
     )
     return JobProfileResponse.model_validate(profile)
+
+
+
+@router.delete(
+    path="/job-profiles/{job_profile_id}",
+    name="job-profiles:delete",
+    response_model=JobProfileDeleteResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Delete a shared job profile",
+)
+async def delete_job_profile(
+    job_profile_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileDeleteResponse:
+    deleted = await job_profile_repo.delete_profile(profile_id=job_profile_id)
+    if not deleted:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+    return JobProfileDeleteResponse(deleted=True, job_profile_id=job_profile_id)
 
 
 

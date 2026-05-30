@@ -41,7 +41,8 @@ from src.models.schemas.job_profile import (
     JobProfileUpdateQuestionRequest,
     JobProfileUpdateQuestionResponse,
     JobProfileRegenerateQuestionResponse,
-    JobProfileDeleteQuestionResponse
+    JobProfileDeleteQuestionResponse,
+    JobProfileDeleteResponse
 )
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.file_processor import validate_file
@@ -122,6 +123,25 @@ async def create_job_profile(
     )
     return JobProfileResponse.model_validate(profile)
 
+
+
+@_app.delete(
+    path="/api/v2/job-profiles/{job_profile_id}",
+    response_model=JobProfileDeleteResponse,
+    status_code=200,
+)
+async def delete_job_profile(
+    job_profile_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileDeleteResponse:
+    deleted = await job_profile_repo.delete_profile(profile_id=job_profile_id)
+    if not deleted:
+        raise fastapi.HTTPException(
+            status_code=404,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+    return JobProfileDeleteResponse(deleted=True, job_profile_id=job_profile_id)
 
 
 
@@ -792,6 +812,45 @@ def test_create_job_profile():
 
 
 
+def test_create_job_profile_legacy_aliases():
+    mock_created = MockJobProfileModel(100, "Frontend Engineer", "Builds modern interfaces")
+    _mock_repo.create_profile = AsyncMock(return_value=mock_created)
+
+    # Send legacy key names: "title" and "description"
+    payload = {
+        "title": "Frontend Engineer",
+        "description": "Builds modern interfaces"
+    }
+    response = client.post("/api/v2/job-profiles", json=payload)
+    
+    assert response.status_code == 201
+    data = response.json()
+    assert data["id"] == 100
+    
+    # Assert BOTH the new keys and legacy keys exist exactly in the JSON keys!
+    assert "jobName" in data
+    assert "jobDescription" in data
+    assert "title" in data
+    assert "description" in data
+    
+    # Assert their values are correctly mapped
+    assert data["jobName"] == "Frontend Engineer"
+    assert data["jobDescription"] == "Builds modern interfaces"
+    assert data["title"] == "Frontend Engineer"
+    assert data["description"] == "Builds modern interfaces"
+    
+    _mock_repo.create_profile.assert_called_once_with(
+        job_name="Frontend Engineer",
+        job_description="Builds modern interfaces",
+        company_name=None,
+        experience_level=None,
+        skills=None,
+        additional_context=None
+    )
+
+
+
+
 # 6. POST /api/v2/job-profiles/upload/job-description
 def test_upload_job_description_success():
     file_content = b"pdf job description bytes"
@@ -1315,6 +1374,25 @@ def test_delete_question_not_found():
     response = client.delete("/api/v2/job-profile-questions/999")
     assert response.status_code == 404
     assert "not found" in response.json()["detail"]
+
+
+# 9. DELETE /api/v2/job-profiles/{id}
+def test_delete_job_profile_success():
+    _mock_repo.delete_profile = AsyncMock(return_value=True)
+    response = client.delete("/api/v2/job-profiles/123")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["deleted"] is True
+    assert data["jobProfileId"] == 123
+    _mock_repo.delete_profile.assert_called_once_with(profile_id=123)
+
+
+def test_delete_job_profile_not_found():
+    _mock_repo.delete_profile = AsyncMock(return_value=False)
+    response = client.delete("/api/v2/job-profiles/999")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+    _mock_repo.delete_profile.assert_called_once_with(profile_id=999)
 
 
 
