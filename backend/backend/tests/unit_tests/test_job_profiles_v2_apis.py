@@ -120,6 +120,8 @@ async def create_job_profile(
         experience_level=payload.experience_level,
         skills=payload.skills,
         additional_context=payload.additional_context,
+        category=payload.category,
+        employment_type=payload.employment_type,
     )
     return JobProfileResponse.model_validate(profile)
 
@@ -806,7 +808,9 @@ def test_create_job_profile():
         company_name="Google",
         experience_level="Senior",
         skills=["React", "CSS"],
-        additional_context="Urgent hire"
+        additional_context="Urgent hire",
+        category=None,
+        employment_type=None
     )
 
 
@@ -845,7 +849,9 @@ def test_create_job_profile_legacy_aliases():
         company_name=None,
         experience_level=None,
         skills=None,
-        additional_context=None
+        additional_context=None,
+        category=None,
+        employment_type=None
     )
 
 
@@ -1393,6 +1399,76 @@ def test_delete_job_profile_not_found():
     assert response.status_code == 404
     assert "not found" in response.json()["detail"]
     _mock_repo.delete_profile.assert_called_once_with(profile_id=999)
+
+
+
+
+def test_create_job_profile_figma_metadata():
+    mock_created = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    mock_created.company_name = "Amazon"
+    mock_created.experience_level = "0-2 years"
+    mock_created.skills = ["React", "TypeScript", "Node", "GraphQL"]
+    mock_created.additional_context = "Need strong frontend architecture knowledge"
+    mock_created.category = "Engineering"
+    mock_created.employment_type = "Full-time"
+    
+    # Custom fixed created_at time to assert in the JSON
+    fixed_time = datetime.datetime(2026, 6, 1, 10, 0, 0, tzinfo=datetime.timezone.utc)
+    mock_created.created_at = fixed_time
+
+    _mock_repo.create_profile = AsyncMock(return_value=mock_created)
+
+    payload = {
+        "job_name": "Senior Front-End Developer",
+        "job_description": "Own end-to-end frontend architecture...",
+        "companyName": "Amazon",
+        "experienceLevel": "0-2 years",
+        "category": "Engineering",
+        "employmentType": "Full-time",
+        "skills": ["React", "TypeScript", "Node", "GraphQL"],
+        "additionalContext": "Need strong frontend architecture knowledge"
+    }
+    
+    response = client.post("/api/v2/job-profiles", json=payload)
+    
+    assert response.status_code == 201
+    data = response.json()
+    
+    # Assert exact required response structure and fields
+    assert data["id"] == 123
+    assert data["job_name"] == "Senior Front-End Developer"
+    assert data["job_description"] == "Own end-to-end frontend architecture..."
+    assert data["companyName"] == "Amazon"
+    assert data["experienceLevel"] == "0-2 years"
+    assert data["category"] == "Engineering"
+    assert data["employmentType"] == "Full-time"
+    assert data["skills"] == ["React", "TypeScript", "Node", "GraphQL"]
+    assert data["additionalContext"] == "Need strong frontend architecture knowledge"
+    assert data["createdAt"] == "2026-06-01T10:00:00Z"
+    
+    # Assert senior's compatibility aliases exist exactly in the JSON keys
+    assert "jobName" in data
+    assert "jobDescription" in data
+    assert "title" in data
+    assert "description" in data
+    
+    # Assert values for legacy/senior aliases
+    assert data["jobName"] == "Senior Front-End Developer"
+    assert data["jobDescription"] == "Own end-to-end frontend architecture..."
+    assert data["title"] == "Senior Front-End Developer"
+    assert data["description"] == "Own end-to-end frontend architecture..."
+
+    _mock_repo.create_profile.assert_called_once_with(
+        job_name="Senior Front-End Developer",
+        job_description="Own end-to-end frontend architecture...",
+        company_name="Amazon",
+        experience_level="0-2 years",
+        skills=["React", "TypeScript", "Node", "GraphQL"],
+        additional_context="Need strong frontend architecture knowledge",
+        category="Engineering",
+        employment_type="Full-time"
+    )
+
 
 
 

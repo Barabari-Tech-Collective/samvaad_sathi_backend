@@ -109,6 +109,8 @@ async def create_job_profile(
         experience_level=payload.experience_level,
         skills=payload.skills,
         additional_context=payload.additional_context,
+        category=payload.category,
+        employment_type=payload.employment_type,
     )
     return JobProfileResponse.model_validate(profile)
 

@@ -8,17 +8,24 @@ from src.models.schemas.base import BaseSchemaModel
 class JobProfileBase(BaseSchemaModel):
     job_name: str = pydantic.Field(
         validation_alias=pydantic.AliasChoices("job_name", "jobName", "title"),
-        serialization_alias="jobName"
+        serialization_alias="job_name"
     )
     job_description: Optional[str] = pydantic.Field(
         default=None,
         validation_alias=pydantic.AliasChoices("job_description", "jobDescription", "description"),
-        serialization_alias="jobDescription"
+        serialization_alias="job_description"
     )
     company_name: Optional[str] = None
     experience_level: Optional[str] = None
     skills: Optional[List[str]] = None
     additional_context: Optional[str] = None
+    category: Optional[str] = None
+    employment_type: Optional[str] = pydantic.Field(
+        default=None,
+        alias="employmentType",
+        validation_alias=pydantic.AliasChoices("employmentType", "employment_type"),
+        serialization_alias="employmentType"
+    )
 
 class JobProfileCreateV2(JobProfileBase):
     pass
@@ -26,6 +33,16 @@ class JobProfileCreateV2(JobProfileBase):
 class JobProfileResponse(JobProfileBase):
     id: int
     created_at: datetime.datetime
+
+    @pydantic.computed_field
+    @property
+    def jobName(self) -> str:
+        return self.job_name
+
+    @pydantic.computed_field
+    @property
+    def jobDescription(self) -> Optional[str]:
+        return self.job_description
 
     @pydantic.computed_field
     @property
