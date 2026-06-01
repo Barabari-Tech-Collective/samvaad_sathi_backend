@@ -213,6 +213,44 @@ class JobProfileDeleteQuestionResponse(BaseModel):
     question_id: str
 
 
+# --- Review Summary Schemas ---
+class JobProfileReviewRoleDetails(BaseModel):
+    role_name: str
+    company_name: Optional[str] = None
+    category: Optional[str] = None
+    experience_level: Optional[str] = None
+    employment_type: Optional[str] = None
+    description: Optional[str] = None
+
+class JobProfileReviewJdSummary(BaseModel):
+    extracted_skills: List[str] = []
+    competencies: List[str] = []
+
+class JobProfileReviewPreviewQuestion(BaseModel):
+    question_id: int
+    question: str
+
+class JobProfileReviewLevelInfo(BaseModel):
+    level: int
+    title: str
+    description: str
+    question_count: int
+    preview_questions: List[JobProfileReviewPreviewQuestion] = []
+
+class JobProfileReviewQuestionSummary(BaseModel):
+    total_questions: int
+    total_levels: int
+    levels: List[JobProfileReviewLevelInfo] = []
+
+class JobProfileReviewResponse(BaseModel):
+    job_profile_id: int
+    role_details: JobProfileReviewRoleDetails
+    jd_summary: JobProfileReviewJdSummary
+    question_summary: JobProfileReviewQuestionSummary
+    status: str = "draft"
+
+
+
 
 
 

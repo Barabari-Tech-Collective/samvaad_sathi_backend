@@ -42,7 +42,13 @@ from src.models.schemas.job_profile import (
     JobProfileUpdateQuestionResponse,
     JobProfileRegenerateQuestionResponse,
     JobProfileDeleteQuestionResponse,
-    JobProfileDeleteResponse
+    JobProfileDeleteResponse,
+    JobProfileReviewResponse,
+    JobProfileReviewRoleDetails,
+    JobProfileReviewJdSummary,
+    JobProfileReviewPreviewQuestion,
+    JobProfileReviewLevelInfo,
+    JobProfileReviewQuestionSummary
 )
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.file_processor import validate_file
@@ -124,6 +130,112 @@ async def create_job_profile(
         employment_type=payload.employment_type,
     )
     return JobProfileResponse.model_validate(profile)
+
+
+@_app.get(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileReviewResponse,
+    status_code=200,
+)
+async def get_job_profile_review(
+    job_profile_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileReviewResponse:
+    # 1. Fetch JobProfile record
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=404,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+
+    # 2. Fetch all linked questions
+    questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+
+    # 3. Parse competencies from additional_context
+    competencies = []
+    if profile.additional_context:
+        if "," in profile.additional_context:
+            competencies = [c.strip() for c in profile.additional_context.split(",") if c.strip()]
+        elif "\n" in profile.additional_context:
+            competencies = [c.strip() for c in profile.additional_context.split("\n") if c.strip()]
+        else:
+            competencies = [profile.additional_context.strip()]
+
+    # 4. Map role details
+    role_details = JobProfileReviewRoleDetails(
+        role_name=profile.job_name,
+        company_name=profile.company_name,
+        category=profile.category,
+        experience_level=profile.experience_level,
+        employment_type=profile.employment_type,
+        description=profile.job_description
+    )
+
+    # 5. Map JD summary
+    jd_summary = JobProfileReviewJdSummary(
+        extracted_skills=profile.skills or [],
+        competencies=competencies
+    )
+
+    # 6. Map levels static titles and descriptions
+    LEVEL_METADATA = {
+        1: {
+            "title": "General Fundamentals",
+            "description": "Basic concepts and foundational knowledge questions."
+        },
+        2: {
+            "title": "Project & Resume Based",
+            "description": "Questions based on resume projects and practical implementation."
+        },
+        3: {
+            "title": "Production & Scenario Based",
+            "description": "Production-level debugging and real-world problem-solving questions."
+        },
+        4: {
+            "title": "Advanced / Pressure Scenarios",
+            "description": "High-pressure and advanced real-world interview situations."
+        }
+    }
+
+    levels_list = []
+    for lvl in [1, 2, 3, 4]:
+        meta = LEVEL_METADATA[lvl]
+        lvl_questions = [q for q in questions if q.level == lvl]
+        
+        # Get first 3 questions as preview questions
+        preview = [
+            JobProfileReviewPreviewQuestion(question_id=q.id, question=q.question_text)
+            for q in lvl_questions[:3]
+        ]
+        
+        levels_list.append(JobProfileReviewLevelInfo(
+            level=lvl,
+            title=meta["title"],
+            description=meta["description"],
+            question_count=len(lvl_questions),
+            preview_questions=preview
+        ))
+
+    # 7. Calculate totals
+    total_questions = len(questions)
+    total_levels = sum(1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions))
+
+    question_summary = JobProfileReviewQuestionSummary(
+        total_questions=total_questions,
+        total_levels=total_levels,
+        levels=levels_list
+    )
+
+    return JobProfileReviewResponse(
+        job_profile_id=job_profile_id,
+        role_details=role_details,
+        jd_summary=jd_summary,
+        question_summary=question_summary,
+        status="draft"
+    )
+
 
 
 
@@ -1468,6 +1580,124 @@ def test_create_job_profile_figma_metadata():
         category="Engineering",
         employment_type="Full-time"
     )
+
+
+def test_get_job_profile_review_success():
+    # 1. Setup mock job profile
+    profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    profile.company_name = "Amazon"
+    profile.category = "Engineering"
+    profile.experience_level = "4-6 years"
+    profile.employment_type = "Full-time"
+    profile.skills = ["React", "TypeScript", "GraphQL", "Performance"]
+    profile.additional_context = "Systems thinking, Stakeholder communication, Production ownership"
+    
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    # 2. Setup mock questions
+    class MockQuestion:
+        def __init__(self, id, question_text, level):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+
+    mock_qs = [
+        # Level 1 (5 questions - preview only first 3)
+        MockQuestion(1, "Q1", 1),
+        MockQuestion(2, "Q2", 1),
+        MockQuestion(3, "Q3", 1),
+        MockQuestion(4, "Q4", 1),
+        MockQuestion(5, "Q5", 1),
+        # Level 2 (1 question)
+        MockQuestion(6, "Q6", 2),
+        # Level 4 (2 questions)
+        MockQuestion(7, "Q7", 4),
+        MockQuestion(8, "Q8", 4),
+    ]
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=mock_qs)
+
+    response = client.get("/api/v2/job-profiles/123/review")
+    assert response.status_code == 200
+    data = response.json()
+
+    # 3. Assert JSON structure & keys
+    assert data["job_profile_id"] == 123
+    assert data["status"] == "draft"
+
+    # 4. Assert role details mapping
+    assert data["role_details"]["role_name"] == "Senior Front-End Developer"
+    assert data["role_details"]["company_name"] == "Amazon"
+    assert data["role_details"]["category"] == "Engineering"
+    assert data["role_details"]["experience_level"] == "4-6 years"
+    assert data["role_details"]["employment_type"] == "Full-time"
+    assert data["role_details"]["description"] == "Own end-to-end frontend architecture..."
+
+    # 5. Assert JD Summary mapping
+    assert data["jd_summary"]["extracted_skills"] == ["React", "TypeScript", "GraphQL", "Performance"]
+    assert data["jd_summary"]["competencies"] == ["Systems thinking", "Stakeholder communication", "Production ownership"]
+
+    # 6. Assert totals
+    assert data["question_summary"]["total_questions"] == 8
+    assert data["question_summary"]["total_levels"] == 3 # Levels 1, 2, 4 have questions
+
+    # 7. Assert levels details & preview limits
+    levels = data["question_summary"]["levels"]
+    assert len(levels) == 4 # Always returns 4 levels
+
+    # Level 1
+    assert levels[0]["level"] == 1
+    assert levels[0]["question_count"] == 5
+    assert len(levels[0]["preview_questions"]) == 3 # Limit to first 3
+    assert levels[0]["preview_questions"][0]["question_id"] == 1
+    assert levels[0]["preview_questions"][0]["question"] == "Q1"
+
+    # Level 2
+    assert levels[1]["level"] == 2
+    assert levels[1]["question_count"] == 1
+    assert len(levels[1]["preview_questions"]) == 1
+
+    # Level 3
+    assert levels[2]["level"] == 3
+    assert levels[2]["question_count"] == 0
+    assert len(levels[2]["preview_questions"]) == 0
+
+    # Level 4
+    assert levels[3]["level"] == 4
+    assert levels[3]["question_count"] == 2
+    assert len(levels[3]["preview_questions"]) == 2
+
+    _mock_repo.get_by_id.assert_called_once_with(job_profile_id=123)
+    _mock_repo.get_job_profile_questions.assert_called_once_with(job_profile_id=123)
+
+
+def test_get_job_profile_review_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    response = client.get("/api/v2/job-profiles/999/review")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_get_job_profile_review_empty_questions():
+    profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    profile.company_name = None
+    profile.category = None
+    profile.experience_level = None
+    profile.employment_type = None
+    profile.skills = None
+    profile.additional_context = None
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=[])
+
+    response = client.get("/api/v2/job-profiles/123/review")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["question_summary"]["total_questions"] == 0
+    assert data["question_summary"]["total_levels"] == 0
+    for level_info in data["question_summary"]["levels"]:
+        assert level_info["question_count"] == 0
+        assert level_info["preview_questions"] == []
+
 
 
 

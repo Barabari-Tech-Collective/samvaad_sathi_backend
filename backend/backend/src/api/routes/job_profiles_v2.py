@@ -25,7 +25,13 @@ from src.models.schemas.job_profile import (
     JobProfileUpdateQuestionResponse,
     JobProfileRegenerateQuestionResponse,
     JobProfileDeleteQuestionResponse,
-    JobProfileDeleteResponse
+    JobProfileDeleteResponse,
+    JobProfileReviewResponse,
+    JobProfileReviewRoleDetails,
+    JobProfileReviewJdSummary,
+    JobProfileReviewPreviewQuestion,
+    JobProfileReviewLevelInfo,
+    JobProfileReviewQuestionSummary
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
@@ -113,6 +119,114 @@ async def create_job_profile(
         employment_type=payload.employment_type,
     )
     return JobProfileResponse.model_validate(profile)
+
+
+@router.get(
+    path="/job-profiles/{job_profile_id}/review",
+    name="job-profiles:get-review",
+    response_model=JobProfileReviewResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Get Job Profile Review Summary for Step 5",
+)
+async def get_job_profile_review(
+    job_profile_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileReviewResponse:
+    # 1. Fetch JobProfile record
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+
+    # 2. Fetch all linked questions
+    questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+
+    # 3. Parse competencies from additional_context
+    competencies = []
+    if profile.additional_context:
+        if "," in profile.additional_context:
+            competencies = [c.strip() for c in profile.additional_context.split(",") if c.strip()]
+        elif "\n" in profile.additional_context:
+            competencies = [c.strip() for c in profile.additional_context.split("\n") if c.strip()]
+        else:
+            competencies = [profile.additional_context.strip()]
+
+    # 4. Map role details
+    role_details = JobProfileReviewRoleDetails(
+        role_name=profile.job_name,
+        company_name=profile.company_name,
+        category=profile.category,
+        experience_level=profile.experience_level,
+        employment_type=profile.employment_type,
+        description=profile.job_description
+    )
+
+    # 5. Map JD summary
+    jd_summary = JobProfileReviewJdSummary(
+        extracted_skills=profile.skills or [],
+        competencies=competencies
+    )
+
+    # 6. Map levels static titles and descriptions
+    LEVEL_METADATA = {
+        1: {
+            "title": "General Fundamentals",
+            "description": "Basic concepts and foundational knowledge questions."
+        },
+        2: {
+            "title": "Project & Resume Based",
+            "description": "Questions based on resume projects and practical implementation."
+        },
+        3: {
+            "title": "Production & Scenario Based",
+            "description": "Production-level debugging and real-world problem-solving questions."
+        },
+        4: {
+            "title": "Advanced / Pressure Scenarios",
+            "description": "High-pressure and advanced real-world interview situations."
+        }
+    }
+
+    levels_list = []
+    for lvl in [1, 2, 3, 4]:
+        meta = LEVEL_METADATA[lvl]
+        lvl_questions = [q for q in questions if q.level == lvl]
+        
+        # Get first 3 questions as preview questions
+        preview = [
+            JobProfileReviewPreviewQuestion(question_id=q.id, question=q.question_text)
+            for q in lvl_questions[:3]
+        ]
+        
+        levels_list.append(JobProfileReviewLevelInfo(
+            level=lvl,
+            title=meta["title"],
+            description=meta["description"],
+            question_count=len(lvl_questions),
+            preview_questions=preview
+        ))
+
+    # 7. Calculate totals
+    total_questions = len(questions)
+    total_levels = sum(1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions))
+
+    question_summary = JobProfileReviewQuestionSummary(
+        total_questions=total_questions,
+        total_levels=total_levels,
+        levels=levels_list
+    )
+
+    return JobProfileReviewResponse(
+        job_profile_id=job_profile_id,
+        role_details=role_details,
+        jd_summary=jd_summary,
+        question_summary=question_summary,
+        status="draft"
+    )
+
 
 
 
