@@ -250,6 +250,18 @@ class JobProfileReviewResponse(BaseModel):
     status: str = "draft"
 
 
+# --- Submit Role Schemas ---
+class JobProfileSubmitResponse(BaseModel):
+    job_profile_id: int
+    job_name: str
+    status: str
+    submitted_at: datetime.datetime
+    total_questions: int
+    total_levels: int
+    message: str = "Role submitted successfully"
+
+
+
 
 
 

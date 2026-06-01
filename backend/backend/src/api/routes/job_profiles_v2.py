@@ -31,7 +31,8 @@ from src.models.schemas.job_profile import (
     JobProfileReviewJdSummary,
     JobProfileReviewPreviewQuestion,
     JobProfileReviewLevelInfo,
-    JobProfileReviewQuestionSummary
+    JobProfileReviewQuestionSummary,
+    JobProfileSubmitResponse
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
@@ -226,6 +227,55 @@ async def get_job_profile_review(
         question_summary=question_summary,
         status="draft"
     )
+
+
+@router.post(
+    path="/job-profiles/{job_profile_id}/submit",
+    name="job-profiles:submit",
+    response_model=JobProfileSubmitResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Submit a Job Profile for review",
+)
+async def submit_job_profile(
+    job_profile_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileSubmitResponse:
+    # 1. Fetch JobProfile record
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="Job profile not found"
+        )
+
+    # 2. Fetch all linked questions
+    questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+
+    # 3. Validate generated questions exist
+    if not questions:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Cannot submit role without generated questions"
+        )
+
+    # 4. Submit the profile (updates status to 'under_review' and saves current timestamp)
+    updated_profile = await job_profile_repo.submit_profile(job_profile_id=job_profile_id)
+
+    # 5. Calculate counts
+    total_questions = len(questions)
+    total_levels = sum(1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions))
+
+    return JobProfileSubmitResponse(
+        job_profile_id=updated_profile.id,
+        job_name=updated_profile.job_name,
+        status=updated_profile.status,
+        submitted_at=updated_profile.submitted_at,
+        total_questions=total_questions,
+        total_levels=total_levels,
+        message="Role submitted successfully"
+    )
+
 
 
 

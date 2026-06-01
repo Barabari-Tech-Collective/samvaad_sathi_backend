@@ -48,7 +48,8 @@ from src.models.schemas.job_profile import (
     JobProfileReviewJdSummary,
     JobProfileReviewPreviewQuestion,
     JobProfileReviewLevelInfo,
-    JobProfileReviewQuestionSummary
+    JobProfileReviewQuestionSummary,
+    JobProfileSubmitResponse
 )
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.file_processor import validate_file
@@ -235,6 +236,53 @@ async def get_job_profile_review(
         question_summary=question_summary,
         status="draft"
     )
+
+
+@_app.post(
+    path="/api/v2/job-profiles/{job_profile_id}/submit",
+    response_model=JobProfileSubmitResponse,
+    status_code=200,
+)
+async def submit_job_profile(
+    job_profile_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileSubmitResponse:
+    # 1. Fetch JobProfile record
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=404,
+            detail="Job profile not found"
+        )
+
+    # 2. Fetch all linked questions
+    questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+
+    # 3. Validate generated questions exist
+    if not questions:
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="Cannot submit role without generated questions"
+        )
+
+    # 4. Submit the profile (updates status to 'under_review' and saves current timestamp)
+    updated_profile = await job_profile_repo.submit_profile(job_profile_id=job_profile_id)
+
+    # 5. Calculate counts
+    total_questions = len(questions)
+    total_levels = sum(1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions))
+
+    return JobProfileSubmitResponse(
+        job_profile_id=updated_profile.id,
+        job_name=updated_profile.job_name,
+        status=updated_profile.status,
+        submitted_at=updated_profile.submitted_at,
+        total_questions=total_questions,
+        total_levels=total_levels,
+        message="Role submitted successfully"
+    )
+
 
 
 
@@ -1697,6 +1745,66 @@ def test_get_job_profile_review_empty_questions():
     for level_info in data["question_summary"]["levels"]:
         assert level_info["question_count"] == 0
         assert level_info["preview_questions"] == []
+
+
+def test_submit_job_profile_success():
+    # 1. Setup mock job profile
+    profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    profile.status = "draft"
+    profile.submitted_at = None
+    
+    # 2. Setup submitted/updated profile mock
+    updated_profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    updated_profile.status = "under_review"
+    fixed_time = datetime.datetime(2026, 6, 1, 12, 30, 0, tzinfo=datetime.timezone.utc)
+    updated_profile.submitted_at = fixed_time
+    
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.submit_profile = AsyncMock(return_value=updated_profile)
+
+    # 3. Setup mock questions (at least 1 question must exist)
+    class MockQuestion:
+        def __init__(self, id, level):
+            self.id = id
+            self.level = level
+
+    mock_qs = [MockQuestion(1, 1)]
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=mock_qs)
+
+    response = client.post("/api/v2/job-profiles/123/submit")
+    assert response.status_code == 200
+    data = response.json()
+
+    # 4. Assert response payload
+    assert data["job_profile_id"] == 123
+    assert data["job_name"] == "Senior Front-End Developer"
+    assert data["status"] == "under_review"
+    assert data["submitted_at"] == "2026-06-01T12:30:00Z"
+    assert data["total_questions"] == 1
+    assert data["total_levels"] == 1
+    assert data["message"] == "Role submitted successfully"
+
+    _mock_repo.get_by_id.assert_called_once_with(job_profile_id=123)
+    _mock_repo.get_job_profile_questions.assert_called_once_with(job_profile_id=123)
+    _mock_repo.submit_profile.assert_called_once_with(job_profile_id=123)
+
+
+def test_submit_job_profile_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    response = client.post("/api/v2/job-profiles/999/submit")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_submit_job_profile_no_questions():
+    profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=[])
+
+    response = client.post("/api/v2/job-profiles/123/submit")
+    assert response.status_code == 400
+    assert "Cannot submit role without generated questions" in response.json()["detail"]
+
 
 
 

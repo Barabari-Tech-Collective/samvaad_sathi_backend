@@ -203,6 +203,20 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         await self.async_session.delete(question)
         await self.async_session.commit()
 
+    async def submit_profile(self, *, job_profile_id: int) -> Optional[JobProfile]:
+        import datetime
+        profile = await self.get_by_id(job_profile_id=job_profile_id)
+        if not profile:
+            return None
+        
+        profile.status = "under_review"
+        profile.submitted_at = datetime.datetime.now(datetime.timezone.utc)
+        self.async_session.add(profile)
+        await self.async_session.commit()
+        await self.async_session.refresh(profile)
+        return profile
+
+
 
 
 
