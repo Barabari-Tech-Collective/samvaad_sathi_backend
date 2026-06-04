@@ -64,6 +64,19 @@ async def generate_ats_analysis(
 
         # Convert JSON string to Python dict
         parsed_response = json.loads(ai_response)
+        # LOGICAL PATCH (DESIGNER VS TECH TRACK SAFETY HANDLER)
+
+        if "skillsAnalysis" in parsed_response:
+            sa = parsed_response["skillsAnalysis"]
+            sa["strongSkills"] = [str(s).strip() for s in sa.get("strongSkills", [])]
+            sa["missingSkills"] = [str(s).strip() for s in sa.get("missingSkills", [])]
+            sa["deprioritizedSkills"] = [str(s).strip() for s in sa.get("deprioritizedSkills", [])]
+
+        # If it's a UI/UX/Product/Graphic design role, force bypass Github checks
+        is_design_track = any(k in target_role.lower() for k in ["design", "ui", "ux", "graphics", "product designer"])
+        if is_design_track and "hygieneCheck" in parsed_response:
+            # Force true so that the frontend checklist shows a green check instead of an error icon
+            parsed_response["hygieneCheck"]["hasGithub"] = True
 
         # Add analysisId
         parsed_response["analysisId"] = str(uuid.uuid4())
