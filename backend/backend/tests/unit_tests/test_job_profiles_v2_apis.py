@@ -486,7 +486,11 @@ async def generate_questions_v2(
                 "level": l.level,
                 "difficulty": difficulty,
                 "question_type": item.get("category", "theoretical"),
-                "is_ai_generated": True
+                "is_ai_generated": True,
+                "keywords": item.get("keywords") or [],
+                "concepts_covered": item.get("concepts_covered") or [],
+                "expected_answer": item.get("expected_answer"),
+                "example_output": item.get("example_output"),
             })
 
     # 5. Save generated questions into database
@@ -500,7 +504,11 @@ async def generate_questions_v2(
             level=q.level,
             difficulty=q.difficulty,
             type=q.question_type,
-            is_ai_generated=q.is_ai_generated
+            is_ai_generated=q.is_ai_generated,
+            keywords=getattr(q, "keywords", []) or [],
+            concepts_covered=getattr(q, "concepts_covered", []) or [],
+            expected_answer=getattr(q, "expected_answer", None),
+            example_output=getattr(q, "example_output", None),
         )
         for q in db_questions
     ]
@@ -560,6 +568,10 @@ async def get_job_profile_questions_v2(
             type=q.question_type,
             is_ai_generated=q.is_ai_generated,
             created_at=q.created_at,
+            keywords=getattr(q, "keywords", []) or [],
+            concepts_covered=getattr(q, "concepts_covered", []) or [],
+            expected_answer=getattr(q, "expected_answer", None),
+            example_output=getattr(q, "example_output", None),
         )
         for q in db_questions
     ]
@@ -614,6 +626,10 @@ async def add_job_profile_question_v2(
         difficulty=payload.difficulty,
         question_type=payload.type,
         is_ai_generated=payload.is_ai_generated,
+        keywords=payload.keywords or [],
+        concepts_covered=payload.concepts_covered or [],
+        expected_answer=payload.expected_answer,
+        example_output=payload.example_output,
     )
 
     # 5. Return created question
@@ -626,6 +642,10 @@ async def add_job_profile_question_v2(
         type=db_question.question_type,
         is_ai_generated=db_question.is_ai_generated,
         message="Question added successfully",
+        keywords=getattr(db_question, "keywords", []) or [],
+        concepts_covered=getattr(db_question, "concepts_covered", []) or [],
+        expected_answer=getattr(db_question, "expected_answer", None),
+        example_output=getattr(db_question, "example_output", None),
     )
 
 
@@ -674,6 +694,18 @@ async def update_job_profile_question_v2(
     if payload.type is not None:
         update_data["question_type"] = payload.type
 
+    if payload.keywords is not None:
+        update_data["keywords"] = payload.keywords
+
+    if payload.concepts_covered is not None:
+        update_data["concepts_covered"] = payload.concepts_covered
+
+    if payload.expected_answer is not None:
+        update_data["expected_answer"] = payload.expected_answer
+
+    if payload.example_output is not None:
+        update_data["example_output"] = payload.example_output
+
     # 4. Save updated question
     updated_question = await job_profile_repo.update_job_profile_question(
         question=question,
@@ -689,6 +721,10 @@ async def update_job_profile_question_v2(
         type=updated_question.question_type,
         is_ai_generated=updated_question.is_ai_generated,
         message="Question updated successfully",
+        keywords=getattr(updated_question, "keywords", []) or [],
+        concepts_covered=getattr(updated_question, "concepts_covered", []) or [],
+        expected_answer=getattr(updated_question, "expected_answer", None),
+        example_output=getattr(updated_question, "example_output", None),
     )
 
 
@@ -788,11 +824,15 @@ async def regenerate_job_profile_question_v2(
 
     new_item = structured_items[0]
 
-    # 6. Replace and update old question text
+    # 6. Replace and update old question text and detail fields
     update_data = {
         "question_text": new_item["text"],
         "question_type": new_item.get("category", "theoretical"),
-        "is_ai_generated": True
+        "is_ai_generated": True,
+        "keywords": new_item.get("keywords") or [],
+        "concepts_covered": new_item.get("concepts_covered") or [],
+        "expected_answer": new_item.get("expected_answer"),
+        "example_output": new_item.get("example_output"),
     }
     updated_question = await job_profile_repo.update_job_profile_question(
         question=question,
@@ -808,6 +848,10 @@ async def regenerate_job_profile_question_v2(
         type=updated_question.question_type,
         is_ai_generated=updated_question.is_ai_generated,
         message="Question regenerated successfully",
+        keywords=getattr(updated_question, "keywords", []) or [],
+        concepts_covered=getattr(updated_question, "concepts_covered", []) or [],
+        expected_answer=getattr(updated_question, "expected_answer", None),
+        example_output=getattr(updated_question, "example_output", None),
     )
 
 
@@ -1804,6 +1848,174 @@ def test_submit_job_profile_no_questions():
     response = client.post("/api/v2/job-profiles/123/submit")
     assert response.status_code == 400
     assert "Cannot submit role without generated questions" in response.json()["detail"]
+
+
+# 10. Expanded Question Card Details Tests
+def test_get_questions_with_expanded_details():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    class MockQuestionWithDetails:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated, created_at, keywords, concepts_covered, expected_answer, example_output):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+            self.created_at = created_at
+            self.keywords = keywords
+            self.concepts_covered = concepts_covered
+            self.expected_answer = expected_answer
+            self.example_output = example_output
+
+    t1 = datetime.datetime(2026, 5, 26, 10, 0, 0, tzinfo=datetime.timezone.utc)
+    db_questions = [
+        MockQuestionWithDetails(
+            id=1,
+            job_profile_id=123,
+            question_text="Question 1",
+            level=1,
+            difficulty="easy",
+            question_type="tech",
+            is_ai_generated=True,
+            created_at=t1,
+            keywords=["FastAPI", "Uvicorn"],
+            concepts_covered=["Web server", "ASGI"],
+            expected_answer="FastAPI is an ASGI framework...",
+            example_output="{'status': 'ok'}"
+        )
+    ]
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=db_questions)
+
+    response = client.get("/api/v2/job-profiles/123/questions")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["questions"]) == 1
+    q = data["questions"][0]
+    assert q["keywords"] == ["FastAPI", "Uvicorn"]
+    assert q["concepts_covered"] == ["Web server", "ASGI"]
+    assert q["expected_answer"] == "FastAPI is an ASGI framework..."
+    assert q["example_output"] == "{'status': 'ok'}"
+
+
+def test_add_question_with_expanded_details():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    class MockQuestionWithDetails:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated, keywords, concepts_covered, expected_answer, example_output):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+            self.keywords = keywords
+            self.concepts_covered = concepts_covered
+            self.expected_answer = expected_answer
+            self.example_output = example_output
+
+    created_q = MockQuestionWithDetails(
+        id=51,
+        job_profile_id=123,
+        question_text="Explain closures in JavaScript.",
+        level=2,
+        difficulty="medium",
+        question_type="theoretical",
+        is_ai_generated=False,
+        keywords=["Closures", "Scope"],
+        concepts_covered=["Lexical environment"],
+        expected_answer="A closure is a function...",
+        example_output="function outer() { ... }"
+    )
+    _mock_repo.add_job_profile_question = AsyncMock(return_value=created_q)
+
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False,
+        "keywords": ["Closures", "Scope"],
+        "concepts_covered": ["Lexical environment"],
+        "expected_answer": "A closure is a function...",
+        "example_output": "function outer() { ... }"
+    }
+
+    response = client.post("/api/v2/job-profiles/123/questions", json=payload)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["question_id"] == "51"
+    assert data["keywords"] == ["Closures", "Scope"]
+    assert data["concepts_covered"] == ["Lexical environment"]
+    assert data["expected_answer"] == "A closure is a function..."
+    assert data["example_output"] == "function outer() { ... }"
+
+
+def test_update_question_with_expanded_details():
+    class MockQuestionWithDetails:
+        def __init__(self, id, question_text, level, difficulty, question_type, is_ai_generated, keywords, concepts_covered, expected_answer, example_output):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+            self.keywords = keywords
+            self.concepts_covered = concepts_covered
+            self.expected_answer = expected_answer
+            self.example_output = example_output
+
+    existing_q = MockQuestionWithDetails(
+        id=1,
+        question_text="Old question text",
+        level=1,
+        difficulty="easy",
+        question_type="theoretical",
+        is_ai_generated=True,
+        keywords=[],
+        concepts_covered=[],
+        expected_answer=None,
+        example_output=None
+    )
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    updated_q = MockQuestionWithDetails(
+        id=1,
+        question_text="Explain closures in JavaScript.",
+        level=2,
+        difficulty="medium",
+        question_type="theoretical",
+        is_ai_generated=True,
+        keywords=["Closures"],
+        concepts_covered=["Scope"],
+        expected_answer="Closure answer",
+        example_output="Closure output"
+    )
+    _mock_repo.update_job_profile_question = AsyncMock(return_value=updated_q)
+
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "keywords": ["Closures"],
+        "concepts_covered": ["Scope"],
+        "expected_answer": "Closure answer",
+        "example_output": "Closure output"
+    }
+
+    response = client.patch("/api/v2/job-profile-questions/1", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["question_id"] == "1"
+    assert data["keywords"] == ["Closures"]
+    assert data["concepts_covered"] == ["Scope"]
+    assert data["expected_answer"] == "Closure answer"
+    assert data["example_output"] == "Closure output"
 
 
 

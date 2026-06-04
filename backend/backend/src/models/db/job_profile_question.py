@@ -5,6 +5,8 @@ from sqlalchemy.orm import Mapped as SQLAlchemyMapped, mapped_column as sqlalche
 from sqlalchemy.sql import functions as sqlalchemy_functions
 from src.repository.table import Base
 
+from sqlalchemy.dialects.postgresql import JSONB
+
 class JobProfileQuestion(Base):  # type: ignore
     __tablename__ = "job_profile_question"
 
@@ -17,6 +19,10 @@ class JobProfileQuestion(Base):  # type: ignore
     difficulty: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(length=32), nullable=False, index=True)
     question_type: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(length=64), nullable=False, default="theoretical")
     is_ai_generated: SQLAlchemyMapped[bool] = sqlalchemy_mapped_column(sqlalchemy.Boolean, nullable=False, default=True)
+    keywords: SQLAlchemyMapped[list[str] | None] = sqlalchemy_mapped_column(JSONB, nullable=True, default=list, server_default="[]")
+    concepts_covered: SQLAlchemyMapped[list[str] | None] = sqlalchemy_mapped_column(JSONB, nullable=True, default=list, server_default="[]")
+    expected_answer: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
+    example_output: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True), nullable=False, server_default=sqlalchemy_functions.now()
     )
@@ -24,3 +30,4 @@ class JobProfileQuestion(Base):  # type: ignore
     job_profile = relationship("JobProfile")
 
     __mapper_args__ = {"eager_defaults": True}
+

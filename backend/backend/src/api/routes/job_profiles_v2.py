@@ -475,35 +475,55 @@ async def generate_questions_v2(
             "experience_level": profile.experience_level,
         }
 
-        logger.info(
-            f"Generating {l.count} questions for Job Profile {job_profile_id} at Level {l.level} ({difficulty})"
-        )
+        # Senior instruction: Make multiple smaller LLM calls to prevent large call failures (e.g. batch size of 5)
+        remaining = l.count
+        batch_size = 5
+        level_generated_items = []
 
-        questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
-            track=track,
-            context_text=context_text,
-            count=l.count,
-            difficulty=difficulty,
-            syllabus_topics=topics,
-            ratio=ratio,
-            influence=influence,
-        )
+        while remaining > 0:
+            current_batch = min(remaining, batch_size)
+            current_influence = dict(influence)
+            if level_generated_items:
+                current_influence["exclude_questions"] = [
+                    item["text"] for item in level_generated_items
+                ]
 
-        if error or not structured_items:
-            logger.error(f"Failed to generate questions for Level {l.level}: {error}")
-            raise fastapi.HTTPException(
-                status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to generate questions for Level {l.level}: {error or 'No questions generated'}"
+            logger.info(
+                f"Generating batch of {current_batch} questions (remaining: {remaining}) for Job Profile {job_profile_id} at Level {l.level} ({difficulty})"
             )
 
-        for item in structured_items:
+            questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
+                track=track,
+                context_text=context_text,
+                count=current_batch,
+                difficulty=difficulty,
+                syllabus_topics=topics,
+                ratio=ratio,
+                influence=current_influence,
+            )
+
+            if error or not structured_items:
+                logger.error(f"Failed to generate questions batch for Level {l.level}: {error}")
+                raise fastapi.HTTPException(
+                    status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to generate questions for Level {l.level}: {error or 'No questions generated'}"
+                )
+
+            level_generated_items.extend(structured_items)
+            remaining -= current_batch
+
+        for item in level_generated_items:
             generated_questions_data.append({
                 "job_profile_id": profile.id,
                 "question_text": item["text"],
                 "level": l.level,
                 "difficulty": difficulty,
                 "question_type": item.get("category", "theoretical"),
-                "is_ai_generated": True
+                "is_ai_generated": True,
+                "keywords": item.get("keywords") or [],
+                "concepts_covered": item.get("concepts_covered") or [],
+                "expected_answer": item.get("expected_answer"),
+                "example_output": item.get("example_output"),
             })
 
     # 5. Save generated questions into database
@@ -517,7 +537,11 @@ async def generate_questions_v2(
             level=q.level,
             difficulty=q.difficulty,
             type=q.question_type,
-            is_ai_generated=q.is_ai_generated
+            is_ai_generated=q.is_ai_generated,
+            keywords=getattr(q, "keywords", []) or [],
+            concepts_covered=getattr(q, "concepts_covered", []) or [],
+            expected_answer=getattr(q, "expected_answer", None),
+            example_output=getattr(q, "example_output", None),
         )
         for q in db_questions
     ]
@@ -534,7 +558,7 @@ async def generate_questions_v2(
     name="job-profiles:get-questions",
     response_model=JobProfileQuestionsListResponse,
     status_code=fastapi.status.HTTP_200_OK,
-    summary="Get all generated questions for a job profile",
+    summary="Get all questions (AI and custom) for a job profile",
 )
 async def get_job_profile_questions_v2(
     job_profile_id: int,
@@ -579,6 +603,10 @@ async def get_job_profile_questions_v2(
             type=q.question_type,
             is_ai_generated=q.is_ai_generated,
             created_at=q.created_at,
+            keywords=getattr(q, "keywords", []) or [],
+            concepts_covered=getattr(q, "concepts_covered", []) or [],
+            expected_answer=getattr(q, "expected_answer", None),
+            example_output=getattr(q, "example_output", None),
         )
         for q in db_questions
     ]
@@ -635,6 +663,10 @@ async def add_job_profile_question_v2(
         difficulty=payload.difficulty,
         question_type=payload.type,
         is_ai_generated=payload.is_ai_generated,
+        keywords=payload.keywords or [],
+        concepts_covered=payload.concepts_covered or [],
+        expected_answer=payload.expected_answer,
+        example_output=payload.example_output,
     )
 
     # 5. Return created question
@@ -647,6 +679,10 @@ async def add_job_profile_question_v2(
         type=db_question.question_type,
         is_ai_generated=db_question.is_ai_generated,
         message="Question added successfully",
+        keywords=getattr(db_question, "keywords", []) or [],
+        concepts_covered=getattr(db_question, "concepts_covered", []) or [],
+        expected_answer=getattr(db_question, "expected_answer", None),
+        example_output=getattr(db_question, "example_output", None),
     )
 
 
@@ -697,6 +733,18 @@ async def update_job_profile_question_v2(
     if payload.type is not None:
         update_data["question_type"] = payload.type
 
+    if payload.keywords is not None:
+        update_data["keywords"] = payload.keywords
+
+    if payload.concepts_covered is not None:
+        update_data["concepts_covered"] = payload.concepts_covered
+
+    if payload.expected_answer is not None:
+        update_data["expected_answer"] = payload.expected_answer
+
+    if payload.example_output is not None:
+        update_data["example_output"] = payload.example_output
+
     # 4. Save updated question
     updated_question = await job_profile_repo.update_job_profile_question(
         question=question,
@@ -712,6 +760,10 @@ async def update_job_profile_question_v2(
         type=updated_question.question_type,
         is_ai_generated=updated_question.is_ai_generated,
         message="Question updated successfully",
+        keywords=getattr(updated_question, "keywords", []) or [],
+        concepts_covered=getattr(updated_question, "concepts_covered", []) or [],
+        expected_answer=getattr(updated_question, "expected_answer", None),
+        example_output=getattr(updated_question, "example_output", None),
     )
 
 
@@ -810,11 +862,15 @@ async def regenerate_job_profile_question_v2(
 
     new_item = structured_items[0]
 
-    # 6. Replace and update old question text
+    # 6. Replace and update old question text and detail fields
     update_data = {
         "question_text": new_item["text"],
         "question_type": new_item.get("category", "theoretical"),
-        "is_ai_generated": True
+        "is_ai_generated": True,
+        "keywords": new_item.get("keywords") or [],
+        "concepts_covered": new_item.get("concepts_covered") or [],
+        "expected_answer": new_item.get("expected_answer"),
+        "example_output": new_item.get("example_output"),
     }
     updated_question = await job_profile_repo.update_job_profile_question(
         question=question,
@@ -830,6 +886,10 @@ async def regenerate_job_profile_question_v2(
         type=updated_question.question_type,
         is_ai_generated=updated_question.is_ai_generated,
         message="Question regenerated successfully",
+        keywords=getattr(updated_question, "keywords", []) or [],
+        concepts_covered=getattr(updated_question, "concepts_covered", []) or [],
+        expected_answer=getattr(updated_question, "expected_answer", None),
+        example_output=getattr(updated_question, "example_output", None),
     )
 
 

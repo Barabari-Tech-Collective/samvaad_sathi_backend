@@ -130,6 +130,10 @@ class JobProfileGeneratedQuestionItem(BaseModel):
     difficulty: str
     type: str
     is_ai_generated: bool
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
 
 class JobProfileGenerateQuestionsResponse(BaseModel):
     job_profile_id: str
@@ -152,6 +156,10 @@ class JobProfileQuestionItem(BaseModel):
     type: str
     is_ai_generated: bool
     created_at: datetime.datetime
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
 
 class JobProfileQuestionsListResponse(BaseModel):
     job_profile_id: str
@@ -167,6 +175,10 @@ class JobProfileAddQuestionRequest(BaseModel):
     difficulty: str
     type: str = "theoretical"
     is_ai_generated: bool = False
+    keywords: Optional[List[str]] = []
+    concepts_covered: Optional[List[str]] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
 
 class JobProfileAddQuestionResponse(BaseModel):
     question_id: str
@@ -177,6 +189,10 @@ class JobProfileAddQuestionResponse(BaseModel):
     type: str
     is_ai_generated: bool
     message: str
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
 
 
 # --- Update Question Schemas ---
@@ -185,6 +201,10 @@ class JobProfileUpdateQuestionRequest(BaseModel):
     level: Optional[int] = None
     difficulty: Optional[str] = None
     type: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    concepts_covered: Optional[List[str]] = None
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
 
 class JobProfileUpdateQuestionResponse(BaseModel):
     question_id: str
@@ -194,6 +214,10 @@ class JobProfileUpdateQuestionResponse(BaseModel):
     type: str
     is_ai_generated: bool
     message: str
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
 
 
 # --- Regenerate Question Schemas ---
@@ -205,6 +229,10 @@ class JobProfileRegenerateQuestionResponse(BaseModel):
     type: str
     is_ai_generated: bool
     message: str
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
 
 
 # --- Delete Question Schemas ---

@@ -141,7 +141,11 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
                 level=q["level"],
                 difficulty=q["difficulty"],
                 question_type=q.get("question_type", "theoretical"),
-                is_ai_generated=q.get("is_ai_generated", True)
+                is_ai_generated=q.get("is_ai_generated", True),
+                keywords=q.get("keywords") or [],
+                concepts_covered=q.get("concepts_covered") or [],
+                expected_answer=q.get("expected_answer"),
+                example_output=q.get("example_output"),
             )
             self.async_session.add(obj)
             db_objs.append(obj)
@@ -168,7 +172,11 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         level: int,
         difficulty: str,
         question_type: str = "theoretical",
-        is_ai_generated: bool = False
+        is_ai_generated: bool = False,
+        keywords: list[str] | None = None,
+        concepts_covered: list[str] | None = None,
+        expected_answer: str | None = None,
+        example_output: str | None = None
     ) -> JobProfileQuestion:
         from src.models.db.job_profile_question import JobProfileQuestion
         obj = JobProfileQuestion(
@@ -177,12 +185,17 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             level=level,
             difficulty=difficulty,
             question_type=question_type,
-            is_ai_generated=is_ai_generated
+            is_ai_generated=is_ai_generated,
+            keywords=keywords or [],
+            concepts_covered=concepts_covered or [],
+            expected_answer=expected_answer,
+            example_output=example_output
         )
         self.async_session.add(obj)
         await self.async_session.commit()
         await self.async_session.refresh(obj)
         return obj
+
 
     async def get_question_by_id(self, question_id: int) -> Optional[JobProfileQuestion]:
         from src.models.db.job_profile_question import JobProfileQuestion

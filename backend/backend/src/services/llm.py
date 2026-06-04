@@ -553,8 +553,12 @@ class BaseItemLLM(pydantic.BaseModel):
 
 
 class QuestionsItemLLM(BaseItemLLM):
-    """Question item with category field."""
+    """Question item with category field and extra details."""
     category: str | None = None  # tech | tech_allied | behavioral
+    keywords: list[str] | None = None
+    concepts_covered: list[str] | None = None
+    expected_answer: str | None = None
+    example_output: str | None = None
 
 
 class QuestionsResponseLLM(pydantic.BaseModel):
@@ -608,7 +612,7 @@ async def structured_output(
         kwargs = {
             "model": model,
             "response_format": {"type": "json_object"},
-            token_param_key: 2048,
+            token_param_key: 2048, 
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content if isinstance(user_content, str) else json.dumps(user_content, ensure_ascii=False)},
@@ -735,7 +739,7 @@ async def generate_interview_questions_with_llm(
     sys_prompt = (
         "You are an expert interviewer. Generate concise, specific interview questions for a candidate. "
         "Avoid open-ended prompts; ask targeted questions that require concrete answers, but keep in mind to ask deep questions that will take time to answer NOT one sentence or one word answers"
-        "Return ONLY valid JSON with key: 'items' (array of objects with fields: text, topic, difficulty, category)."
+        "Return ONLY valid JSON with key: 'items' (array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output)."
         "Understand that this is a verbal interview setting, so questions should STRICTLY be suitable for strictly spoken responses."
     )
     # Prepare a sampled syllabus so we don't send the entire topic bank to the LLM
@@ -768,6 +772,22 @@ async def generate_interview_questions_with_llm(
         "behavioral": beh_pool,
     }
 
+    exclude_list = (influence or {}).get("exclude_questions", [])
+    constraints = [
+        "No preambles, no numbering in the JSON itself",
+        "Questions should be single sentences when possible",
+        "Avoid duplicate or trivial questions",
+        "Each item must include a 'category' of tech | tech_allied | behavioral",
+        "Behavioral questions must come from the provided behavioral topics and probe for specific actions/decisions",
+        "Tech-allied questions should be related to the candidate's experience/skills when available",
+        "Vary topics and ensure depth appropriate to difficulty; do not ask purely opinion-based questions",
+        "Use a mix of the provided archetypes to ensure variety (e.g., concept, trade-offs, debug, design)",
+        "Follow the depth guidelines for the given difficulty",
+        "Ask deep questions but make sure they have a clear, specific answer"
+    ]
+    if exclude_list:
+        constraints.append(f"Do NOT generate any questions similar or identical to these existing questions: {exclude_list}")
+
     user_prompt = {
         "track": track,
         "count": total,
@@ -789,18 +809,7 @@ async def generate_interview_questions_with_llm(
         # Also trim behavioral list passed separately to reinforce selection
         "behavioral_topics": beh_pool,
         "influence": influence or {},
-        "constraints": [
-            "No preambles, no numbering in the JSON itself",
-            "Questions should be single sentences when possible",
-            "Avoid duplicate or trivial questions",
-            "Each item must include a 'category' of tech | tech_allied | behavioral",
-            "Behavioral questions must come from the provided behavioral topics and probe for specific actions/decisions",
-            "Tech-allied questions should be related to the candidate's experience/skills when available",
-            "Vary topics and ensure depth appropriate to difficulty; do not ask purely opinion-based questions",
-            "Use a mix of the provided archetypes to ensure variety (e.g., concept, trade-offs, debug, design)",
-            "Follow the depth guidelines for the given difficulty",
-            "Ask deep questions but make sure they have a clear, specific answer"
-        ],
+        "constraints": constraints,
     }
 
     try:
@@ -816,7 +825,16 @@ async def generate_interview_questions_with_llm(
             if result.items:
                 questions = [it.text.strip() for it in result.items]
                 structured_items = [
-                    {"text": it.text.strip(), "topic": it.topic, "difficulty": it.difficulty, "category": it.category}
+                    {
+                        "text": it.text.strip(),
+                        "topic": it.topic,
+                        "difficulty": it.difficulty,
+                        "category": it.category,
+                        "keywords": it.keywords or [],
+                        "concepts_covered": it.concepts_covered or [],
+                        "expected_answer": it.expected_answer,
+                        "example_output": it.example_output,
+                    }
                     for it in result.items
                 ]
         latency_ms = latency
