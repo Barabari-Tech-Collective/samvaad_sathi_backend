@@ -52,6 +52,7 @@ class FullResumeContentSchema(BaseModel):
 # --- Request/Response Payload Envelopes ---
 class CreateResumeFromTemplateRequest(BaseModel):
     templateId: str = "default_ats_001"
+    analysisId: Optional[str] = None
 
 class UpdateResumeDataRequest(BaseModel):
     data: FullResumeContentSchema

@@ -16,6 +16,8 @@ from src.models.schemas.resume_builder import (
     TemplateCompactResponse, TemplateDetailResponse,
     CreateResumeFromTemplateRequest, UpdateResumeDataRequest, ResumeInstanceResponse
 )
+from src.repository.crud.ai_resume_analysis import AIResumeAnalysisCRUDRepository
+from src.services.ai_resume.template_service import generate_structured_resume_data
 
 router = APIRouter(prefix="/resume-builder", tags=["Resume Builder V2"])
 
@@ -40,6 +42,16 @@ async def create_resume_from_template(
         
     repo = ResumeBuilderRepository(session)
     initial_boilerplate = DEFAULT_TEMPLATE_DETAIL["sampleData"]
+    
+    if payload.analysisId:
+        analysis_repo = AIResumeAnalysisCRUDRepository(session)
+        analysis_record = await analysis_repo.get_by_analysis_id(payload.analysisId)
+        if analysis_record and analysis_record.user_id == current_user.id:
+            structured_data = await generate_structured_resume_data(
+                resume_text=analysis_record.extracted_resume_text,
+                analysis_result=analysis_record.analysis_result,
+            )
+            initial_boilerplate = structured_data
     
     new_resume = await repo.create_resume_instance(
         user_id=current_user.id,
@@ -105,78 +117,92 @@ async def download_resume_pdf(
         data = resume.resume_data
         header = data.get('header', {})
         
+        contact_items = []
+        if header.get('email'): contact_items.append(header.get('email'))
+        if header.get('phone'): contact_items.append(header.get('phone'))
+        if header.get('location'): contact_items.append(header.get('location'))
+        if header.get('linkedin'): contact_items.append(header.get('linkedin'))
+        if header.get('github'): contact_items.append(header.get('github'))
+        contact_str = " &bull; ".join(contact_items)
+
         html_content = f"""
         <html>
         <head>
             <meta charset="utf-8">
             <style>
-                @page {{ size: letter; margin: 0.6in; }}
-                body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #111111; line-height: 1.4; font-size: 11pt; }}
+                @page {{ size: A4; margin: 0.6in; }}
+                body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #111111; line-height: 1.4; font-size: 10pt; }}
                 .center {{ text-align: center; }}
                 .name {{ font-size: 22pt; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 2px; }}
-                .contact-line {{ font-size: 10pt; color: #444444; margin-bottom: 15px; }}
-                .section-header {{ font-size: 12pt; font-weight: bold; text-transform: uppercase; border-bottom: 1px solid #222222; margin-top: 18px; margin-bottom: 6px; letter-spacing: 0.5px; }}
-                .item-title {{ font-weight: bold; font-size: 11pt; }}
-                .item-subtitle {{ font-style: italic; color: #333333; }}
-                .flex-row {{ margin-bottom: 2px; }}
-                .right {{ float: right; font-weight: normal; font-style: normal; font-size: 10pt; color: #444444; }}
-                ul {{ margin: 4px 0 8px 18px; padding: 0; }}
-                li {{ margin-bottom: 3px; text-align: justify; }}
-                .skills-container {{ margin-top: 5px; }}
+                .title {{ font-size: 11pt; color: #555555; margin-bottom: 4px; }}
+                .contact-line {{ font-size: 9pt; color: #444444; margin-bottom: 15px; }}
+                .section-header {{ font-size: 11pt; font-weight: bold; text-transform: uppercase; border-bottom: 1px solid #cccccc; margin-top: 15px; margin-bottom: 6px; letter-spacing: 0.5px; padding-bottom: 2px; }}
+                .item-title {{ font-weight: bold; font-size: 10pt; display: inline-block; }}
+                .item-subtitle {{ font-style: italic; font-size: 10pt; color: #333333; margin-bottom: 2px; }}
+                .flex-row {{ margin-bottom: 2px; width: 100%; }}
+                .right {{ float: right; font-weight: normal; font-style: normal; font-size: 9pt; color: #555555; }}
+                ul {{ margin: 3px 0 8px 18px; padding: 0; }}
+                li {{ margin-bottom: 2px; text-align: justify; font-size: 10pt; }}
+                .skills-container {{ margin-top: 4px; font-size: 10pt; line-height: 1.5; }}
+                p {{ font-size: 10pt; margin: 0; text-align: justify; }}
             </style>
         </head>
         <body>
             <div class="center">
-                <div class="name">{header.get('fullName', 'Your Name')}</div>
+                <div class="name">{header.get('fullName', header.get('name', 'Your Name'))}</div>
+                {"<div class='title'>" + header.get('title') + "</div>" if header.get('title') else ""}
                 <div class="contact-line">
-                    {header.get('email', '')} &bull; {header.get('phone', '')}
-                    {f" &bull; <a href='https://{header.get('linkedin') or ''}'>LinkedIn</a>" if header.get('linkedin') else ''}
-                    {f" &bull; <a href='https://{header.get('github') or ''}'>GitHub</a>" if header.get('github') else ''}
+                    {contact_str}
                 </div>
             </div>
 
-            {"<div class='section-header'>Professional Summary</div><p style='margin: 0; text-align: justify;'>" + data.get('summary') + "</p>" if data.get('summary') else ''}
-
-            <div class="section-header">Skills</div>
-            <div class="skills-container">
-                <strong>Technical Capabilities:</strong> {", ".join(data.get('skills', []))}
-            </div>
-        </div>
+            {"<div class='section-header'>Career Objective</div><p style='margin-top: 4px;'>" + data.get('summary') + "</p>" if data.get('summary') else ''}
         """
 
         if data.get('experience'):
-            html_content += "<div class='section-header'>Professional Experience</div>"
+            html_content += "<div class='section-header'>Work Experience</div>"
             for exp in data['experience']:
-                highlights_li = "".join([f"<li>{item}</li>" for item in exp.get('highlights', []) if item])
+                bullets = exp.get('highlights') or exp.get('bullets') or []
+                highlights_li = "".join([f"<li>{item}</li>" for item in bullets if item])
                 html_content += f"""
                 <div class="flex-row">
                     <span class="right">{exp.get('duration', '')}</span>
-                    <span class="item-title">{exp.get('company', '')}</span>
+                    <span class="item-title">{exp.get('role', exp.get('title', ''))}</span>
                 </div>
-                <div class="item-subtitle" style="margin-bottom: 4px;">{exp.get('role', '')}</div>
-                <ul>{highlights_li}</ul>
+                {"<div class='item-subtitle'>" + exp.get('company') + "</div>" if exp.get('company') else ""}
+                {"<ul>" + highlights_li + "</ul>" if highlights_li else ""}
                 """
 
         if data.get('projects'):
-            html_content += "<div class='section-header'>Key Projects</div>"
+            html_content += "<div class='section-header'>Projects</div>"
             for proj in data['projects']:
+                bullets = proj.get('highlights') or proj.get('bullets') or []
+                highlights_li = "".join([f"<li>{item}</li>" for item in bullets if item])
                 html_content += f"""
                 <div class="flex-row">
+                    <span class="right">{proj.get('duration', '')}</span>
                     <span class="item-title">{proj.get('title', '')}</span>
                 </div>
-                <p style="margin: 2px 0 8px 0; text-align: justify;">{proj.get('description', '')}</p>
+                {"<ul>" + highlights_li + "</ul>" if highlights_li else ("<p style='margin-top: 4px;'>" + proj.get('description', '') + "</p>" if proj.get('description') else "")}
                 """
+
+        if data.get('skills'):
+            html_content += "<div class='section-header'>Skills</div>"
+            html_content += f"""
+            <div class="skills-container">
+                {", ".join(data.get('skills', []))}
+            </div>
+            """
 
         if data.get('education'):
             html_content += "<div class='section-header'>Education</div>"
             for edu in data['education']:
                 html_content += f"""
                 <div class="flex-row">
-                    <span class="right">{edu.get('year', '')}</span>
-                    <span class="item-title">{edu.get('institution', '')}</span>
+                    <span class="right">{edu.get('institution', '')}</span>
+                    <span class="item-title">{edu.get('degree', '')}</span>
                 </div>
-                <div class="item-subtitle">{edu.get('degree', '')}</div>
-                <div style="height: 5px;"></div>
+                <div style="font-size: 9pt; color: #555555; margin-bottom: 6px;">{edu.get('year', edu.get('duration', ''))}</div>
                 """
 
         html_content += "</body></html>"
