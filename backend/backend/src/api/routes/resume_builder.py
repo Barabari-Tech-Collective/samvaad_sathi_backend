@@ -178,11 +178,22 @@ async def download_resume_pdf(
             for proj in data['projects']:
                 bullets = proj.get('highlights') or proj.get('bullets') or []
                 highlights_li = "".join([f"<li>{item}</li>" for item in bullets if item])
+                
+                links_html = ""
+                if proj.get('github_link') or proj.get('hosted_link'):
+                    links_parts = []
+                    if proj.get('github_link'):
+                        links_parts.append(f"<a href='{proj.get('github_link')}' style='color: #1a73e8; text-decoration: none;'>GitHub</a>")
+                    if proj.get('hosted_link'):
+                        links_parts.append(f"<a href='{proj.get('hosted_link')}' style='color: #1a73e8; text-decoration: none;'>Live Project</a>")
+                    links_html = f"<div class='item-subtitle' style='margin-top: 1px; margin-bottom: 3px;'>{' | '.join(links_parts)}</div>"
+
                 html_content += f"""
                 <div class="flex-row">
                     <span class="right">{proj.get('duration', '')}</span>
                     <span class="item-title">{proj.get('title', '')}</span>
                 </div>
+                {links_html}
                 {"<ul>" + highlights_li + "</ul>" if highlights_li else ("<p style='margin-top: 4px;'>" + proj.get('description', '') + "</p>" if proj.get('description') else "")}
                 """
 

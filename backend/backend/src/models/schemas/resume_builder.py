@@ -29,11 +29,16 @@ class ResumeExperienceSchema(BaseModel):
     company: str = ""
     role: str = ""
     duration: str = ""
+    bullets: Optional[List[str]] = []
     highlights: List[str] = []
 
 class ResumeProjectSchema(BaseModel):
     title: str = ""
     description: str = ""
+    duration: Optional[str] = ""
+    github_link: Optional[str] = ""
+    hosted_link: Optional[str] = ""
+    bullets: Optional[List[str]] = []
     technologies: Optional[List[str]] = []
 
 class ResumeEducationSchema(BaseModel):
