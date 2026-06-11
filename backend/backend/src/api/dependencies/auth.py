@@ -25,11 +25,18 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user = await user_repo.get_user_by_email(email=email)
-    if not user:
+    try:
+        user = await user_repo.get_user_by_email(email=email)
+        if not user:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    except Exception:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
+            detail="User not found in database",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
