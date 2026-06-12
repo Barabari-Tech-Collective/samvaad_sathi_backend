@@ -71,11 +71,26 @@ class JobProfileActivityResponse(BaseSchemaModel):
     message: str
     created_at: datetime.datetime
 
+class KnowledgeQuestionLevelResponse(BaseSchemaModel):
+    level: int
+    question_count: int
+    questions: List[str]
+
+class KnowledgeQuestionTopicResponse(BaseSchemaModel):
+    topic_name: str
+    candidate_type: str
+    question_count: int
+    levels: List[KnowledgeQuestionLevelResponse]
+
 class JobProfileUploadResponse(BaseSchemaModel):
     success: bool
     original_file_name: str
     file_type: str
     file_size: int
+    uploaded_at: Optional[datetime.datetime] = None
+    topics_detected: List[str] = []
+    total_questions: int = 0
+    topics: List[KnowledgeQuestionTopicResponse] = []
 
 class JobProfileExtractSkillsRequest(BaseSchemaModel):
     job_description: str
@@ -122,6 +137,7 @@ class JobProfileQuestionLevelRequest(BaseModel):
 
 class JobProfileGenerateQuestionsRequest(BaseModel):
     levels: List[JobProfileQuestionLevelRequest]
+    knowledge_reference_context: Optional[str] = None
 
 class JobProfileGeneratedQuestionItem(BaseModel):
     question_id: str

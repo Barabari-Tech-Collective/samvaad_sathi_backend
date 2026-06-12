@@ -334,12 +334,242 @@ async def upload_knowledge_questions(
     file: UploadFile = File(...),
     current_user=fastapi.Depends(_fake_current_user),
 ) -> JobProfileUploadResponse:
+    import io
+    import re
+    import datetime
+    import zipfile
+    import xml.etree.ElementTree as ET
+    import PyPDF2
+    
     extension, size = await validate_file(file)
+    uploaded_at = datetime.datetime.now(datetime.timezone.utc)
+    
+    topics_detected = []
+    total_questions = 0
+    topics_list = []
+    
+    try:
+        await file.seek(0)
+        content = await file.read()
+        
+        extracted_text = ""
+        ext = extension.lower()
+        if ext == ".txt":
+            extracted_text = content.decode("utf-8", errors="ignore")
+        elif ext == ".pdf":
+            try:
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
+                texts = []
+                for page in pdf_reader.pages:
+                    try:
+                        page_text = page.extract_text() or ""
+                        if page_text.strip():
+                            texts.append(page_text)
+                    except Exception:
+                        continue
+                extracted_text = "\n".join(texts)
+            except Exception:
+                extracted_text = ""
+        elif ext == ".docx":
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as z:
+                    xml_content = z.read("word/document.xml")
+                    root = ET.fromstring(xml_content)
+                    texts = []
+                    for elem in root.iter():
+                        if elem.tag.endswith('}t'):
+                            if elem.text:
+                                texts.append(elem.text)
+                    extracted_text = " ".join(texts)
+            except Exception:
+                extracted_text = ""
+        elif ext == ".doc":
+            extracted_text = content.decode("utf-8", errors="ignore")
+            
+        if extracted_text.strip():
+            lines = [line.strip() for line in extracted_text.split("\n")]
+            
+            filtered_lines = []
+            unwanted_substrings = [
+                "Barabari Tech Collective",
+                "Expanded Interview Knowledge Base",
+                "Engineering Interview Guidelines",
+                "Copyright",
+                "Confidential",
+                "Page",
+                "v2.0 May 2026",
+                "Assessment Level",
+                "Sample Questions / Topics",
+                "Document Prepared By",
+                "Sharath Nair",
+                "Engineering Manager"
+            ]
+            
+            for line in lines:
+                clean = line.strip()
+                if not clean:
+                    continue
+                if clean in ("•", "-", "*"):
+                    continue
+                
+                is_unwanted = False
+                for sub in unwanted_substrings:
+                    if sub.lower() in clean.lower():
+                        is_unwanted = True
+                        break
+                if not is_unwanted:
+                    filtered_lines.append(clean)
+                    
+            def is_question_start_prefix(clean_line: str) -> bool:
+                question_prefixes = [
+                    "What", "Explain", "How", "When", "Why", "Write", "Discuss",
+                    "Advanced CSS", "Advanced TypeScript", "JWT vs", "Microservices vs", "gRPC vs"
+                ]
+                for prefix in question_prefixes:
+                    if clean_line.lower().startswith(prefix.lower()):
+                        if len(clean_line) == len(prefix) or clean_line[len(prefix)].isspace() or clean_line[len(prefix)] in (",", ";", ":", "-", "."):
+                            return True
+                return False
+
+            topics_map = {}
+            current_candidate_type = "Freshers"
+            current_topic = "Frontend"
+            current_level = 1
+            
+            last_question_key = None
+            
+            for line in filtered_lines:
+                clean_for_header = re.sub(r'^[#*\-\s\+•]+', '', line).strip()
+                
+                if "part 1" in line.lower() and "freshers" in line.lower():
+                    current_candidate_type = "Freshers"
+                    continue
+                elif "part 2" in line.lower() and "experienced" in line.lower():
+                    current_candidate_type = "Experienced"
+                    continue
+                    
+                is_topic_hdr = False
+                for vt in ["Frontend", "Backend (Java)", "Node.js"]:
+                    if clean_for_header.lower() == vt.lower():
+                        current_topic = vt
+                        is_topic_hdr = True
+                        break
+                if is_topic_hdr:
+                    continue
+                    
+                level_match = re.match(r'^level\s*([1-4])', clean_for_header, re.IGNORECASE)
+                if level_match:
+                    current_level = int(level_match.group(1))
+                    continue
+                    
+                is_section_lbl = False
+                for lbl in ["Easy & Fundamentals", "Resume & Project Based", "Production Based", "Advanced"]:
+                    if clean_for_header.lower() == lbl.lower():
+                        is_section_lbl = True
+                        break
+                if is_section_lbl:
+                    continue
+                    
+                question_text = re.sub(r'^\d+[\.\)]\s*', '', line)
+                question_text = re.sub(r'^[#*\-\s\+•]+', '', question_text).strip()
+                
+                if not question_text:
+                    continue
+                    
+                key = (current_topic, current_candidate_type, current_level)
+                topic_key = (current_topic, current_candidate_type)
+                
+                starts_new = False
+                starts_with_prefix = is_question_start_prefix(question_text)
+                ends_with_qmark = question_text.endswith("?")
+                
+                if starts_with_prefix:
+                    starts_new = True
+                elif ends_with_qmark:
+                    if topic_key in topics_map and current_level in topics_map[topic_key] and topics_map[topic_key][current_level]:
+                        prev_q = topics_map[topic_key][current_level][-1]
+                        if prev_q.endswith("?"):
+                            starts_new = True
+                    else:
+                        starts_new = True
+                        
+                if starts_new or last_question_key is None or key != last_question_key:
+                    if topic_key not in topics_map:
+                        topics_map[topic_key] = {}
+                    if current_level not in topics_map[topic_key]:
+                        topics_map[topic_key][current_level] = []
+                    topics_map[topic_key][current_level].append(question_text)
+                    last_question_key = key
+                else:
+                    if topic_key in topics_map and current_level in topics_map[topic_key]:
+                        prev_questions = topics_map[topic_key][current_level]
+                        if prev_questions:
+                            prev_questions[-1] = prev_questions[-1] + " " + question_text
+                        else:
+                            prev_questions.append(question_text)
+                    else:
+                        if topic_key not in topics_map:
+                            topics_map[topic_key] = {}
+                        if current_level not in topics_map[topic_key]:
+                            topics_map[topic_key][current_level] = []
+                        topics_map[topic_key][current_level].append(question_text)
+                        last_question_key = key
+
+            candidates_order = ["Freshers", "Experienced"]
+            topics_order = ["Frontend", "Backend (Java)", "Node.js"]
+            
+            topics_detected_set = set()
+            
+            for cand in candidates_order:
+                for top in topics_order:
+                    key = (top, cand)
+                    if key in topics_map:
+                        levels_dict = topics_map[key]
+                        levels_res = []
+                        topic_question_count = 0
+                        
+                        for lvl_num in sorted(levels_dict.keys()):
+                            q_list = levels_dict[lvl_num]
+                            q_list_clean = [q.strip() for q in q_list if q.strip()]
+                            if not q_list_clean:
+                                continue
+                            lvl_count = len(q_list_clean)
+                            topic_question_count += lvl_count
+                            levels_res.append({
+                                "level": lvl_num,
+                                "questionCount": lvl_count,
+                                "questions": q_list_clean
+                            })
+                            
+                        if topic_question_count > 0:
+                            total_questions += topic_question_count
+                            topics_detected_set.add(top)
+                            topics_list.append({
+                                "topicName": top,
+                                "candidateType": cand,
+                                "questionCount": topic_question_count,
+                                "levels": levels_res
+                            })
+                            
+            topics_detected = [t for t in topics_order if t in topics_detected_set]
+            for t in topics_detected_set:
+                if t not in topics_detected:
+                    topics_detected.append(t)
+                    
+    except Exception:
+        topics_detected = []
+        total_questions = 0
+        topics_list = []
+        
     return JobProfileUploadResponse(
         success=True,
         original_file_name=file.filename or "",
         file_type=extension.replace(".", ""),
         file_size=size,
+        uploaded_at=uploaded_at,
+        topics_detected=topics_detected,
+        total_questions=total_questions,
+        topics=topics_list
     )
 
 
@@ -462,6 +692,8 @@ async def generate_questions_v2(
             "skills": skills_list,
             "experience_level": profile.experience_level,
         }
+        if payload.knowledge_reference_context:
+            influence["knowledge_reference_context"] = payload.knowledge_reference_context
 
         questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
             track=track,
@@ -1087,19 +1319,100 @@ def test_upload_job_description_invalid_extension():
 
 # 7. POST /api/v2/job-profiles/upload/knowledge-questions
 def test_upload_knowledge_questions_success():
-    file_content = b"docx job questions bytes"
-    files = {"file": ("questions.docx", io.BytesIO(file_content), "application/octet-stream")}
-
+    # Plain text content with refined candidate type, topic and level structure
+    file_content = (
+        "Barabari Tech Collective\n"
+        "Engineering Interview Guidelines\n"
+        "Part 1: Freshers\n"
+        "Frontend\n"
+        "Level 1\n"
+        "What are the core differences between HTML5, CSS3, and JavaScript?\n"
+        "Explain the significance of Semantic HTML elements and how they affect SEO and accessibility.\n"
+        "Level 2\n"
+        "Explain the JavaScript Event Loop (Call Stack, Web APIs, Microtask\n"
+        "Queue).\n"
+        "Backend (Java)\n"
+        "Level 1\n"
+        "What is JVM and JDK?\n"
+        "Node.js\n"
+        "Level 1\n"
+        "What is event loop in Node.js?\n"
+        "Part 2: Experienced\n"
+        "Frontend\n"
+        "Level 1\n"
+        "What are common HTTP status codes and when should you use 200, 201, 400, 401, 403,\n"
+        "404, 500?\n"
+    ).encode("utf-8")
+    
+    files = {"file": ("Barabari_Interview_Knowledge_Base_V2.txt", io.BytesIO(file_content), "text/plain")}
     response = client.post("/api/v2/job-profiles/upload/knowledge-questions", files=files)
+    
     assert response.status_code == 201
     data = response.json()
     assert data["success"] is True
-    assert data["originalFileName"] == "questions.docx"
-    assert data["fileType"] == "docx"
+    assert data["originalFileName"] == "Barabari_Interview_Knowledge_Base_V2.txt"
+    assert data["fileType"] == "txt"
     assert data["fileSize"] == len(file_content)
-    # Check that stateless keys are absolutely absent
-    assert "storedFileName" not in data
-    assert "filePath" not in data
+    assert data["uploadedAt"] is not None
+    assert set(data["topicsDetected"]) == {"Frontend", "Backend (Java)", "Node.js"}
+    assert data["totalQuestions"] == 6
+    
+    topics = data["topics"]
+    assert len(topics) == 4
+    
+    # 1. Frontend Freshers
+    frontend_freshers = next(t for t in topics if t["topicName"] == "Frontend" and t["candidateType"] == "Freshers")
+    assert frontend_freshers["questionCount"] == 3
+    assert len(frontend_freshers["levels"]) == 2
+    lvl1 = next(l for l in frontend_freshers["levels"] if l["level"] == 1)
+    assert lvl1["questionCount"] == 2
+    assert "What are the core differences between HTML5, CSS3, and JavaScript?" in lvl1["questions"]
+    assert "Explain the significance of Semantic HTML elements and how they affect SEO and accessibility." in lvl1["questions"]
+    
+    # Verify wrapped lines are merged correctly
+    lvl2 = next(l for l in frontend_freshers["levels"] if l["level"] == 2)
+    assert lvl2["questionCount"] == 1
+    assert lvl2["questions"][0] == "Explain the JavaScript Event Loop (Call Stack, Web APIs, Microtask Queue)."
+    
+    # 2. Backend (Java) Freshers
+    java_freshers = next(t for t in topics if t["topicName"] == "Backend (Java)" and t["candidateType"] == "Freshers")
+    assert java_freshers["questionCount"] == 1
+    assert java_freshers["levels"][0]["questions"][0] == "What is JVM and JDK?"
+    
+    # 3. Node.js Freshers
+    node_freshers = next(t for t in topics if t["topicName"] == "Node.js" and t["candidateType"] == "Freshers")
+    assert node_freshers["questionCount"] == 1
+    assert node_freshers["levels"][0]["questions"][0] == "What is event loop in Node.js?"
+    
+    # 4. Frontend Experienced
+    frontend_exp = next(t for t in topics if t["topicName"] == "Frontend" and t["candidateType"] == "Experienced")
+    assert frontend_exp["questionCount"] == 1
+    assert frontend_exp["levels"][0]["questions"][0] == "What are common HTTP status codes and when should you use 200, 201, 400, 401, 403, 404, 500?"
+    
+    # Check that header/footer text was cleaned out and does not appear as a question
+    all_questions = []
+    for t in topics:
+        for l in t["levels"]:
+            all_questions.extend(l["questions"])
+    assert not any("Barabari Tech Collective" in q for q in all_questions)
+    assert not any("Engineering Interview Guidelines" in q for q in all_questions)
+
+
+def test_upload_knowledge_questions_fallback_empty():
+    # File content that contains no text or is unparsable
+    file_content = b""
+    files = {"file": ("empty.txt", io.BytesIO(file_content), "text/plain")}
+    response = client.post("/api/v2/job-profiles/upload/knowledge-questions", files=files)
+    
+    assert response.status_code == 201
+    data = response.json()
+    assert data["success"] is True
+    assert data["originalFileName"] == "empty.txt"
+    assert data["fileType"] == "txt"
+    assert data["fileSize"] == 0
+    assert data["topicsDetected"] == []
+    assert data["totalQuestions"] == 0
+    assert data["topics"] == []
 
 
 # 8. POST /api/v2/job-profiles/extract-skills
@@ -2016,6 +2329,92 @@ def test_update_question_with_expanded_details():
     assert data["concepts_covered"] == ["Scope"]
     assert data["expected_answer"] == "Closure answer"
     assert data["example_output"] == "Closure output"
+
+
+def test_generate_questions_with_knowledge_base():
+    profile = MockJobProfileModel(
+        id=123,
+        job_name="Python Developer",
+        job_description="Looking for an experienced Python developer with React skills.",
+        skills=["Python", "React"],
+        experience_level="Mid"
+    )
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    mock_items = [
+        {"text": "What is Django?", "category": "tech"},
+        {"text": "Explain React state management.", "category": "tech_allied"}
+    ]
+
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    saved_questions = [
+        MockQuestion(1, 123, "What is Django?", 1, "easy", "tech", True),
+        MockQuestion(2, 123, "Explain React state management.", 1, "easy", "tech_allied", True)
+    ]
+    _mock_repo.create_job_profile_questions = AsyncMock(return_value=saved_questions)
+
+    payload = {
+        "levels": [
+            {"level": 1, "count": 2}
+        ],
+        "knowledge_reference_context": "Frontend - Level 1: What is HTML5? What is CSS Box Model? React - Level 2: Explain props and state."
+    }
+    with patch("src.services.llm.generate_interview_questions_with_llm", new_callable=AsyncMock) as mock_generate:
+        mock_generate.return_value = (["What is Django?", "Explain React state management."], None, 150, "gpt-4o-mini", mock_items)
+        response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_profile_id"] == "123"
+        assert data["total_questions"] == 2
+        
+        mock_generate.assert_called_once()
+        call_kwargs = mock_generate.call_args.kwargs
+        assert call_kwargs["influence"]["knowledge_reference_context"] == "Frontend - Level 1: What is HTML5? What is CSS Box Model? React - Level 2: Explain props and state."
+
+
+@pytest.mark.asyncio
+async def test_generate_interview_questions_llm_prompt_with_knowledge_base():
+    from src.services.llm import generate_interview_questions_with_llm
+    from src.config.manager import settings
+    
+    orig_key = settings.OPENAI_API_KEY
+    settings.OPENAI_API_KEY = "mock-api-key"
+    
+    try:
+        with patch("src.services.llm.structured_output", new_callable=AsyncMock) as mock_structured_output:
+            mock_structured_output.return_value = (None, None, 0, "gpt-4o-mini")
+            
+            influence = {
+                "knowledge_reference_context": "Frontend - Level 1: What is HTML5? What is CSS Box Model? React - Level 2: Explain props and state."
+            }
+            
+            await generate_interview_questions_with_llm(
+                track="Python Developer",
+                count=3,
+                difficulty="medium",
+                influence=influence
+            )
+            
+            mock_structured_output.assert_called_once()
+            call_kwargs = mock_structured_output.call_args.kwargs
+            sys_prompt = call_kwargs["system_prompt"]
+            
+            assert "Reference Knowledge Base:" in sys_prompt
+            assert "Frontend - Level 1: What is HTML5?" in sys_prompt
+            assert "Do not copy reference questions exactly." in sys_prompt
+            assert "Generate new related questions using the same topics/concepts." in sys_prompt
+    finally:
+        settings.OPENAI_API_KEY = orig_key
 
 
 

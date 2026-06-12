@@ -334,19 +334,266 @@ async def upload_job_description(
     summary="Upload Knowledge Set Questions file",
 )
 async def upload_knowledge_questions(
-    file: UploadFile = File(..., description="PDF or DOC/DOCX file (max 10MB)"),
+    file: UploadFile = File(..., description="PDF, DOC/DOCX, or TXT file (max 10MB)"),
     current_user=fastapi.Depends(get_current_user),
 ) -> JobProfileUploadResponse:
     """
     Validates and processes the uploaded Knowledge Questions file entirely in memory.
-    No file is written to disk and no metadata is persisted.
+    Extracts text and parses it into topic-wise and level-wise questions.
     """
+    import io
+    import re
+    import datetime
+    import zipfile
+    import xml.etree.ElementTree as ET
+    import PyPDF2
+    
+    # 1. Existing validation
     extension, size = await validate_file(file)
+    
+    uploaded_at = datetime.datetime.now(datetime.timezone.utc)
+    
+    # 2. Extract text and parse
+    topics_detected = []
+    total_questions = 0
+    topics_list = []
+    
+    try:
+        await file.seek(0)
+        content = await file.read()
+        
+        extracted_text = ""
+        ext = extension.lower()
+        if ext == ".txt":
+            extracted_text = content.decode("utf-8", errors="ignore")
+        elif ext == ".pdf":
+            try:
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
+                texts = []
+                for page in pdf_reader.pages:
+                    try:
+                        page_text = page.extract_text() or ""
+                        if page_text.strip():
+                            texts.append(page_text)
+                    except Exception:
+                        continue
+                extracted_text = "\n".join(texts)
+            except Exception as e:
+                logger.error(f"Error parsing PDF file: {e}")
+                extracted_text = ""
+        elif ext == ".docx":
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as z:
+                    xml_content = z.read("word/document.xml")
+                    root = ET.fromstring(xml_content)
+                    texts = []
+                    for elem in root.iter():
+                        if elem.tag.endswith('}t'):
+                            if elem.text:
+                                texts.append(elem.text)
+                    extracted_text = " ".join(texts)
+            except Exception as e:
+                logger.error(f"Error parsing DOCX file: {e}")
+                extracted_text = ""
+        elif ext == ".doc":
+            extracted_text = content.decode("utf-8", errors="ignore")
+            
+        # Parse text if we extracted anything
+        if extracted_text.strip():
+            lines = [line.strip() for line in extracted_text.split("\n")]
+            
+            # Clean unwanted lines
+            filtered_lines = []
+            unwanted_substrings = [
+                "Barabari Tech Collective",
+                "Expanded Interview Knowledge Base",
+                "Engineering Interview Guidelines",
+                "Copyright",
+                "Confidential",
+                "Page",
+                "v2.0 May 2026",
+                "Assessment Level",
+                "Sample Questions / Topics",
+                "Document Prepared By",
+                "Sharath Nair",
+                "Engineering Manager"
+            ]
+            
+            for line in lines:
+                clean = line.strip()
+                if not clean:
+                    continue
+                if clean in ("•", "-", "*"):
+                    continue
+                
+                is_unwanted = False
+                for sub in unwanted_substrings:
+                    if sub.lower() in clean.lower():
+                        is_unwanted = True
+                        break
+                if not is_unwanted:
+                    filtered_lines.append(clean)
+                    
+            def is_question_start_prefix(clean_line: str) -> bool:
+                question_prefixes = [
+                    "What", "Explain", "How", "When", "Why", "Write", "Discuss",
+                    "Advanced CSS", "Advanced TypeScript", "JWT vs", "Microservices vs", "gRPC vs"
+                ]
+                for prefix in question_prefixes:
+                    if clean_line.lower().startswith(prefix.lower()):
+                        if len(clean_line) == len(prefix) or clean_line[len(prefix)].isspace() or clean_line[len(prefix)] in (",", ";", ":", "-", "."):
+                            return True
+                return False
+
+            topics_map = {}
+            # Structure: (topic_name, candidate_type) -> { level_num -> [questions] }
+            
+            current_candidate_type = "Freshers"
+            current_topic = "Frontend"
+            current_level = 1
+            
+            last_question_key = None
+            
+            for line in filtered_lines:
+                clean_for_header = re.sub(r'^[#*\-\s\+•]+', '', line).strip()
+                
+                # Detect candidate type
+                if "part 1" in line.lower() and "freshers" in line.lower():
+                    current_candidate_type = "Freshers"
+                    continue
+                elif "part 2" in line.lower() and "experienced" in line.lower():
+                    current_candidate_type = "Experienced"
+                    continue
+                    
+                # Detect topic header
+                is_topic_hdr = False
+                for vt in ["Frontend", "Backend (Java)", "Node.js"]:
+                    if clean_for_header.lower() == vt.lower():
+                        current_topic = vt
+                        is_topic_hdr = True
+                        break
+                if is_topic_hdr:
+                    continue
+                    
+                # Detect level header
+                level_match = re.match(r'^level\s*([1-4])', clean_for_header, re.IGNORECASE)
+                if level_match:
+                    current_level = int(level_match.group(1))
+                    continue
+                    
+                # Check if section label to ignore
+                is_section_lbl = False
+                for lbl in ["Easy & Fundamentals", "Resume & Project Based", "Production Based", "Advanced"]:
+                    if clean_for_header.lower() == lbl.lower():
+                        is_section_lbl = True
+                        break
+                if is_section_lbl:
+                    continue
+                    
+                # Clean question text of leading numbers, bullet symbols
+                question_text = re.sub(r'^\d+[\.\)]\s*', '', line)
+                question_text = re.sub(r'^[#*\-\s\+•]+', '', question_text).strip()
+                
+                if not question_text:
+                    continue
+                    
+                key = (current_topic, current_candidate_type, current_level)
+                topic_key = (current_topic, current_candidate_type)
+                
+                # Determine if it starts a new question or merges
+                starts_new = False
+                starts_with_prefix = is_question_start_prefix(question_text)
+                ends_with_qmark = question_text.endswith("?")
+                
+                if starts_with_prefix:
+                    starts_new = True
+                elif ends_with_qmark:
+                    if topic_key in topics_map and current_level in topics_map[topic_key] and topics_map[topic_key][current_level]:
+                        prev_q = topics_map[topic_key][current_level][-1]
+                        if prev_q.endswith("?"):
+                            starts_new = True
+                    else:
+                        starts_new = True
+                        
+                if starts_new or last_question_key is None or key != last_question_key:
+                    if topic_key not in topics_map:
+                        topics_map[topic_key] = {}
+                    if current_level not in topics_map[topic_key]:
+                        topics_map[topic_key][current_level] = []
+                    topics_map[topic_key][current_level].append(question_text)
+                    last_question_key = key
+                else:
+                    if topic_key in topics_map and current_level in topics_map[topic_key]:
+                        prev_questions = topics_map[topic_key][current_level]
+                        if prev_questions:
+                            prev_questions[-1] = prev_questions[-1] + " " + question_text
+                        else:
+                            prev_questions.append(question_text)
+                    else:
+                        if topic_key not in topics_map:
+                            topics_map[topic_key] = {}
+                        if current_level not in topics_map[topic_key]:
+                            topics_map[topic_key][current_level] = []
+                        topics_map[topic_key][current_level].append(question_text)
+                        last_question_key = key
+
+            # Construct the output structure
+            candidates_order = ["Freshers", "Experienced"]
+            topics_order = ["Frontend", "Backend (Java)", "Node.js"]
+            
+            topics_detected_set = set()
+            
+            for cand in candidates_order:
+                for top in topics_order:
+                    key = (top, cand)
+                    if key in topics_map:
+                        levels_dict = topics_map[key]
+                        levels_res = []
+                        topic_question_count = 0
+                        
+                        for lvl_num in sorted(levels_dict.keys()):
+                            q_list = levels_dict[lvl_num]
+                            q_list_clean = [q.strip() for q in q_list if q.strip()]
+                            if not q_list_clean:
+                                continue
+                            lvl_count = len(q_list_clean)
+                            topic_question_count += lvl_count
+                            levels_res.append({
+                                "level": lvl_num,
+                                "questionCount": lvl_count,
+                                "questions": q_list_clean
+                            })
+                            
+                        if topic_question_count > 0:
+                            total_questions += topic_question_count
+                            topics_detected_set.add(top)
+                            topics_list.append({
+                                "topicName": top,
+                                "candidateType": cand,
+                                "questionCount": topic_question_count,
+                                "levels": levels_res
+                            })
+                            
+            topics_detected = [t for t in topics_order if t in topics_detected_set]
+            for t in topics_detected_set:
+                if t not in topics_detected:
+                    topics_detected.append(t)
+                    
+    except Exception as e:
+        logger.error(f"Error parsing uploaded questions file: {e}")
+        topics_detected = []
+        total_questions = 0
+        topics_list = []
+        
     return JobProfileUploadResponse(
         success=True,
         original_file_name=file.filename or "",
         file_type=extension.replace(".", ""),
         file_size=size,
+        uploaded_at=uploaded_at,
+        topics_detected=topics_detected,
+        total_questions=total_questions,
+        topics=topics_list
     )
 
 @router.post(
@@ -474,6 +721,8 @@ async def generate_questions_v2(
             "skills": skills_list,
             "experience_level": profile.experience_level,
         }
+        if payload.knowledge_reference_context:
+            influence["knowledge_reference_context"] = payload.knowledge_reference_context
 
         # Senior instruction: Make multiple smaller LLM calls to prevent large call failures (e.g. batch size of 5)
         remaining = l.count

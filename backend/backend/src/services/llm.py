@@ -742,6 +742,19 @@ async def generate_interview_questions_with_llm(
         "Return ONLY valid JSON with key: 'items' (array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output)."
         "Understand that this is a verbal interview setting, so questions should STRICTLY be suitable for strictly spoken responses."
     )
+    knowledge_reference_context = (influence or {}).get("knowledge_reference_context")
+    if knowledge_reference_context:
+        sys_prompt += (
+            f"\n\nReference Knowledge Base:\n{knowledge_reference_context}\n\n"
+            "Instructions:\n"
+            "Use the above uploaded knowledge base only as topic guidance.\n"
+            "Generate interview questions related to these reference questions.\n"
+            "Do not copy reference questions exactly.\n"
+            "Generate new related questions using the same topics/concepts.\n"
+            "Keep the questions aligned with the job profile, skills, experience level, and requested difficulty level.\n"
+            "Return the same structured output as before:\n"
+            "question, keywords, concepts_covered, expected_answer, example_output, level, difficulty, type."
+        )
     # Prepare a sampled syllabus so we don't send the entire topic bank to the LLM
     topics = syllabus_topics or {}
     r = ratio or {"tech": 2, "tech_allied": 2, "behavioral": 1}
