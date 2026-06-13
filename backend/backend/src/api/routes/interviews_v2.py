@@ -67,6 +67,7 @@ from src.services.analytics_events import track_analytics_event
 
 logger = logging.getLogger(__name__)
 FOLLOW_UP_STRATEGY = "llm_transcription_based"
+FULL_STACK_ROLE = "Full Stack Developer"
 
 
 router = fastapi.APIRouter(prefix="/v2", tags=["interviews-v2"])
@@ -194,7 +195,7 @@ async def create_or_resume_interview_v2(
     if difficulty not in ("easy", "medium", "hard", "expert"):
         difficulty = "medium"
         
-    if payload.track == "Full Stack Developer" and difficulty == "medium" and getattr(payload, "use_resume", True):
+    if payload.track == FULL_STACK_ROLE and difficulty == "medium" and getattr(payload, "use_resume", True):
         resume_text = getattr(current_user, "resume_text", None)
         if not resume_text or not str(resume_text).strip():
             raise fastapi.HTTPException(
@@ -266,7 +267,7 @@ async def generate_questions_v2(
         has_resume = bool(resume_context)
         has_skills = bool(skills_list)
 
-        if interview.track == "Full Stack Developer" and interview.difficulty == "medium" and not has_resume:
+        if interview.track == FULL_STACK_ROLE and interview.difficulty == "medium" and not has_resume:
             qs = {
                 "questions": ["Before proceeding with a Medium level Full Stack Developer interview, please add your resume."],
                 "llm_error": None,
