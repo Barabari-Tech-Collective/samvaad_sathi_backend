@@ -1327,9 +1327,14 @@ def _extract_overall_score(report: Report | None, summary_report: SummaryReport 
     if report and report.overall_score is not None:
         return _normalize_score(_to_float(report.overall_score))
     if summary_report and isinstance(summary_report.report_json, dict):
-        score_summary = summary_report.report_json.get("scoreSummary") or {}
-        knowledge_pct = _to_float(((score_summary.get("knowledgeCompetence") or {}).get("percentage")))
-        speech_pct = _to_float(((score_summary.get("speechAndStructure") or {}).get("percentage")))
+        score_summary = summary_report.report_json.get("overallScoreSummary") or summary_report.report_json.get("scoreSummary") or {}
+        
+        knowledge_comp = score_summary.get("knowledgeCompetence") or {}
+        knowledge_pct = _to_float(knowledge_comp.get("averagePct") or knowledge_comp.get("percentage"))
+        
+        speech_struct = score_summary.get("speechStructure") or score_summary.get("speechAndStructure") or {}
+        speech_pct = _to_float(speech_struct.get("averagePct") or speech_struct.get("percentage"))
+        
         return _avg_non_null([knowledge_pct, speech_pct])
     return None
 

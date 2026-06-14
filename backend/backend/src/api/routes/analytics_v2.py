@@ -526,12 +526,17 @@ async def get_students_table(
     interview_ids = [interview.id for interview in interviews]
     reports_map: dict[int, float | None] = {}
     if interview_ids:
-        report_rows = list(
-            (
-                await session.execute(sqlalchemy.select(Report.interview_id, Report.overall_score).where(Report.interview_id.in_(interview_ids)))
-            ).all()
-        )
-        reports_map = {int(interview_id): score for interview_id, score in report_rows}
+        report_rows = list((await session.execute(sqlalchemy.select(Report).where(Report.interview_id.in_(interview_ids)))).scalars().all())
+        summary_rows = list((await session.execute(sqlalchemy.select(SummaryReport).where(SummaryReport.interview_id.in_(interview_ids)))).scalars().all())
+        
+        report_dict = {r.interview_id: r for r in report_rows}
+        summary_dict = {sr.interview_id: sr for sr in summary_rows}
+        
+        from src.services.analytics import _extract_overall_score
+        reports_map = {
+            int(interview_id): _extract_overall_score(report_dict.get(interview_id), summary_dict.get(interview_id))
+            for interview_id in interview_ids
+        }
 
     interviews_by_user: dict[int, list[Interview]] = defaultdict(list)
     for interview in interviews:

@@ -6,4 +6,6 @@ from src.models.db.report import Report
 from src.models.db.summary_report import SummaryReport
 from src.models.db.question_supplement import QuestionSupplement
 from src.models.db.job_profile import JobProfile
+from src.models.db.ai_resume_analysis import AIResumeAnalysis
+from src.models.db.resume_instance import UserResumeInstance
 from src.repository.table import Base
