@@ -9,18 +9,25 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
     # --- feature/roles-page-api methods ---
     async def get_summary(self) -> dict:
         """
-        Returns a summary count of job profiles.
-        Since status field doesn't exist yet, we return 0 for status-based counts.
+        Returns a summary count of job profiles based on their status in the database.
         """
-        query = select(func.count()).select_from(JobProfile)
-        result = await self.async_session.execute(query)
-        total_count = result.scalar() or 0
+        total_stmt = select(func.count()).select_from(JobProfile)
+        total_count = (await self.async_session.execute(total_stmt)).scalar() or 0
         
+        pending_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == "under_review")
+        pending_count = (await self.async_session.execute(pending_stmt)).scalar() or 0
+
+        approved_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == "approved")
+        approved_count = (await self.async_session.execute(approved_stmt)).scalar() or 0
+
+        rejected_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == "rejected")
+        rejected_count = (await self.async_session.execute(rejected_stmt)).scalar() or 0
+
         return {
             "totalRoles": total_count,
-            "pendingReview": 0,
-            "approved": 0,
-            "rejected": 0
+            "pendingReview": pending_count,
+            "approved": approved_count,
+            "rejected": rejected_count
         }
 
     async def list_profiles(
