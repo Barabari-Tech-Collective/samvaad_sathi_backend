@@ -103,10 +103,11 @@ async def get_job_profiles_summary(
 )
 async def list_job_profiles(
     category: str | None = fastapi.Query(None),
+    limit: int | None = fastapi.Query(None),
     current_user=fastapi.Depends(_fake_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
 ) -> JobProfileListResponse:
-    profiles = await job_profile_repo.list_profiles(category=category)
+    profiles = await job_profile_repo.list_profiles(category=category, limit=limit)
     return JobProfileListResponse(items=profiles, total=len(profiles))
 
 
@@ -1192,7 +1193,7 @@ def test_list_job_profiles():
     assert data["total"] == 2
     assert data["items"][0]["jobName"] == "Python Developer"
     assert data["items"][1]["jobName"] == "Java Architect"
-    _mock_repo.list_profiles.assert_called_once_with(category=None)
+    _mock_repo.list_profiles.assert_called_once_with(category=None, limit=None)
 
 
 def test_list_job_profiles_with_category_filter():
@@ -1207,7 +1208,37 @@ def test_list_job_profiles_with_category_filter():
     data = response.json()
     assert data["total"] == 1
     assert data["items"][0]["jobName"] == "Python Developer"
-    _mock_repo.list_profiles.assert_called_with(category="Python")
+    _mock_repo.list_profiles.assert_called_with(category="Python", limit=None)
+
+
+def test_list_job_profiles_with_limit():
+    mock_profiles = [
+        MockJobProfileModel(1, "Python Developer", "Writes clean code")
+    ]
+    _mock_repo.list_profiles = AsyncMock(return_value=mock_profiles)
+
+    # Test filtering with limit
+    response = client.get("/api/v2/job-profiles?limit=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["jobName"] == "Python Developer"
+    _mock_repo.list_profiles.assert_called_with(category=None, limit=5)
+
+
+def test_list_job_profiles_with_category_and_limit():
+    mock_profiles = [
+        MockJobProfileModel(1, "Python Developer", "Writes clean code")
+    ]
+    _mock_repo.list_profiles = AsyncMock(return_value=mock_profiles)
+
+    # Test filtering with both category and limit
+    response = client.get("/api/v2/job-profiles?category=Python&limit=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["jobName"] == "Python Developer"
+    _mock_repo.list_profiles.assert_called_with(category="Python", limit=5)
 
 
 # 4. POST /api/v2/job-profiles

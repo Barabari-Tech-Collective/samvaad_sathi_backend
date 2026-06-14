@@ -23,8 +23,17 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             "rejected": 0
         }
 
-    async def list_profiles(self) -> List[JobProfile]:
+    async def list_profiles(
+        self,
+        *,
+        category: Optional[str] = None,
+        limit: Optional[int] = None
+    ) -> List[JobProfile]:
         query = select(JobProfile).order_by(JobProfile.created_at.desc())
+        if category:
+            query = query.where(JobProfile.category == category)
+        if limit is not None:
+            query = query.limit(limit)
         result = await self.async_session.execute(query)
         return list(result.scalars().all())
 
