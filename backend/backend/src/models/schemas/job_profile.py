@@ -131,15 +131,15 @@ class JobProfileDeleteResponse(BaseSchemaModel):
 
 
 # --- Generate Questions Schemas ---
-class JobProfileQuestionLevelRequest(BaseModel):
+class JobProfileQuestionLevelRequest(BaseSchemaModel):
     level: int
     count: int
 
-class JobProfileGenerateQuestionsRequest(BaseModel):
+class JobProfileGenerateQuestionsRequest(BaseSchemaModel):
     levels: List[JobProfileQuestionLevelRequest]
     knowledge_reference_context: Optional[str] = None
 
-class JobProfileGeneratedQuestionItem(BaseModel):
+class JobProfileGeneratedQuestionItem(BaseSchemaModel):
     question_id: str
     question: str
     level: int
@@ -151,20 +151,20 @@ class JobProfileGeneratedQuestionItem(BaseModel):
     expected_answer: Optional[str] = None
     example_output: Optional[str] = None
 
-class JobProfileGenerateQuestionsResponse(BaseModel):
+class JobProfileGenerateQuestionsResponse(BaseSchemaModel):
     job_profile_id: str
     total_questions: int
     questions: List[JobProfileGeneratedQuestionItem]
 
 
 # --- Get Questions Schemas ---
-class JobProfileQuestionLevelCounts(BaseModel):
+class JobProfileQuestionLevelCounts(BaseSchemaModel):
     level_1: int = 0
     level_2: int = 0
     level_3: int = 0
     level_4: int = 0
 
-class JobProfileQuestionItem(BaseModel):
+class JobProfileQuestionItem(BaseSchemaModel):
     question_id: str
     question: str
     level: int
@@ -177,7 +177,7 @@ class JobProfileQuestionItem(BaseModel):
     expected_answer: Optional[str] = None
     example_output: Optional[str] = None
 
-class JobProfileQuestionsListResponse(BaseModel):
+class JobProfileQuestionsListResponse(BaseSchemaModel):
     job_profile_id: str
     total_questions: int
     level_counts: JobProfileQuestionLevelCounts
@@ -185,7 +185,7 @@ class JobProfileQuestionsListResponse(BaseModel):
 
 
 # --- Add Question Schemas ---
-class JobProfileAddQuestionRequest(BaseModel):
+class JobProfileAddQuestionRequest(BaseSchemaModel):
     question: str
     level: int
     difficulty: str
@@ -196,7 +196,7 @@ class JobProfileAddQuestionRequest(BaseModel):
     expected_answer: Optional[str] = None
     example_output: Optional[str] = None
 
-class JobProfileAddQuestionResponse(BaseModel):
+class JobProfileAddQuestionResponse(BaseSchemaModel):
     question_id: str
     job_profile_id: str
     question: str
@@ -212,7 +212,7 @@ class JobProfileAddQuestionResponse(BaseModel):
 
 
 # --- Update Question Schemas ---
-class JobProfileUpdateQuestionRequest(BaseModel):
+class JobProfileUpdateQuestionRequest(BaseSchemaModel):
     question: Optional[str] = None
     level: Optional[int] = None
     difficulty: Optional[str] = None
@@ -222,7 +222,7 @@ class JobProfileUpdateQuestionRequest(BaseModel):
     expected_answer: Optional[str] = None
     example_output: Optional[str] = None
 
-class JobProfileUpdateQuestionResponse(BaseModel):
+class JobProfileUpdateQuestionResponse(BaseSchemaModel):
     question_id: str
     question: str
     level: int
@@ -237,7 +237,7 @@ class JobProfileUpdateQuestionResponse(BaseModel):
 
 
 # --- Regenerate Question Schemas ---
-class JobProfileRegenerateQuestionResponse(BaseModel):
+class JobProfileRegenerateQuestionResponse(BaseSchemaModel):
     question_id: str
     question: str
     level: int
@@ -252,13 +252,13 @@ class JobProfileRegenerateQuestionResponse(BaseModel):
 
 
 # --- Delete Question Schemas ---
-class JobProfileDeleteQuestionResponse(BaseModel):
+class JobProfileDeleteQuestionResponse(BaseSchemaModel):
     message: str
     question_id: str
 
 
 # --- Review Summary Schemas ---
-class JobProfileReviewRoleDetails(BaseModel):
+class JobProfileReviewRoleDetails(BaseSchemaModel):
     role_name: str
     company_name: Optional[str] = None
     category: Optional[str] = None
@@ -266,27 +266,27 @@ class JobProfileReviewRoleDetails(BaseModel):
     employment_type: Optional[str] = None
     description: Optional[str] = None
 
-class JobProfileReviewJdSummary(BaseModel):
+class JobProfileReviewJdSummary(BaseSchemaModel):
     extracted_skills: List[str] = []
     competencies: List[str] = []
 
-class JobProfileReviewPreviewQuestion(BaseModel):
+class JobProfileReviewPreviewQuestion(BaseSchemaModel):
     question_id: int
     question: str
 
-class JobProfileReviewLevelInfo(BaseModel):
+class JobProfileReviewLevelInfo(BaseSchemaModel):
     level: int
     title: str
     description: str
     question_count: int
     preview_questions: List[JobProfileReviewPreviewQuestion] = []
 
-class JobProfileReviewQuestionSummary(BaseModel):
+class JobProfileReviewQuestionSummary(BaseSchemaModel):
     total_questions: int
     total_levels: int
     levels: List[JobProfileReviewLevelInfo] = []
 
-class JobProfileReviewResponse(BaseModel):
+class JobProfileReviewResponse(BaseSchemaModel):
     job_profile_id: int
     role_details: JobProfileReviewRoleDetails
     jd_summary: JobProfileReviewJdSummary
@@ -295,7 +295,7 @@ class JobProfileReviewResponse(BaseModel):
 
 
 # --- Submit Role Schemas ---
-class JobProfileSubmitResponse(BaseModel):
+class JobProfileSubmitResponse(BaseSchemaModel):
     job_profile_id: int
     job_name: str
     status: str
