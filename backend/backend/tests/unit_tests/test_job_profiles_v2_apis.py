@@ -18,7 +18,7 @@ import pytest
 import fastapi
 from fastapi import File, UploadFile
 from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Import schemas and repository
 from src.models.schemas.job_profile import (
@@ -29,7 +29,27 @@ from src.models.schemas.job_profile import (
     JobProfileActivityResponse,
     JobProfileUploadResponse,
     JobProfileExtractSkillsRequest,
-    JobProfileExtractSkillsResponse
+    JobProfileExtractSkillsResponse,
+    JobProfileGenerateQuestionsRequest,
+    JobProfileGenerateQuestionsResponse,
+    JobProfileGeneratedQuestionItem,
+    JobProfileQuestionsListResponse,
+    JobProfileQuestionItem,
+    JobProfileQuestionLevelCounts,
+    JobProfileAddQuestionRequest,
+    JobProfileAddQuestionResponse,
+    JobProfileUpdateQuestionRequest,
+    JobProfileUpdateQuestionResponse,
+    JobProfileRegenerateQuestionResponse,
+    JobProfileDeleteQuestionResponse,
+    JobProfileDeleteResponse,
+    JobProfileReviewResponse,
+    JobProfileReviewRoleDetails,
+    JobProfileReviewJdSummary,
+    JobProfileReviewPreviewQuestion,
+    JobProfileReviewLevelInfo,
+    JobProfileReviewQuestionSummary,
+    JobProfileSubmitResponse
 )
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.file_processor import validate_file
@@ -83,10 +103,11 @@ async def get_job_profiles_summary(
 )
 async def list_job_profiles(
     category: str | None = fastapi.Query(None),
+    limit: int | None = fastapi.Query(None),
     current_user=fastapi.Depends(_fake_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
 ) -> JobProfileListResponse:
-    profiles = await job_profile_repo.list_profiles(category=category)
+    profiles = await job_profile_repo.list_profiles(category=category, limit=limit)
     return JobProfileListResponse(items=profiles, total=len(profiles))
 
 
@@ -100,9 +121,190 @@ async def create_job_profile(
     current_user=fastapi.Depends(_fake_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
 ) -> JobProfileResponse:
-    profile = await job_profile_repo.create_profile(title=payload.title, description=payload.description)
-    return JobProfileResponse.from_orm(profile)
+    profile = await job_profile_repo.create_profile(
+        job_name=payload.job_name,
+        job_description=payload.job_description,
+        company_name=payload.company_name,
+        experience_level=payload.experience_level,
+        skills=payload.skills,
+        additional_context=payload.additional_context,
+        category=payload.category,
+        employment_type=payload.employment_type,
+    )
+    return JobProfileResponse.model_validate(profile)
 
+
+@_app.get(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileReviewResponse,
+    status_code=200,
+)
+async def get_job_profile_review(
+    job_profile_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileReviewResponse:
+    # 1. Fetch JobProfile record
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=404,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+
+    # 2. Fetch all linked questions
+    questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+
+    # 3. Parse competencies from additional_context
+    competencies = []
+    if profile.additional_context:
+        if "," in profile.additional_context:
+            competencies = [c.strip() for c in profile.additional_context.split(",") if c.strip()]
+        elif "\n" in profile.additional_context:
+            competencies = [c.strip() for c in profile.additional_context.split("\n") if c.strip()]
+        else:
+            competencies = [profile.additional_context.strip()]
+
+    # 4. Map role details
+    role_details = JobProfileReviewRoleDetails(
+        role_name=profile.job_name,
+        company_name=profile.company_name,
+        category=profile.category,
+        experience_level=profile.experience_level,
+        employment_type=profile.employment_type,
+        description=profile.job_description
+    )
+
+    # 5. Map JD summary
+    jd_summary = JobProfileReviewJdSummary(
+        extracted_skills=profile.skills or [],
+        competencies=competencies
+    )
+
+    # 6. Map levels static titles and descriptions
+    LEVEL_METADATA = {
+        1: {
+            "title": "General Fundamentals",
+            "description": "Basic concepts and foundational knowledge questions."
+        },
+        2: {
+            "title": "Project & Resume Based",
+            "description": "Questions based on resume projects and practical implementation."
+        },
+        3: {
+            "title": "Production & Scenario Based",
+            "description": "Production-level debugging and real-world problem-solving questions."
+        },
+        4: {
+            "title": "Advanced / Pressure Scenarios",
+            "description": "High-pressure and advanced real-world interview situations."
+        }
+    }
+
+    levels_list = []
+    for lvl in [1, 2, 3, 4]:
+        meta = LEVEL_METADATA[lvl]
+        lvl_questions = [q for q in questions if q.level == lvl]
+        
+        # Get first 3 questions as preview questions
+        preview = [
+            JobProfileReviewPreviewQuestion(question_id=q.id, question=q.question_text)
+            for q in lvl_questions[:3]
+        ]
+        
+        levels_list.append(JobProfileReviewLevelInfo(
+            level=lvl,
+            title=meta["title"],
+            description=meta["description"],
+            question_count=len(lvl_questions),
+            preview_questions=preview
+        ))
+
+    # 7. Calculate totals
+    total_questions = len(questions)
+    total_levels = sum(1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions))
+
+    question_summary = JobProfileReviewQuestionSummary(
+        total_questions=total_questions,
+        total_levels=total_levels,
+        levels=levels_list
+    )
+
+    return JobProfileReviewResponse(
+        job_profile_id=job_profile_id,
+        role_details=role_details,
+        jd_summary=jd_summary,
+        question_summary=question_summary,
+        status="draft"
+    )
+
+
+@_app.post(
+    path="/api/v2/job-profiles/{job_profile_id}/submit",
+    response_model=JobProfileSubmitResponse,
+    status_code=200,
+)
+async def submit_job_profile(
+    job_profile_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileSubmitResponse:
+    # 1. Fetch JobProfile record
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=404,
+            detail="Job profile not found"
+        )
+
+    # 2. Fetch all linked questions
+    questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+
+    # 3. Validate generated questions exist
+    if not questions:
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="Cannot submit role without generated questions"
+        )
+
+    # 4. Submit the profile (updates status to 'under_review' and saves current timestamp)
+    updated_profile = await job_profile_repo.submit_profile(job_profile_id=job_profile_id)
+
+    # 5. Calculate counts
+    total_questions = len(questions)
+    total_levels = sum(1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions))
+
+    return JobProfileSubmitResponse(
+        job_profile_id=updated_profile.id,
+        job_name=updated_profile.job_name,
+        status=updated_profile.status,
+        submitted_at=updated_profile.submitted_at,
+        total_questions=total_questions,
+        total_levels=total_levels,
+        message="Role submitted successfully"
+    )
+
+
+
+
+
+@_app.delete(
+    path="/api/v2/job-profiles/{job_profile_id}",
+    response_model=JobProfileDeleteResponse,
+    status_code=200,
+)
+async def delete_job_profile(
+    job_profile_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileDeleteResponse:
+    deleted = await job_profile_repo.delete_profile(profile_id=job_profile_id)
+    if not deleted:
+        raise fastapi.HTTPException(
+            status_code=404,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+    return JobProfileDeleteResponse(deleted=True, job_profile_id=job_profile_id)
 
 
 
@@ -118,9 +320,9 @@ async def upload_job_description(
     extension, size = await validate_file(file)
     return JobProfileUploadResponse(
         success=True,
-        originalFileName=file.filename or "",
-        fileType=extension.replace(".", ""),
-        fileSize=size,
+        original_file_name=file.filename or "",
+        file_type=extension.replace(".", ""),
+        file_size=size,
     )
 
 
@@ -133,12 +335,242 @@ async def upload_knowledge_questions(
     file: UploadFile = File(...),
     current_user=fastapi.Depends(_fake_current_user),
 ) -> JobProfileUploadResponse:
+    import io
+    import re
+    import datetime
+    import zipfile
+    import xml.etree.ElementTree as ET
+    import PyPDF2
+    
     extension, size = await validate_file(file)
+    uploaded_at = datetime.datetime.now(datetime.timezone.utc)
+    
+    topics_detected = []
+    total_questions = 0
+    topics_list = []
+    
+    try:
+        await file.seek(0)
+        content = await file.read()
+        
+        extracted_text = ""
+        ext = extension.lower()
+        if ext == ".txt":
+            extracted_text = content.decode("utf-8", errors="ignore")
+        elif ext == ".pdf":
+            try:
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
+                texts = []
+                for page in pdf_reader.pages:
+                    try:
+                        page_text = page.extract_text() or ""
+                        if page_text.strip():
+                            texts.append(page_text)
+                    except Exception:
+                        continue
+                extracted_text = "\n".join(texts)
+            except Exception:
+                extracted_text = ""
+        elif ext == ".docx":
+            try:
+                with zipfile.ZipFile(io.BytesIO(content)) as z:
+                    xml_content = z.read("word/document.xml")
+                    root = ET.fromstring(xml_content)
+                    texts = []
+                    for elem in root.iter():
+                        if elem.tag.endswith('}t'):
+                            if elem.text:
+                                texts.append(elem.text)
+                    extracted_text = " ".join(texts)
+            except Exception:
+                extracted_text = ""
+        elif ext == ".doc":
+            extracted_text = content.decode("utf-8", errors="ignore")
+            
+        if extracted_text.strip():
+            lines = [line.strip() for line in extracted_text.split("\n")]
+            
+            filtered_lines = []
+            unwanted_substrings = [
+                "Barabari Tech Collective",
+                "Expanded Interview Knowledge Base",
+                "Engineering Interview Guidelines",
+                "Copyright",
+                "Confidential",
+                "Page",
+                "v2.0 May 2026",
+                "Assessment Level",
+                "Sample Questions / Topics",
+                "Document Prepared By",
+                "Sharath Nair",
+                "Engineering Manager"
+            ]
+            
+            for line in lines:
+                clean = line.strip()
+                if not clean:
+                    continue
+                if clean in ("•", "-", "*"):
+                    continue
+                
+                is_unwanted = False
+                for sub in unwanted_substrings:
+                    if sub.lower() in clean.lower():
+                        is_unwanted = True
+                        break
+                if not is_unwanted:
+                    filtered_lines.append(clean)
+                    
+            def is_question_start_prefix(clean_line: str) -> bool:
+                question_prefixes = [
+                    "What", "Explain", "How", "When", "Why", "Write", "Discuss",
+                    "Advanced CSS", "Advanced TypeScript", "JWT vs", "Microservices vs", "gRPC vs"
+                ]
+                for prefix in question_prefixes:
+                    if clean_line.lower().startswith(prefix.lower()):
+                        if len(clean_line) == len(prefix) or clean_line[len(prefix)].isspace() or clean_line[len(prefix)] in (",", ";", ":", "-", "."):
+                            return True
+                return False
+
+            topics_map = {}
+            current_candidate_type = "Freshers"
+            current_topic = "Frontend"
+            current_level = 1
+            
+            last_question_key = None
+            
+            for line in filtered_lines:
+                clean_for_header = re.sub(r'^[#*\-\s\+•]+', '', line).strip()
+                
+                if "part 1" in line.lower() and "freshers" in line.lower():
+                    current_candidate_type = "Freshers"
+                    continue
+                elif "part 2" in line.lower() and "experienced" in line.lower():
+                    current_candidate_type = "Experienced"
+                    continue
+                    
+                is_topic_hdr = False
+                for vt in ["Frontend", "Backend (Java)", "Node.js"]:
+                    if clean_for_header.lower() == vt.lower():
+                        current_topic = vt
+                        is_topic_hdr = True
+                        break
+                if is_topic_hdr:
+                    continue
+                    
+                level_match = re.match(r'^level\s*([1-4])', clean_for_header, re.IGNORECASE)
+                if level_match:
+                    current_level = int(level_match.group(1))
+                    continue
+                    
+                is_section_lbl = False
+                for lbl in ["Easy & Fundamentals", "Resume & Project Based", "Production Based", "Advanced"]:
+                    if clean_for_header.lower() == lbl.lower():
+                        is_section_lbl = True
+                        break
+                if is_section_lbl:
+                    continue
+                    
+                question_text = re.sub(r'^\d+[\.\)]\s*', '', line)
+                question_text = re.sub(r'^[#*\-\s\+•]+', '', question_text).strip()
+                
+                if not question_text:
+                    continue
+                    
+                key = (current_topic, current_candidate_type, current_level)
+                topic_key = (current_topic, current_candidate_type)
+                
+                starts_new = False
+                starts_with_prefix = is_question_start_prefix(question_text)
+                ends_with_qmark = question_text.endswith("?")
+                
+                if starts_with_prefix:
+                    starts_new = True
+                elif ends_with_qmark:
+                    if topic_key in topics_map and current_level in topics_map[topic_key] and topics_map[topic_key][current_level]:
+                        prev_q = topics_map[topic_key][current_level][-1]
+                        if prev_q.endswith("?"):
+                            starts_new = True
+                    else:
+                        starts_new = True
+                        
+                if starts_new or last_question_key is None or key != last_question_key:
+                    if topic_key not in topics_map:
+                        topics_map[topic_key] = {}
+                    if current_level not in topics_map[topic_key]:
+                        topics_map[topic_key][current_level] = []
+                    topics_map[topic_key][current_level].append(question_text)
+                    last_question_key = key
+                else:
+                    if topic_key in topics_map and current_level in topics_map[topic_key]:
+                        prev_questions = topics_map[topic_key][current_level]
+                        if prev_questions:
+                            prev_questions[-1] = prev_questions[-1] + " " + question_text
+                        else:
+                            prev_questions.append(question_text)
+                    else:
+                        if topic_key not in topics_map:
+                            topics_map[topic_key] = {}
+                        if current_level not in topics_map[topic_key]:
+                            topics_map[topic_key][current_level] = []
+                        topics_map[topic_key][current_level].append(question_text)
+                        last_question_key = key
+
+            candidates_order = ["Freshers", "Experienced"]
+            topics_order = ["Frontend", "Backend (Java)", "Node.js"]
+            
+            topics_detected_set = set()
+            
+            for cand in candidates_order:
+                for top in topics_order:
+                    key = (top, cand)
+                    if key in topics_map:
+                        levels_dict = topics_map[key]
+                        levels_res = []
+                        topic_question_count = 0
+                        
+                        for lvl_num in sorted(levels_dict.keys()):
+                            q_list = levels_dict[lvl_num]
+                            q_list_clean = [q.strip() for q in q_list if q.strip()]
+                            if not q_list_clean:
+                                continue
+                            lvl_count = len(q_list_clean)
+                            topic_question_count += lvl_count
+                            levels_res.append({
+                                "level": lvl_num,
+                                "questionCount": lvl_count,
+                                "questions": q_list_clean
+                            })
+                            
+                        if topic_question_count > 0:
+                            total_questions += topic_question_count
+                            topics_detected_set.add(top)
+                            topics_list.append({
+                                "topicName": top,
+                                "candidateType": cand,
+                                "questionCount": topic_question_count,
+                                "levels": levels_res
+                            })
+                            
+            topics_detected = [t for t in topics_order if t in topics_detected_set]
+            for t in topics_detected_set:
+                if t not in topics_detected:
+                    topics_detected.append(t)
+                    
+    except Exception:
+        topics_detected = []
+        total_questions = 0
+        topics_list = []
+        
     return JobProfileUploadResponse(
         success=True,
-        originalFileName=file.filename or "",
-        fileType=extension.replace(".", ""),
-        fileSize=size,
+        original_file_name=file.filename or "",
+        file_type=extension.replace(".", ""),
+        file_size=size,
+        uploaded_at=uploaded_at,
+        topics_detected=topics_detected,
+        total_questions=total_questions,
+        topics=topics_list
     )
 
 
@@ -151,23 +583,549 @@ async def extract_skills(
     payload: JobProfileExtractSkillsRequest,
     current_user=fastapi.Depends(_fake_current_user),
 ) -> JobProfileExtractSkillsResponse:
-    if not payload.jobDescription.strip():
+    if not payload.job_description.strip():
         raise fastapi.HTTPException(
             status_code=422,
-            detail="jobDescription cannot be empty"
+            detail="job_description cannot be empty"
         )
-    extracted_skills = extract_skills_from_text(payload.jobDescription)
+    extracted_skills = extract_skills_from_text(payload.job_description)
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
+
+
+@_app.post(
+    path="/api/v2/job-profiles/{job_profile_id}/questions/generate",
+    response_model=JobProfileGenerateQuestionsResponse,
+    status_code=200,
+)
+async def generate_questions_v2(
+    job_profile_id: int,
+    payload: JobProfileGenerateQuestionsRequest,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileGenerateQuestionsResponse:
+    # 1. Fetch job profile details & validate existence
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if profile is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+
+    # 2. Level to difficulty map
+    level_map = {
+        1: "easy",
+        2: "medium",
+        3: "hard",
+        4: "expert"
+    }
+
+    # 3. Validate levels and counts
+    total_requested = 0
+    for l in payload.levels:
+        if l.level not in level_map:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid level {l.level}. Level must be 1, 2, 3, or 4."
+            )
+        if l.count < 0:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid count {l.count} for level {l.level}. Count cannot be negative."
+            )
+        total_requested += l.count
+
+    if total_requested == 0:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Total question count must be greater than zero."
+        )
+
+    # 4. Generate questions using existing LLM system
+    generated_questions_data = []
+
+    skills_list = profile.skills or []
+    track = profile.job_name
+    context_text = profile.job_description
+
+    from src.services.syllabus_service import syllabus_service
+    from src.services.llm import generate_interview_questions_with_llm
+
+    for l in payload.levels:
+        if l.count == 0:
+            continue
+
+        difficulty = level_map[l.level]
+        
+        # Prepare syllabus and question ratio using existing syllabus service
+        role = syllabus_service._role_manager.derive_role(track)
+        topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
+        
+        topics = {
+            "tech": topic_bank.tech,
+            "tech_allied": topic_bank.tech_allied,
+            "behavioral": topic_bank.behavioral,
+            "archetypes": topic_bank.archetypes,
+            "depth_guidelines": topic_bank.depth_guidelines,
+        }
+        
+        # Extract tech-allied topics from job description
+        topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
+            resume_text=context_text,
+            skills=skills_list,
+            fallback_topics=topics.get("tech_allied", []),
+        )
+        
+        question_ratio = syllabus_service.compute_question_ratio(
+            years_experience=None,
+            has_resume_text=bool(context_text),
+            has_skills=bool(skills_list),
+        )
+        
+        ratio = {
+            "tech": question_ratio.tech,
+            "tech_allied": question_ratio.tech_allied,
+            "behavioral": question_ratio.behavioral,
+        }
+        
+        influence = {
+            "target_role": role,
+            "difficulty": difficulty,
+            "skills": skills_list,
+            "experience_level": profile.experience_level,
+        }
+        if payload.knowledge_reference_context:
+            influence["knowledge_reference_context"] = payload.knowledge_reference_context
+
+        questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
+            track=track,
+            context_text=context_text,
+            count=l.count,
+            difficulty=difficulty,
+            syllabus_topics=topics,
+            ratio=ratio,
+            influence=influence,
+        )
+
+        if error or not structured_items:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate questions for Level {l.level}: {error or 'No questions generated'}"
+            )
+
+        for item in structured_items:
+            generated_questions_data.append({
+                "job_profile_id": profile.id,
+                "question_text": item["text"],
+                "level": l.level,
+                "difficulty": difficulty,
+                "question_type": item.get("category", "theoretical"),
+                "is_ai_generated": True,
+                "keywords": item.get("keywords") or [],
+                "concepts_covered": item.get("concepts_covered") or [],
+                "expected_answer": item.get("expected_answer"),
+                "example_output": item.get("example_output"),
+            })
+
+    # 5. Save generated questions into database
+    db_questions = await job_profile_repo.create_job_profile_questions(generated_questions_data)
+
+    # 6. Format and return response
+    response_items = [
+        JobProfileGeneratedQuestionItem(
+            question_id=str(q.id),
+            question=q.question_text,
+            level=q.level,
+            difficulty=q.difficulty,
+            type=q.question_type,
+            is_ai_generated=q.is_ai_generated,
+            keywords=getattr(q, "keywords", []) or [],
+            concepts_covered=getattr(q, "concepts_covered", []) or [],
+            expected_answer=getattr(q, "expected_answer", None),
+            example_output=getattr(q, "example_output", None),
+        )
+        for q in db_questions
+    ]
+
+    return JobProfileGenerateQuestionsResponse(
+        job_profile_id=str(profile.id),
+        total_questions=len(response_items),
+        questions=response_items
+    )
+
+
+@_app.get(
+    path="/api/v2/job-profiles/{job_profile_id}/questions",
+    response_model=JobProfileQuestionsListResponse,
+    status_code=200,
+)
+async def get_job_profile_questions_v2(
+    job_profile_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileQuestionsListResponse:
+    # 1. Validate job_profile_id exists
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+
+    # 2. Fetch all questions linked to job_profile_id
+    db_questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+
+    # 3. Calculate level counts
+    level_counts = {
+        "level_1": 0,
+        "level_2": 0,
+        "level_3": 0,
+        "level_4": 0,
+    }
+    for q in db_questions:
+        if q.level == 1:
+            level_counts["level_1"] += 1
+        elif q.level == 2:
+            level_counts["level_2"] += 1
+        elif q.level == 3:
+            level_counts["level_3"] += 1
+        elif q.level == 4:
+            level_counts["level_4"] += 1
+
+    # 4. Map questions to response format
+    questions_list = [
+        JobProfileQuestionItem(
+            question_id=str(q.id),
+            question=q.question_text,
+            level=q.level,
+            difficulty=q.difficulty,
+            type=q.question_type,
+            is_ai_generated=q.is_ai_generated,
+            created_at=q.created_at,
+            keywords=getattr(q, "keywords", []) or [],
+            concepts_covered=getattr(q, "concepts_covered", []) or [],
+            expected_answer=getattr(q, "expected_answer", None),
+            example_output=getattr(q, "example_output", None),
+        )
+        for q in db_questions
+    ]
+
+    return JobProfileQuestionsListResponse(
+        job_profile_id=str(job_profile_id),
+        total_questions=len(db_questions),
+        level_counts=JobProfileQuestionLevelCounts(**level_counts),
+        questions=questions_list,
+    )
+
+
+@_app.post(
+    path="/api/v2/job-profiles/{job_profile_id}/questions",
+    response_model=JobProfileAddQuestionResponse,
+    status_code=201,
+)
+async def add_job_profile_question_v2(
+    job_profile_id: int,
+    payload: JobProfileAddQuestionRequest,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileAddQuestionResponse:
+    # 1. Validate job_profile_id exists
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+
+    # 2. Validate question text is not empty
+    question_text = payload.question.strip() if payload.question else ""
+    if not question_text:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Question text cannot be empty",
+        )
+
+    # 3. Validate level is between 1 and 4
+    if payload.level not in [1, 2, 3, 4]:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Invalid level. Level must be 1, 2, 3, or 4.",
+        )
+
+    # 4. Save question in job_profile_question table
+    db_question = await job_profile_repo.add_job_profile_question(
+        job_profile_id=job_profile_id,
+        question_text=question_text,
+        level=payload.level,
+        difficulty=payload.difficulty,
+        question_type=payload.type,
+        is_ai_generated=payload.is_ai_generated,
+        keywords=payload.keywords or [],
+        concepts_covered=payload.concepts_covered or [],
+        expected_answer=payload.expected_answer,
+        example_output=payload.example_output,
+    )
+
+    # 5. Return created question
+    return JobProfileAddQuestionResponse(
+        question_id=str(db_question.id),
+        job_profile_id=str(job_profile_id),
+        question=db_question.question_text,
+        level=db_question.level,
+        difficulty=db_question.difficulty,
+        type=db_question.question_type,
+        is_ai_generated=db_question.is_ai_generated,
+        message="Question added successfully",
+        keywords=getattr(db_question, "keywords", []) or [],
+        concepts_covered=getattr(db_question, "concepts_covered", []) or [],
+        expected_answer=getattr(db_question, "expected_answer", None),
+        example_output=getattr(db_question, "example_output", None),
+    )
+
+
+@_app.patch(
+    path="/api/v2/job-profile-questions/{question_id}",
+    response_model=JobProfileUpdateQuestionResponse,
+    status_code=200,
+)
+async def update_job_profile_question_v2(
+    question_id: int,
+    payload: JobProfileUpdateQuestionRequest,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileUpdateQuestionResponse:
+    # 1. Validate question_id exists
+    question = await job_profile_repo.get_question_by_id(question_id=question_id)
+    if not question:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Question with ID {question_id} not found",
+        )
+
+    # 2. Validate question text is not empty if provided
+    update_data = {}
+    if payload.question is not None:
+        question_text = payload.question.strip()
+        if not question_text:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="Question text cannot be empty",
+            )
+        update_data["question_text"] = question_text
+
+    # 3. Validate level is between 1 and 4 if provided
+    if payload.level is not None:
+        if payload.level not in [1, 2, 3, 4]:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="Invalid level. Level must be 1, 2, 3, or 4.",
+            )
+        update_data["level"] = payload.level
+
+    if payload.difficulty is not None:
+        update_data["difficulty"] = payload.difficulty
+
+    if payload.type is not None:
+        update_data["question_type"] = payload.type
+
+    if payload.keywords is not None:
+        update_data["keywords"] = payload.keywords
+
+    if payload.concepts_covered is not None:
+        update_data["concepts_covered"] = payload.concepts_covered
+
+    if payload.expected_answer is not None:
+        update_data["expected_answer"] = payload.expected_answer
+
+    if payload.example_output is not None:
+        update_data["example_output"] = payload.example_output
+
+    # 4. Save updated question
+    updated_question = await job_profile_repo.update_job_profile_question(
+        question=question,
+        update_data=update_data
+    )
+
+    # 5. Return updated response
+    return JobProfileUpdateQuestionResponse(
+        question_id=str(updated_question.id),
+        question=updated_question.question_text,
+        level=updated_question.level,
+        difficulty=updated_question.difficulty,
+        type=updated_question.question_type,
+        is_ai_generated=updated_question.is_ai_generated,
+        message="Question updated successfully",
+        keywords=getattr(updated_question, "keywords", []) or [],
+        concepts_covered=getattr(updated_question, "concepts_covered", []) or [],
+        expected_answer=getattr(updated_question, "expected_answer", None),
+        example_output=getattr(updated_question, "example_output", None),
+    )
+
+
+@_app.post(
+    path="/api/v2/job-profile-questions/{question_id}/regenerate",
+    response_model=JobProfileRegenerateQuestionResponse,
+    status_code=200,
+)
+async def regenerate_job_profile_question_v2(
+    question_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileRegenerateQuestionResponse:
+    # 1. Validate question_id exists
+    question = await job_profile_repo.get_question_by_id(question_id=question_id)
+    if not question:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Question with ID {question_id} not found",
+        )
+
+    # 2. Fetch linked job profile
+    profile = await job_profile_repo.get_by_id(job_profile_id=question.job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="Job profile for this question not found",
+        )
+
+    # 3. Extract and map configuration
+    track = profile.job_name
+    context_text = profile.job_description or ""
+    skills_list = profile.skills or []
+
+    level_map = {
+        1: "easy",
+        2: "medium",
+        3: "hard",
+        4: "expert"
+    }
+    difficulty = level_map.get(question.level, "easy")
+
+    # 4. Prepare syllabus and ratio
+    from src.services.syllabus_service import syllabus_service
+    from src.services.llm import generate_interview_questions_with_llm
+
+    role = syllabus_service._role_manager.derive_role(track)
+    topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
+
+    topics = {
+        "tech": topic_bank.tech,
+        "tech_allied": topic_bank.tech_allied,
+        "behavioral": topic_bank.behavioral,
+        "archetypes": topic_bank.archetypes,
+        "depth_guidelines": topic_bank.depth_guidelines,
+    }
+    topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
+        resume_text=context_text,
+        skills=skills_list,
+        fallback_topics=topics.get("tech_allied", []),
+    )
+
+    question_ratio = syllabus_service.compute_question_ratio(
+        years_experience=None,
+        has_resume_text=bool(context_text),
+        has_skills=bool(skills_list),
+    )
+    ratio = {
+        "tech": question_ratio.tech,
+        "tech_allied": question_ratio.tech_allied,
+        "behavioral": question_ratio.behavioral,
+    }
+
+    influence = {
+        "target_role": role,
+        "difficulty": difficulty,
+        "skills": skills_list,
+        "experience_level": profile.experience_level,
+    }
+
+    # 5. Generate new question using existing LLM service
+    questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
+        track=track,
+        context_text=context_text,
+        count=1,
+        difficulty=difficulty,
+        syllabus_topics=topics,
+        ratio=ratio,
+        influence=influence,
+    )
+
+    if error or not structured_items:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to regenerate question: {error or 'No question returned from LLM'}"
+        )
+
+    new_item = structured_items[0]
+
+    # 6. Replace and update old question text and detail fields
+    update_data = {
+        "question_text": new_item["text"],
+        "question_type": new_item.get("category", "theoretical"),
+        "is_ai_generated": True,
+        "keywords": new_item.get("keywords") or [],
+        "concepts_covered": new_item.get("concepts_covered") or [],
+        "expected_answer": new_item.get("expected_answer"),
+        "example_output": new_item.get("example_output"),
+    }
+    updated_question = await job_profile_repo.update_job_profile_question(
+        question=question,
+        update_data=update_data
+    )
+
+    # 7. Return updated response
+    return JobProfileRegenerateQuestionResponse(
+        question_id=str(updated_question.id),
+        question=updated_question.question_text,
+        level=updated_question.level,
+        difficulty=updated_question.difficulty,
+        type=updated_question.question_type,
+        is_ai_generated=updated_question.is_ai_generated,
+        message="Question regenerated successfully",
+        keywords=getattr(updated_question, "keywords", []) or [],
+        concepts_covered=getattr(updated_question, "concepts_covered", []) or [],
+        expected_answer=getattr(updated_question, "expected_answer", None),
+        example_output=getattr(updated_question, "example_output", None),
+    )
+
+
+@_app.delete(
+    path="/api/v2/job-profile-questions/{question_id}",
+    response_model=JobProfileDeleteQuestionResponse,
+    status_code=200,
+)
+async def delete_job_profile_question_v2(
+    question_id: int,
+    current_user=fastapi.Depends(_fake_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileDeleteQuestionResponse:
+    # 1. Validate question_id exists
+    question = await job_profile_repo.get_question_by_id(question_id=question_id)
+    if not question:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Question with ID {question_id} not found",
+        )
+
+    # 2. Delete the question
+    await job_profile_repo.delete_job_profile_question(question=question)
+
+    # 3. Return success response
+    return JobProfileDeleteQuestionResponse(
+        message="Question deleted successfully",
+        question_id=str(question_id),
+    )
 
 
 client = TestClient(_app)
 
 # Mock model helper representing ORM
 class MockJobProfileModel:
-    def __init__(self, id, job_name, job_description, created_at=None):
+    def __init__(self, id, job_name, job_description, created_at=None, skills=None, experience_level=None):
         self.id = id
         self.job_name = job_name
         self.job_description = job_description or ""
+        self.skills = skills
+        self.experience_level = experience_level
         self.created_at = created_at or datetime.datetime.now(datetime.timezone.utc)
         self.updated_at = self.created_at
 
@@ -233,9 +1191,9 @@ def test_list_job_profiles():
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 2
-    assert data["items"][0]["title"] == "Python Developer"
-    assert data["items"][1]["title"] == "Java Architect"
-    _mock_repo.list_profiles.assert_called_once_with(category=None)
+    assert data["items"][0]["jobName"] == "Python Developer"
+    assert data["items"][1]["jobName"] == "Java Architect"
+    _mock_repo.list_profiles.assert_called_once_with(category=None, limit=None)
 
 
 def test_list_job_profiles_with_category_filter():
@@ -249,24 +1207,119 @@ def test_list_job_profiles_with_category_filter():
     assert response.status_code == 200
     data = response.json()
     assert data["total"] == 1
-    assert data["items"][0]["title"] == "Python Developer"
-    _mock_repo.list_profiles.assert_called_with(category="Python")
+    assert data["items"][0]["jobName"] == "Python Developer"
+    _mock_repo.list_profiles.assert_called_with(category="Python", limit=None)
+
+
+def test_list_job_profiles_with_limit():
+    mock_profiles = [
+        MockJobProfileModel(1, "Python Developer", "Writes clean code")
+    ]
+    _mock_repo.list_profiles = AsyncMock(return_value=mock_profiles)
+
+    # Test filtering with limit
+    response = client.get("/api/v2/job-profiles?limit=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["jobName"] == "Python Developer"
+    _mock_repo.list_profiles.assert_called_with(category=None, limit=5)
+
+
+def test_list_job_profiles_with_category_and_limit():
+    mock_profiles = [
+        MockJobProfileModel(1, "Python Developer", "Writes clean code")
+    ]
+    _mock_repo.list_profiles = AsyncMock(return_value=mock_profiles)
+
+    # Test filtering with both category and limit
+    response = client.get("/api/v2/job-profiles?category=Python&limit=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert data["items"][0]["jobName"] == "Python Developer"
+    _mock_repo.list_profiles.assert_called_with(category="Python", limit=5)
 
 
 # 4. POST /api/v2/job-profiles
 def test_create_job_profile():
     mock_created = MockJobProfileModel(100, "Frontend Engineer", "Builds modern interfaces")
+    mock_created.company_name = "Google"
+    mock_created.experience_level = "Senior"
+    mock_created.skills = ["React", "CSS"]
+    mock_created.additional_context = "Urgent hire"
     _mock_repo.create_profile = AsyncMock(return_value=mock_created)
 
-    payload = {"title": "Frontend Engineer", "description": "Builds modern interfaces"}
+    payload = {
+        "jobName": "Frontend Engineer",
+        "jobDescription": "Builds modern interfaces",
+        "companyName": "Google",
+        "experienceLevel": "Senior",
+        "skills": ["React", "CSS"],
+        "additionalContext": "Urgent hire"
+    }
     response = client.post("/api/v2/job-profiles", json=payload)
     
     assert response.status_code == 201
     data = response.json()
     assert data["id"] == 100
+    assert data["jobName"] == "Frontend Engineer"
+    assert data["jobDescription"] == "Builds modern interfaces"
+    assert data["companyName"] == "Google"
+    assert data["experienceLevel"] == "Senior"
+    assert data["skills"] == ["React", "CSS"]
+    assert data["additionalContext"] == "Urgent hire"
+    _mock_repo.create_profile.assert_called_once_with(
+        job_name="Frontend Engineer",
+        job_description="Builds modern interfaces",
+        company_name="Google",
+        experience_level="Senior",
+        skills=["React", "CSS"],
+        additional_context="Urgent hire",
+        category=None,
+        employment_type=None
+    )
+
+
+
+
+def test_create_job_profile_legacy_aliases():
+    mock_created = MockJobProfileModel(100, "Frontend Engineer", "Builds modern interfaces")
+    _mock_repo.create_profile = AsyncMock(return_value=mock_created)
+
+    # Send legacy key names: "title" and "description"
+    payload = {
+        "title": "Frontend Engineer",
+        "description": "Builds modern interfaces"
+    }
+    response = client.post("/api/v2/job-profiles", json=payload)
+    
+    assert response.status_code == 201
+    data = response.json()
+    assert data["id"] == 100
+    
+    # Assert BOTH the new keys and legacy keys exist exactly in the JSON keys!
+    assert "jobName" in data
+    assert "jobDescription" in data
+    assert "title" in data
+    assert "description" in data
+    
+    # Assert their values are correctly mapped
+    assert data["jobName"] == "Frontend Engineer"
+    assert data["jobDescription"] == "Builds modern interfaces"
     assert data["title"] == "Frontend Engineer"
     assert data["description"] == "Builds modern interfaces"
-    _mock_repo.create_profile.assert_called_once_with(title="Frontend Engineer", description="Builds modern interfaces")
+    
+    _mock_repo.create_profile.assert_called_once_with(
+        job_name="Frontend Engineer",
+        job_description="Builds modern interfaces",
+        company_name=None,
+        experience_level=None,
+        skills=None,
+        additional_context=None,
+        category=None,
+        employment_type=None
+    )
 
 
 
@@ -297,19 +1350,100 @@ def test_upload_job_description_invalid_extension():
 
 # 7. POST /api/v2/job-profiles/upload/knowledge-questions
 def test_upload_knowledge_questions_success():
-    file_content = b"docx job questions bytes"
-    files = {"file": ("questions.docx", io.BytesIO(file_content), "application/octet-stream")}
-
+    # Plain text content with refined candidate type, topic and level structure
+    file_content = (
+        "Barabari Tech Collective\n"
+        "Engineering Interview Guidelines\n"
+        "Part 1: Freshers\n"
+        "Frontend\n"
+        "Level 1\n"
+        "What are the core differences between HTML5, CSS3, and JavaScript?\n"
+        "Explain the significance of Semantic HTML elements and how they affect SEO and accessibility.\n"
+        "Level 2\n"
+        "Explain the JavaScript Event Loop (Call Stack, Web APIs, Microtask\n"
+        "Queue).\n"
+        "Backend (Java)\n"
+        "Level 1\n"
+        "What is JVM and JDK?\n"
+        "Node.js\n"
+        "Level 1\n"
+        "What is event loop in Node.js?\n"
+        "Part 2: Experienced\n"
+        "Frontend\n"
+        "Level 1\n"
+        "What are common HTTP status codes and when should you use 200, 201, 400, 401, 403,\n"
+        "404, 500?\n"
+    ).encode("utf-8")
+    
+    files = {"file": ("Barabari_Interview_Knowledge_Base_V2.txt", io.BytesIO(file_content), "text/plain")}
     response = client.post("/api/v2/job-profiles/upload/knowledge-questions", files=files)
+    
     assert response.status_code == 201
     data = response.json()
     assert data["success"] is True
-    assert data["originalFileName"] == "questions.docx"
-    assert data["fileType"] == "docx"
+    assert data["originalFileName"] == "Barabari_Interview_Knowledge_Base_V2.txt"
+    assert data["fileType"] == "txt"
     assert data["fileSize"] == len(file_content)
-    # Check that stateless keys are absolutely absent
-    assert "storedFileName" not in data
-    assert "filePath" not in data
+    assert data["uploadedAt"] is not None
+    assert set(data["topicsDetected"]) == {"Frontend", "Backend (Java)", "Node.js"}
+    assert data["totalQuestions"] == 6
+    
+    topics = data["topics"]
+    assert len(topics) == 4
+    
+    # 1. Frontend Freshers
+    frontend_freshers = next(t for t in topics if t["topicName"] == "Frontend" and t["candidateType"] == "Freshers")
+    assert frontend_freshers["questionCount"] == 3
+    assert len(frontend_freshers["levels"]) == 2
+    lvl1 = next(l for l in frontend_freshers["levels"] if l["level"] == 1)
+    assert lvl1["questionCount"] == 2
+    assert "What are the core differences between HTML5, CSS3, and JavaScript?" in lvl1["questions"]
+    assert "Explain the significance of Semantic HTML elements and how they affect SEO and accessibility." in lvl1["questions"]
+    
+    # Verify wrapped lines are merged correctly
+    lvl2 = next(l for l in frontend_freshers["levels"] if l["level"] == 2)
+    assert lvl2["questionCount"] == 1
+    assert lvl2["questions"][0] == "Explain the JavaScript Event Loop (Call Stack, Web APIs, Microtask Queue)."
+    
+    # 2. Backend (Java) Freshers
+    java_freshers = next(t for t in topics if t["topicName"] == "Backend (Java)" and t["candidateType"] == "Freshers")
+    assert java_freshers["questionCount"] == 1
+    assert java_freshers["levels"][0]["questions"][0] == "What is JVM and JDK?"
+    
+    # 3. Node.js Freshers
+    node_freshers = next(t for t in topics if t["topicName"] == "Node.js" and t["candidateType"] == "Freshers")
+    assert node_freshers["questionCount"] == 1
+    assert node_freshers["levels"][0]["questions"][0] == "What is event loop in Node.js?"
+    
+    # 4. Frontend Experienced
+    frontend_exp = next(t for t in topics if t["topicName"] == "Frontend" and t["candidateType"] == "Experienced")
+    assert frontend_exp["questionCount"] == 1
+    assert frontend_exp["levels"][0]["questions"][0] == "What are common HTTP status codes and when should you use 200, 201, 400, 401, 403, 404, 500?"
+    
+    # Check that header/footer text was cleaned out and does not appear as a question
+    all_questions = []
+    for t in topics:
+        for l in t["levels"]:
+            all_questions.extend(l["questions"])
+    assert not any("Barabari Tech Collective" in q for q in all_questions)
+    assert not any("Engineering Interview Guidelines" in q for q in all_questions)
+
+
+def test_upload_knowledge_questions_fallback_empty():
+    # File content that contains no text or is unparsable
+    file_content = b""
+    files = {"file": ("empty.txt", io.BytesIO(file_content), "text/plain")}
+    response = client.post("/api/v2/job-profiles/upload/knowledge-questions", files=files)
+    
+    assert response.status_code == 201
+    data = response.json()
+    assert data["success"] is True
+    assert data["originalFileName"] == "empty.txt"
+    assert data["fileType"] == "txt"
+    assert data["fileSize"] == 0
+    assert data["topicsDetected"] == []
+    assert data["totalQuestions"] == 0
+    assert data["topics"] == []
 
 
 # 8. POST /api/v2/job-profiles/extract-skills
@@ -329,3 +1463,995 @@ def test_extract_skills_empty_payload():
     payload = {"jobDescription": ""}
     response = client.post("/api/v2/job-profiles/extract-skills", json=payload)
     assert response.status_code == 422
+
+
+# 9. POST /api/v2/job-profiles/{job_profile_id}/questions/generate
+def test_generate_questions_success():
+    profile = MockJobProfileModel(
+        id=123,
+        job_name="Python Developer",
+        job_description="Looking for an experienced Python developer with React skills.",
+        skills=["Python", "React"],
+        experience_level="Mid"
+    )
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    mock_items = [
+        {"text": "What is Django?", "category": "tech"},
+        {"text": "Explain React state management.", "category": "tech_allied"}
+    ]
+
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    saved_questions = [
+        MockQuestion(1, 123, "What is Django?", 1, "easy", "tech", True),
+        MockQuestion(2, 123, "Explain React state management.", 1, "easy", "tech_allied", True)
+    ]
+    _mock_repo.create_job_profile_questions = AsyncMock(return_value=saved_questions)
+
+    payload = {
+        "levels": [
+            {"level": 1, "count": 2}
+        ]
+    }
+    with patch("src.services.llm.generate_interview_questions_with_llm", new_callable=AsyncMock) as mock_generate:
+        mock_generate.return_value = (["What is Django?", "Explain React state management."], None, 150, "gpt-4o-mini", mock_items)
+        response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_profile_id"] == "123"
+        assert data["total_questions"] == 2
+        assert data["questions"][0]["question_id"] == "1"
+        assert data["questions"][0]["question"] == "What is Django?"
+        assert data["questions"][0]["level"] == 1
+        assert data["questions"][0]["difficulty"] == "easy"
+        assert data["questions"][0]["type"] == "tech"
+        assert data["questions"][0]["is_ai_generated"] is True
+
+        _mock_repo.get_by_id.assert_called_with(job_profile_id=123)
+        mock_generate.assert_called_once()
+        _mock_repo.create_job_profile_questions.assert_called_once()
+
+
+def test_generate_questions_profile_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    payload = {
+        "levels": [
+            {"level": 1, "count": 2}
+        ]
+    }
+    response = client.post("/api/v2/job-profiles/999/questions/generate", json=payload)
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_generate_questions_invalid_level():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    payload = {
+        "levels": [
+            {"level": 5, "count": 2}
+        ]
+    }
+    response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
+    assert response.status_code == 400
+    assert "Invalid level" in response.json()["detail"]
+
+
+def test_generate_questions_negative_count():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    payload = {
+        "levels": [
+            {"level": 1, "count": -5}
+        ]
+    }
+    response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
+    assert response.status_code == 400
+    assert "Count cannot be negative" in response.json()["detail"]
+
+
+def test_get_questions_success():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated, created_at):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+            self.created_at = created_at
+
+    t1 = datetime.datetime(2026, 5, 26, 10, 0, 0, tzinfo=datetime.timezone.utc)
+    t2 = datetime.datetime(2026, 5, 26, 10, 5, 0, tzinfo=datetime.timezone.utc)
+
+    db_questions = [
+        MockQuestion(1, 123, "Question 1", 1, "easy", "tech", True, t1),
+        MockQuestion(2, 123, "Question 2", 2, "medium", "behavioral", True, t2)
+    ]
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=db_questions)
+
+    response = client.get("/api/v2/job-profiles/123/questions")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["job_profile_id"] == "123"
+    assert data["total_questions"] == 2
+    assert data["level_counts"]["level_1"] == 1
+    assert data["level_counts"]["level_2"] == 1
+    assert data["level_counts"]["level_3"] == 0
+    assert data["level_counts"]["level_4"] == 0
+    assert len(data["questions"]) == 2
+    assert data["questions"][0]["question_id"] == "1"
+    assert data["questions"][0]["question"] == "Question 1"
+    assert data["questions"][0]["level"] == 1
+    assert data["questions"][1]["level"] == 2
+    assert "2026-05-26T10:00:00" in data["questions"][0]["created_at"]
+
+
+def test_get_questions_profile_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    response = client.get("/api/v2/job-profiles/999/questions")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_get_questions_empty_list():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=[])
+
+    response = client.get("/api/v2/job-profiles/123/questions")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["job_profile_id"] == "123"
+    assert data["total_questions"] == 0
+    assert data["level_counts"]["level_1"] == 0
+    assert data["questions"] == []
+
+
+def test_add_question_success():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    created_q = MockQuestion(51, 123, "Explain closures in JavaScript.", 2, "medium", "theoretical", False)
+    _mock_repo.add_job_profile_question = AsyncMock(return_value=created_q)
+
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False
+    }
+
+    response = client.post("/api/v2/job-profiles/123/questions", json=payload)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["question_id"] == "51"
+    assert data["job_profile_id"] == "123"
+    assert data["question"] == "Explain closures in JavaScript."
+    assert data["level"] == 2
+    assert data["difficulty"] == "medium"
+    assert data["type"] == "theoretical"
+    assert data["is_ai_generated"] is False
+    assert data["message"] == "Question added successfully"
+
+
+def test_add_question_profile_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False
+    }
+    response = client.post("/api/v2/job-profiles/999/questions", json=payload)
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_add_question_empty_text():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    payload = {
+        "question": "   ",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False
+    }
+    response = client.post("/api/v2/job-profiles/123/questions", json=payload)
+    assert response.status_code == 400
+    assert "cannot be empty" in response.json()["detail"]
+
+
+def test_add_question_invalid_level():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 5,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False
+    }
+    response = client.post("/api/v2/job-profiles/123/questions", json=payload)
+    assert response.status_code == 400
+    assert "Invalid level" in response.json()["detail"]
+
+
+def test_update_question_success():
+    class MockQuestion:
+        def __init__(self, id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, "Old question text", 1, "easy", "theoretical", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    updated_q = MockQuestion(1, "Explain closures in JavaScript with examples.", 2, "medium", "theoretical", True)
+    _mock_repo.update_job_profile_question = AsyncMock(return_value=updated_q)
+
+    payload = {
+        "question": "Explain closures in JavaScript with examples.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical"
+    }
+
+    response = client.patch("/api/v2/job-profile-questions/1", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["question_id"] == "1"
+    assert data["question"] == "Explain closures in JavaScript with examples."
+    assert data["level"] == 2
+    assert data["difficulty"] == "medium"
+    assert data["type"] == "theoretical"
+    assert data["is_ai_generated"] is True
+    assert data["message"] == "Question updated successfully"
+
+
+def test_update_question_not_found():
+    _mock_repo.get_question_by_id = AsyncMock(return_value=None)
+    payload = {
+        "question": "Some text",
+        "level": 2,
+        "difficulty": "medium"
+    }
+    response = client.patch("/api/v2/job-profile-questions/999", json=payload)
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_update_question_empty_text():
+    class MockQuestion:
+        def __init__(self, id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, "Old question text", 1, "easy", "theoretical", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    payload = {
+        "question": "   "
+    }
+    response = client.patch("/api/v2/job-profile-questions/1", json=payload)
+    assert response.status_code == 400
+    assert "cannot be empty" in response.json()["detail"]
+
+
+def test_update_question_invalid_level():
+    class MockQuestion:
+        def __init__(self, id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, "Old question text", 1, "easy", "theoretical", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    payload = {
+        "level": 5
+    }
+    response = client.patch("/api/v2/job-profile-questions/1", json=payload)
+    assert response.status_code == 400
+    assert "Invalid level" in response.json()["detail"]
+
+
+def test_regenerate_question_success():
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, 123, "What is Django?", 1, "easy", "tech", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    profile = MockJobProfileModel(
+        id=123,
+        job_name="Python Developer",
+        job_description="Looking for an experienced Python developer.",
+        skills=["Python"],
+        experience_level="Mid"
+    )
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    mock_items = [{"text": "Explain closures in JavaScript.", "category": "tech"}]
+
+    updated_q = MockQuestion(1, 123, "Explain closures in JavaScript.", 1, "easy", "tech", True)
+    _mock_repo.update_job_profile_question = AsyncMock(return_value=updated_q)
+
+    with patch("src.services.llm.generate_interview_questions_with_llm", new_callable=AsyncMock) as mock_generate:
+        mock_generate.return_value = (["Explain closures in JavaScript."], None, 100, "gpt-4o-mini", mock_items)
+        response = client.post("/api/v2/job-profile-questions/1/regenerate")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["question_id"] == "1"
+        assert data["question"] == "Explain closures in JavaScript."
+        assert data["level"] == 1
+        assert data["difficulty"] == "easy"
+        assert data["type"] == "tech"
+        assert data["is_ai_generated"] is True
+        assert data["message"] == "Question regenerated successfully"
+
+        _mock_repo.get_question_by_id.assert_called_once_with(question_id=1)
+        _mock_repo.get_by_id.assert_called_once_with(job_profile_id=123)
+        mock_generate.assert_called_once()
+        _mock_repo.update_job_profile_question.assert_called_once()
+
+
+def test_regenerate_question_not_found():
+    _mock_repo.get_question_by_id = AsyncMock(return_value=None)
+    response = client.post("/api/v2/job-profile-questions/999/regenerate")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_regenerate_question_profile_not_found():
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, 123, "What is Django?", 1, "easy", "tech", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+
+    response = client.post("/api/v2/job-profile-questions/1/regenerate")
+    assert response.status_code == 404
+    assert "Job profile for this question not found" in response.json()["detail"]
+
+
+def test_regenerate_question_llm_failure():
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, 123, "What is Django?", 1, "easy", "tech", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    profile = MockJobProfileModel(
+        id=123,
+        job_name="Python Developer",
+        job_description="Looking for an experienced Python developer.",
+        skills=["Python"],
+        experience_level="Mid"
+    )
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    with patch("src.services.llm.generate_interview_questions_with_llm", new_callable=AsyncMock) as mock_generate:
+        mock_generate.return_value = ([], "LLM Failed Error", 0, "", [])
+        response = client.post("/api/v2/job-profile-questions/1/regenerate")
+        assert response.status_code == 500
+        assert "Failed to regenerate question" in response.json()["detail"]
+
+
+def test_delete_question_success():
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    existing_q = MockQuestion(1, 123, "What is Django?", 1, "easy", "tech", True)
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+    _mock_repo.delete_job_profile_question = AsyncMock(return_value=None)
+
+    response = client.delete("/api/v2/job-profile-questions/1")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["message"] == "Question deleted successfully"
+    assert data["question_id"] == "1"
+
+    _mock_repo.get_question_by_id.assert_called_once_with(question_id=1)
+    _mock_repo.delete_job_profile_question.assert_called_once_with(question=existing_q)
+
+
+def test_delete_question_not_found():
+    _mock_repo.get_question_by_id = AsyncMock(return_value=None)
+    response = client.delete("/api/v2/job-profile-questions/999")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+# 9. DELETE /api/v2/job-profiles/{id}
+def test_delete_job_profile_success():
+    _mock_repo.delete_profile = AsyncMock(return_value=True)
+    response = client.delete("/api/v2/job-profiles/123")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["deleted"] is True
+    assert data["jobProfileId"] == 123
+    _mock_repo.delete_profile.assert_called_once_with(profile_id=123)
+
+
+def test_delete_job_profile_not_found():
+    _mock_repo.delete_profile = AsyncMock(return_value=False)
+    response = client.delete("/api/v2/job-profiles/999")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+    _mock_repo.delete_profile.assert_called_once_with(profile_id=999)
+
+
+
+
+def test_create_job_profile_figma_metadata():
+    mock_created = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    mock_created.company_name = "Amazon"
+    mock_created.experience_level = "0-2 years"
+    mock_created.skills = ["React", "TypeScript", "Node", "GraphQL"]
+    mock_created.additional_context = "Need strong frontend architecture knowledge"
+    mock_created.category = "Engineering"
+    mock_created.employment_type = "Full-time"
+    
+    # Custom fixed created_at time to assert in the JSON
+    fixed_time = datetime.datetime(2026, 6, 1, 10, 0, 0, tzinfo=datetime.timezone.utc)
+    mock_created.created_at = fixed_time
+
+    _mock_repo.create_profile = AsyncMock(return_value=mock_created)
+
+    payload = {
+        "job_name": "Senior Front-End Developer",
+        "job_description": "Own end-to-end frontend architecture...",
+        "companyName": "Amazon",
+        "experienceLevel": "0-2 years",
+        "category": "Engineering",
+        "employmentType": "Full-time",
+        "skills": ["React", "TypeScript", "Node", "GraphQL"],
+        "additionalContext": "Need strong frontend architecture knowledge"
+    }
+    
+    response = client.post("/api/v2/job-profiles", json=payload)
+    
+    assert response.status_code == 201
+    data = response.json()
+    
+    # Assert exact required response structure and fields
+    assert data["id"] == 123
+    assert data["job_name"] == "Senior Front-End Developer"
+    assert data["job_description"] == "Own end-to-end frontend architecture..."
+    assert data["companyName"] == "Amazon"
+    assert data["experienceLevel"] == "0-2 years"
+    assert data["category"] == "Engineering"
+    assert data["employmentType"] == "Full-time"
+    assert data["skills"] == ["React", "TypeScript", "Node", "GraphQL"]
+    assert data["additionalContext"] == "Need strong frontend architecture knowledge"
+    assert data["createdAt"] == "2026-06-01T10:00:00Z"
+    
+    # Assert senior's compatibility aliases exist exactly in the JSON keys
+    assert "jobName" in data
+    assert "jobDescription" in data
+    assert "title" in data
+    assert "description" in data
+    
+    # Assert values for legacy/senior aliases
+    assert data["jobName"] == "Senior Front-End Developer"
+    assert data["jobDescription"] == "Own end-to-end frontend architecture..."
+    assert data["title"] == "Senior Front-End Developer"
+    assert data["description"] == "Own end-to-end frontend architecture..."
+
+    _mock_repo.create_profile.assert_called_once_with(
+        job_name="Senior Front-End Developer",
+        job_description="Own end-to-end frontend architecture...",
+        company_name="Amazon",
+        experience_level="0-2 years",
+        skills=["React", "TypeScript", "Node", "GraphQL"],
+        additional_context="Need strong frontend architecture knowledge",
+        category="Engineering",
+        employment_type="Full-time"
+    )
+
+
+def test_get_job_profile_review_success():
+    # 1. Setup mock job profile
+    profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    profile.company_name = "Amazon"
+    profile.category = "Engineering"
+    profile.experience_level = "4-6 years"
+    profile.employment_type = "Full-time"
+    profile.skills = ["React", "TypeScript", "GraphQL", "Performance"]
+    profile.additional_context = "Systems thinking, Stakeholder communication, Production ownership"
+    
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    # 2. Setup mock questions
+    class MockQuestion:
+        def __init__(self, id, question_text, level):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+
+    mock_qs = [
+        # Level 1 (5 questions - preview only first 3)
+        MockQuestion(1, "Q1", 1),
+        MockQuestion(2, "Q2", 1),
+        MockQuestion(3, "Q3", 1),
+        MockQuestion(4, "Q4", 1),
+        MockQuestion(5, "Q5", 1),
+        # Level 2 (1 question)
+        MockQuestion(6, "Q6", 2),
+        # Level 4 (2 questions)
+        MockQuestion(7, "Q7", 4),
+        MockQuestion(8, "Q8", 4),
+    ]
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=mock_qs)
+
+    response = client.get("/api/v2/job-profiles/123/review")
+    assert response.status_code == 200
+    data = response.json()
+
+    # 3. Assert JSON structure & keys
+    assert data["job_profile_id"] == 123
+    assert data["status"] == "draft"
+
+    # 4. Assert role details mapping
+    assert data["role_details"]["role_name"] == "Senior Front-End Developer"
+    assert data["role_details"]["company_name"] == "Amazon"
+    assert data["role_details"]["category"] == "Engineering"
+    assert data["role_details"]["experience_level"] == "4-6 years"
+    assert data["role_details"]["employment_type"] == "Full-time"
+    assert data["role_details"]["description"] == "Own end-to-end frontend architecture..."
+
+    # 5. Assert JD Summary mapping
+    assert data["jd_summary"]["extracted_skills"] == ["React", "TypeScript", "GraphQL", "Performance"]
+    assert data["jd_summary"]["competencies"] == ["Systems thinking", "Stakeholder communication", "Production ownership"]
+
+    # 6. Assert totals
+    assert data["question_summary"]["total_questions"] == 8
+    assert data["question_summary"]["total_levels"] == 3 # Levels 1, 2, 4 have questions
+
+    # 7. Assert levels details & preview limits
+    levels = data["question_summary"]["levels"]
+    assert len(levels) == 4 # Always returns 4 levels
+
+    # Level 1
+    assert levels[0]["level"] == 1
+    assert levels[0]["question_count"] == 5
+    assert len(levels[0]["preview_questions"]) == 3 # Limit to first 3
+    assert levels[0]["preview_questions"][0]["question_id"] == 1
+    assert levels[0]["preview_questions"][0]["question"] == "Q1"
+
+    # Level 2
+    assert levels[1]["level"] == 2
+    assert levels[1]["question_count"] == 1
+    assert len(levels[1]["preview_questions"]) == 1
+
+    # Level 3
+    assert levels[2]["level"] == 3
+    assert levels[2]["question_count"] == 0
+    assert len(levels[2]["preview_questions"]) == 0
+
+    # Level 4
+    assert levels[3]["level"] == 4
+    assert levels[3]["question_count"] == 2
+    assert len(levels[3]["preview_questions"]) == 2
+
+    _mock_repo.get_by_id.assert_called_once_with(job_profile_id=123)
+    _mock_repo.get_job_profile_questions.assert_called_once_with(job_profile_id=123)
+
+
+def test_get_job_profile_review_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    response = client.get("/api/v2/job-profiles/999/review")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_get_job_profile_review_empty_questions():
+    profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    profile.company_name = None
+    profile.category = None
+    profile.experience_level = None
+    profile.employment_type = None
+    profile.skills = None
+    profile.additional_context = None
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=[])
+
+    response = client.get("/api/v2/job-profiles/123/review")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["question_summary"]["total_questions"] == 0
+    assert data["question_summary"]["total_levels"] == 0
+    for level_info in data["question_summary"]["levels"]:
+        assert level_info["question_count"] == 0
+        assert level_info["preview_questions"] == []
+
+
+def test_submit_job_profile_success():
+    # 1. Setup mock job profile
+    profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    profile.status = "draft"
+    profile.submitted_at = None
+    
+    # 2. Setup submitted/updated profile mock
+    updated_profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    updated_profile.status = "under_review"
+    fixed_time = datetime.datetime(2026, 6, 1, 12, 30, 0, tzinfo=datetime.timezone.utc)
+    updated_profile.submitted_at = fixed_time
+    
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.submit_profile = AsyncMock(return_value=updated_profile)
+
+    # 3. Setup mock questions (at least 1 question must exist)
+    class MockQuestion:
+        def __init__(self, id, level):
+            self.id = id
+            self.level = level
+
+    mock_qs = [MockQuestion(1, 1)]
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=mock_qs)
+
+    response = client.post("/api/v2/job-profiles/123/submit")
+    assert response.status_code == 200
+    data = response.json()
+
+    # 4. Assert response payload
+    assert data["job_profile_id"] == 123
+    assert data["job_name"] == "Senior Front-End Developer"
+    assert data["status"] == "under_review"
+    assert data["submitted_at"] == "2026-06-01T12:30:00Z"
+    assert data["total_questions"] == 1
+    assert data["total_levels"] == 1
+    assert data["message"] == "Role submitted successfully"
+
+    _mock_repo.get_by_id.assert_called_once_with(job_profile_id=123)
+    _mock_repo.get_job_profile_questions.assert_called_once_with(job_profile_id=123)
+    _mock_repo.submit_profile.assert_called_once_with(job_profile_id=123)
+
+
+def test_submit_job_profile_not_found():
+    _mock_repo.get_by_id = AsyncMock(return_value=None)
+    response = client.post("/api/v2/job-profiles/999/submit")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+
+
+def test_submit_job_profile_no_questions():
+    profile = MockJobProfileModel(123, "Senior Front-End Developer", "Own end-to-end frontend architecture...")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=[])
+
+    response = client.post("/api/v2/job-profiles/123/submit")
+    assert response.status_code == 400
+    assert "Cannot submit role without generated questions" in response.json()["detail"]
+
+
+# 10. Expanded Question Card Details Tests
+def test_get_questions_with_expanded_details():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    class MockQuestionWithDetails:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated, created_at, keywords, concepts_covered, expected_answer, example_output):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+            self.created_at = created_at
+            self.keywords = keywords
+            self.concepts_covered = concepts_covered
+            self.expected_answer = expected_answer
+            self.example_output = example_output
+
+    t1 = datetime.datetime(2026, 5, 26, 10, 0, 0, tzinfo=datetime.timezone.utc)
+    db_questions = [
+        MockQuestionWithDetails(
+            id=1,
+            job_profile_id=123,
+            question_text="Question 1",
+            level=1,
+            difficulty="easy",
+            question_type="tech",
+            is_ai_generated=True,
+            created_at=t1,
+            keywords=["FastAPI", "Uvicorn"],
+            concepts_covered=["Web server", "ASGI"],
+            expected_answer="FastAPI is an ASGI framework...",
+            example_output="{'status': 'ok'}"
+        )
+    ]
+    _mock_repo.get_job_profile_questions = AsyncMock(return_value=db_questions)
+
+    response = client.get("/api/v2/job-profiles/123/questions")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["questions"]) == 1
+    q = data["questions"][0]
+    assert q["keywords"] == ["FastAPI", "Uvicorn"]
+    assert q["concepts_covered"] == ["Web server", "ASGI"]
+    assert q["expected_answer"] == "FastAPI is an ASGI framework..."
+    assert q["example_output"] == "{'status': 'ok'}"
+
+
+def test_add_question_with_expanded_details():
+    profile = MockJobProfileModel(123, "Python Developer", "Job Description")
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    class MockQuestionWithDetails:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated, keywords, concepts_covered, expected_answer, example_output):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+            self.keywords = keywords
+            self.concepts_covered = concepts_covered
+            self.expected_answer = expected_answer
+            self.example_output = example_output
+
+    created_q = MockQuestionWithDetails(
+        id=51,
+        job_profile_id=123,
+        question_text="Explain closures in JavaScript.",
+        level=2,
+        difficulty="medium",
+        question_type="theoretical",
+        is_ai_generated=False,
+        keywords=["Closures", "Scope"],
+        concepts_covered=["Lexical environment"],
+        expected_answer="A closure is a function...",
+        example_output="function outer() { ... }"
+    )
+    _mock_repo.add_job_profile_question = AsyncMock(return_value=created_q)
+
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "is_ai_generated": False,
+        "keywords": ["Closures", "Scope"],
+        "concepts_covered": ["Lexical environment"],
+        "expected_answer": "A closure is a function...",
+        "example_output": "function outer() { ... }"
+    }
+
+    response = client.post("/api/v2/job-profiles/123/questions", json=payload)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["question_id"] == "51"
+    assert data["keywords"] == ["Closures", "Scope"]
+    assert data["concepts_covered"] == ["Lexical environment"]
+    assert data["expected_answer"] == "A closure is a function..."
+    assert data["example_output"] == "function outer() { ... }"
+
+
+def test_update_question_with_expanded_details():
+    class MockQuestionWithDetails:
+        def __init__(self, id, question_text, level, difficulty, question_type, is_ai_generated, keywords, concepts_covered, expected_answer, example_output):
+            self.id = id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+            self.keywords = keywords
+            self.concepts_covered = concepts_covered
+            self.expected_answer = expected_answer
+            self.example_output = example_output
+
+    existing_q = MockQuestionWithDetails(
+        id=1,
+        question_text="Old question text",
+        level=1,
+        difficulty="easy",
+        question_type="theoretical",
+        is_ai_generated=True,
+        keywords=[],
+        concepts_covered=[],
+        expected_answer=None,
+        example_output=None
+    )
+    _mock_repo.get_question_by_id = AsyncMock(return_value=existing_q)
+
+    updated_q = MockQuestionWithDetails(
+        id=1,
+        question_text="Explain closures in JavaScript.",
+        level=2,
+        difficulty="medium",
+        question_type="theoretical",
+        is_ai_generated=True,
+        keywords=["Closures"],
+        concepts_covered=["Scope"],
+        expected_answer="Closure answer",
+        example_output="Closure output"
+    )
+    _mock_repo.update_job_profile_question = AsyncMock(return_value=updated_q)
+
+    payload = {
+        "question": "Explain closures in JavaScript.",
+        "level": 2,
+        "difficulty": "medium",
+        "type": "theoretical",
+        "keywords": ["Closures"],
+        "concepts_covered": ["Scope"],
+        "expected_answer": "Closure answer",
+        "example_output": "Closure output"
+    }
+
+    response = client.patch("/api/v2/job-profile-questions/1", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["question_id"] == "1"
+    assert data["keywords"] == ["Closures"]
+    assert data["concepts_covered"] == ["Scope"]
+    assert data["expected_answer"] == "Closure answer"
+    assert data["example_output"] == "Closure output"
+
+
+def test_generate_questions_with_knowledge_base():
+    profile = MockJobProfileModel(
+        id=123,
+        job_name="Python Developer",
+        job_description="Looking for an experienced Python developer with React skills.",
+        skills=["Python", "React"],
+        experience_level="Mid"
+    )
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+
+    mock_items = [
+        {"text": "What is Django?", "category": "tech"},
+        {"text": "Explain React state management.", "category": "tech_allied"}
+    ]
+
+    class MockQuestion:
+        def __init__(self, id, job_profile_id, question_text, level, difficulty, question_type, is_ai_generated):
+            self.id = id
+            self.job_profile_id = job_profile_id
+            self.question_text = question_text
+            self.level = level
+            self.difficulty = difficulty
+            self.question_type = question_type
+            self.is_ai_generated = is_ai_generated
+
+    saved_questions = [
+        MockQuestion(1, 123, "What is Django?", 1, "easy", "tech", True),
+        MockQuestion(2, 123, "Explain React state management.", 1, "easy", "tech_allied", True)
+    ]
+    _mock_repo.create_job_profile_questions = AsyncMock(return_value=saved_questions)
+
+    payload = {
+        "levels": [
+            {"level": 1, "count": 2}
+        ],
+        "knowledge_reference_context": "Frontend - Level 1: What is HTML5? What is CSS Box Model? React - Level 2: Explain props and state."
+    }
+    with patch("src.services.llm.generate_interview_questions_with_llm", new_callable=AsyncMock) as mock_generate:
+        mock_generate.return_value = (["What is Django?", "Explain React state management."], None, 150, "gpt-4o-mini", mock_items)
+        response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_profile_id"] == "123"
+        assert data["total_questions"] == 2
+        
+        mock_generate.assert_called_once()
+        call_kwargs = mock_generate.call_args.kwargs
+        assert call_kwargs["influence"]["knowledge_reference_context"] == "Frontend - Level 1: What is HTML5? What is CSS Box Model? React - Level 2: Explain props and state."
+
+
+@pytest.mark.asyncio
+async def test_generate_interview_questions_llm_prompt_with_knowledge_base():
+    from src.services.llm import generate_interview_questions_with_llm
+    from src.config.manager import settings
+    
+    orig_key = settings.OPENAI_API_KEY
+    settings.OPENAI_API_KEY = "mock-api-key"
+    
+    try:
+        with patch("src.services.llm.structured_output", new_callable=AsyncMock) as mock_structured_output:
+            mock_structured_output.return_value = (None, None, 0, "gpt-4o-mini")
+            
+            influence = {
+                "knowledge_reference_context": "Frontend - Level 1: What is HTML5? What is CSS Box Model? React - Level 2: Explain props and state."
+            }
+            
+            await generate_interview_questions_with_llm(
+                track="Python Developer",
+                count=3,
+                difficulty="medium",
+                influence=influence
+            )
+            
+            mock_structured_output.assert_called_once()
+            call_kwargs = mock_structured_output.call_args.kwargs
+            sys_prompt = call_kwargs["system_prompt"]
+            
+            assert "Reference Knowledge Base:" in sys_prompt
+            assert "Frontend - Level 1: What is HTML5?" in sys_prompt
+            assert "Do not copy reference questions exactly." in sys_prompt
+            assert "Generate new related questions using the same topics/concepts." in sys_prompt
+    finally:
+        settings.OPENAI_API_KEY = orig_key
+
+
+
+
+
+
+
+
+

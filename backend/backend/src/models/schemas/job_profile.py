@@ -5,9 +5,27 @@ import pydantic
 from src.models.schemas.base import BaseSchemaModel
 
 # --- feature/roles-page-api schemas ---
-class JobProfileBase(BaseModel):
-    title: str
-    description: Optional[str] = None
+class JobProfileBase(BaseSchemaModel):
+    job_name: str = pydantic.Field(
+        validation_alias=pydantic.AliasChoices("job_name", "jobName", "title"),
+        serialization_alias="job_name"
+    )
+    job_description: Optional[str] = pydantic.Field(
+        default=None,
+        validation_alias=pydantic.AliasChoices("job_description", "jobDescription", "description"),
+        serialization_alias="job_description"
+    )
+    company_name: Optional[str] = None
+    experience_level: Optional[str] = None
+    skills: Optional[List[str]] = None
+    additional_context: Optional[str] = None
+    category: Optional[str] = None
+    employment_type: Optional[str] = pydantic.Field(
+        default=None,
+        alias="employmentType",
+        validation_alias=pydantic.AliasChoices("employmentType", "employment_type"),
+        serialization_alias="employmentType"
+    )
 
 class JobProfileCreateV2(JobProfileBase):
     pass
@@ -16,36 +34,68 @@ class JobProfileResponse(JobProfileBase):
     id: int
     created_at: datetime.datetime
 
-    class Config:
-        from_attributes = True
+    @pydantic.computed_field
+    @property
+    def jobName(self) -> str:
+        return self.job_name
 
-class JobProfileSummaryResponse(BaseModel):
-    totalRoles: int
-    pendingReview: int
+    @pydantic.computed_field
+    @property
+    def jobDescription(self) -> Optional[str]:
+        return self.job_description
+
+    @pydantic.computed_field
+    @property
+    def title(self) -> str:
+        return self.job_name
+
+    @pydantic.computed_field
+    @property
+    def description(self) -> Optional[str]:
+        return self.job_description
+
+class JobProfileSummaryResponse(BaseSchemaModel):
+    total_roles: int
+    pending_review: int
     approved: int
     rejected: int
 
-class JobProfileListResponse(BaseModel):
+class JobProfileListResponse(BaseSchemaModel):
     items: List[JobProfileResponse]
     total: int
 
-class JobProfileActivityResponse(BaseModel):
+class JobProfileActivityResponse(BaseSchemaModel):
     id: int
     title: str
     action: str
     message: str
-    createdAt: datetime.datetime
+    created_at: datetime.datetime
 
-class JobProfileUploadResponse(BaseModel):
+class KnowledgeQuestionLevelResponse(BaseSchemaModel):
+    level: int
+    question_count: int
+    questions: List[str]
+
+class KnowledgeQuestionTopicResponse(BaseSchemaModel):
+    topic_name: str
+    candidate_type: str
+    question_count: int
+    levels: List[KnowledgeQuestionLevelResponse]
+
+class JobProfileUploadResponse(BaseSchemaModel):
     success: bool
-    originalFileName: str
-    fileType: str
-    fileSize: int
+    original_file_name: str
+    file_type: str
+    file_size: int
+    uploaded_at: Optional[datetime.datetime] = None
+    topics_detected: List[str] = []
+    total_questions: int = 0
+    topics: List[KnowledgeQuestionTopicResponse] = []
 
-class JobProfileExtractSkillsRequest(BaseModel):
-    jobDescription: str
+class JobProfileExtractSkillsRequest(BaseSchemaModel):
+    job_description: str
 
-class JobProfileExtractSkillsResponse(BaseModel):
+class JobProfileExtractSkillsResponse(BaseSchemaModel):
     skills: List[str]
 
 # --- upstream/master schemas ---
@@ -78,3 +128,186 @@ class JobProfilesListResponse(BaseSchemaModel):
 class JobProfileDeleteResponse(BaseSchemaModel):
     deleted: bool
     job_profile_id: int
+
+
+# --- Generate Questions Schemas ---
+class JobProfileQuestionLevelRequest(BaseSchemaModel):
+    level: int
+    count: int
+
+class JobProfileGenerateQuestionsRequest(BaseSchemaModel):
+    levels: List[JobProfileQuestionLevelRequest]
+    knowledge_reference_context: Optional[str] = None
+
+class JobProfileGeneratedQuestionItem(BaseSchemaModel):
+    question_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
+
+class JobProfileGenerateQuestionsResponse(BaseSchemaModel):
+    job_profile_id: str
+    total_questions: int
+    questions: List[JobProfileGeneratedQuestionItem]
+
+
+# --- Get Questions Schemas ---
+class JobProfileQuestionLevelCounts(BaseSchemaModel):
+    level_1: int = 0
+    level_2: int = 0
+    level_3: int = 0
+    level_4: int = 0
+
+class JobProfileQuestionItem(BaseSchemaModel):
+    question_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+    created_at: datetime.datetime
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
+
+class JobProfileQuestionsListResponse(BaseSchemaModel):
+    job_profile_id: str
+    total_questions: int
+    level_counts: JobProfileQuestionLevelCounts
+    questions: List[JobProfileQuestionItem]
+
+
+# --- Add Question Schemas ---
+class JobProfileAddQuestionRequest(BaseSchemaModel):
+    question: str
+    level: int
+    difficulty: str
+    type: str = "theoretical"
+    is_ai_generated: bool = False
+    keywords: Optional[List[str]] = []
+    concepts_covered: Optional[List[str]] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
+
+class JobProfileAddQuestionResponse(BaseSchemaModel):
+    question_id: str
+    job_profile_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+    message: str
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
+
+
+# --- Update Question Schemas ---
+class JobProfileUpdateQuestionRequest(BaseSchemaModel):
+    question: Optional[str] = None
+    level: Optional[int] = None
+    difficulty: Optional[str] = None
+    type: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    concepts_covered: Optional[List[str]] = None
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
+
+class JobProfileUpdateQuestionResponse(BaseSchemaModel):
+    question_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+    message: str
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
+
+
+# --- Regenerate Question Schemas ---
+class JobProfileRegenerateQuestionResponse(BaseSchemaModel):
+    question_id: str
+    question: str
+    level: int
+    difficulty: str
+    type: str
+    is_ai_generated: bool
+    message: str
+    keywords: List[str] = []
+    concepts_covered: List[str] = []
+    expected_answer: Optional[str] = None
+    example_output: Optional[str] = None
+
+
+# --- Delete Question Schemas ---
+class JobProfileDeleteQuestionResponse(BaseSchemaModel):
+    message: str
+    question_id: str
+
+
+# --- Review Summary Schemas ---
+class JobProfileReviewRoleDetails(BaseSchemaModel):
+    role_name: str
+    company_name: Optional[str] = None
+    category: Optional[str] = None
+    experience_level: Optional[str] = None
+    employment_type: Optional[str] = None
+    description: Optional[str] = None
+
+class JobProfileReviewJdSummary(BaseSchemaModel):
+    extracted_skills: List[str] = []
+    competencies: List[str] = []
+
+class JobProfileReviewPreviewQuestion(BaseSchemaModel):
+    question_id: int
+    question: str
+
+class JobProfileReviewLevelInfo(BaseSchemaModel):
+    level: int
+    title: str
+    description: str
+    question_count: int
+    preview_questions: List[JobProfileReviewPreviewQuestion] = []
+
+class JobProfileReviewQuestionSummary(BaseSchemaModel):
+    total_questions: int
+    total_levels: int
+    levels: List[JobProfileReviewLevelInfo] = []
+
+class JobProfileReviewResponse(BaseSchemaModel):
+    job_profile_id: int
+    role_details: JobProfileReviewRoleDetails
+    jd_summary: JobProfileReviewJdSummary
+    question_summary: JobProfileReviewQuestionSummary
+    status: str = "draft"
+
+
+# --- Submit Role Schemas ---
+class JobProfileSubmitResponse(BaseSchemaModel):
+    job_profile_id: int
+    job_name: str
+    status: str
+    submitted_at: datetime.datetime
+    total_questions: int
+    total_levels: int
+    message: str = "Role submitted successfully"
+
+
+
+
+
+
+
+

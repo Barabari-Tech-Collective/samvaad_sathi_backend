@@ -41,7 +41,7 @@ router.include_router(router=speech_pacing_router)
 router.include_router(router=job_profiles_v2_router)
 router.include_router(router=analytics_router)
 router.include_router(router=analytics_v2_router)
-router.include_router(router=job_profiles_router)
+# router.include_router(router=job_profiles_router)
 router.include_router(router=ai_resume_router)
 router.include_router(router=resume_builder_router)
 # //working on staging
