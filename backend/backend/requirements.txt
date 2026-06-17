@@ -122,3 +122,46 @@ webencodings==0.5.1
 websockets==16.0
 win32_setctime==1.2.0
 xhtml2pdf==0.2.17
+python-jose
+argon2_cffi
+
+# OpenAI integration for audio transcription
+openai>=1.100.0
+
+# ElevenLabs text-to-speech
+elevenlabs>=1.0.0
+
+# Environment and configuration
+python-dotenv
+python-decouple
+email-validator
+
+# File processing
+PyPDF2
+pdfplumber
+pathlib
+
+# Development and testing
+black
+colorama
+httpx
+# OAuth/OIDC with Cognito
+authlib
+requests
+itsdangerous
+isort
+loguru
+mypy
+pathlib
+pre-commit
+pytest
+pytest-asyncio
+pytest-cov
+pytest-xdist
+python-slugify
+trio
+httpx
+boto3
+
+# Python 3.13+ standard library audioop backport
+audioop-lts; python_version >= '3.13'

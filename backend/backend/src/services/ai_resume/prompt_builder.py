@@ -43,7 +43,8 @@ SCORE TIERS FOR VALIDATION:
 - AVERAGE MATCH (Skills present but lacks optimization/keywords): 60 - 84.
 - WEAK MATCH (Massive skill or context gaps): 10 - 59.
 
-Return response in EXACT clean valid JSON format matching the schema below without any markdown formatting wrappers:
+Return response in EXACT clean valid JSON format matching the schema below without any markdown formatting wrappers.
+IMPORTANT: You MUST extract the actual skills, project names, and URLs from the resume text. DO NOT output the placeholder names or fake URLs from the schema blueprint below. If a project does not have a URL in the resume, leave projectUrl as an empty string "".
 
 {{
   "atsScore": 75,
@@ -55,31 +56,31 @@ Return response in EXACT clean valid JSON format matching the schema below witho
     "keywordDensity": 65
   }},
   "skillsAnalysis": {{
-    "strongSkills": ["React", "TypeScript"],
-    "missingSkills": ["Docker", "AWS"],
-    "deprioritizedSkills": ["jQuery"]
+    "strongSkills": ["Extracted_Skill_1", "Extracted_Skill_2", "Extracted_Skill_3"],
+    "missingSkills": ["Missing_Skill_1", "Missing_Skill_2"],
+    "deprioritizedSkills": ["Irrelevant_Skill_1"]
   }},
   "experienceEvaluation": {{
-    "rating": "Good",
-    "feedback": "Years of experience match the job description criteria, but bullet points could use more quantifiable business metrics."
+    "rating": "Good_Or_Bad_Or_Average",
+    "feedback": "Specific feedback on how well their experience matches the job description."
   }},
   "projectEvaluation": [
     {{
-      "projectName": "E-commerce React App",
-      "rating": "Good",
-      "feedback": "Clean component breakdown structure. Include backend scaling parameters.",
-      "projectUrl": "https://github.com/user/project"
+      "projectName": "Extracted_Project_Name",
+      "rating": "Good_Or_Needs_Improvement",
+      "feedback": "Specific feedback for this project based on job description.",
+      "projectUrl": "EXTRACTED_URL_OR_EMPTY_STRING"
     }}
   ],
   "suggestedProject": {{
-    "title": "Real-time collaborative dashboard with WebSockets",
-    "description": "Aligns perfectly with frontend data streaming needs.",
-    "difficulty": "Intermediate",
-    "tags": ["React", "WebSockets"]
+    "title": "Generated_Project_Idea_Title",
+    "description": "Why this project would help them get the job.",
+    "difficulty": "Beginner_Or_Intermediate_Or_Advanced",
+    "tags": ["Generated_Tag_1", "Generated_Tag_2"]
   }},
   "finalRecommendations": [
-    "Add measurable achievements with numbers",
-    "Include live project links in header"
+    "Actionable recommendation 1 based on their resume",
+    "Actionable recommendation 2 based on their resume"
   ],
   "hygieneCheck": {{
     "grammarIssues": [],
@@ -95,5 +96,73 @@ JOB DESCRIPTION SPECIFICATION:
 {job_description}
 
 RESUME TEXT DATA TO EVALUATE:
+{resume_text}
+"""
+
+def build_structuring_prompt(
+    resume_text: str,
+    analysis_result: dict,
+) -> str:
+    """
+    Builds a prompt that instructs the LLM to structure the raw resume text into the exact JSON 
+    schema required by the resume templates, applying any keyword suggestions from the analysis.
+    """
+    return f"""
+You are an expert resume formatter. Your job is to take raw, extracted text from a candidate's uploaded resume, 
+and convert it into a perfectly clean, structured JSON object that will be fed directly into a resume template builder.
+
+You will also be provided with an ATS analysis result. Use the feedback and keywords from the analysis to lightly 
+optimize the structured data (e.g., inject missing keywords into the summary or bullet points where appropriate).
+
+REQUIREMENTS:
+1. Extract the candidate's name, email, phone, location, and links (LinkedIn, GitHub) for the header.
+2. Craft a professional summary based on their experience.
+3. Extract all skills into a flat array of strings.
+4. Extract work experience into an array of objects. Each must have: title, duration, company, and an array of bullet points (highlights).
+5. Extract projects into an array of objects. Each must have: title, duration, description, and an array of bullet points (highlights).
+6. Extract education into an array of objects. Each must have: degree, institution, duration.
+7. Return ONLY valid JSON matching the schema exactly. No markdown wrappers.
+
+JSON SCHEMA EXPECTED:
+{{
+  "header": {{
+    "fullName": "...",
+    "email": "...",
+    "phone": "...",
+    "location": "...",
+    "linkedin": "...",
+    "github": "..."
+  }},
+  "summary": "...",
+  "skills": ["...", "..."],
+  "experience": [
+    {{
+      "title": "...",
+      "company": "...",
+      "duration": "...",
+      "highlights": ["...", "..."]
+    }}
+  ],
+  "projects": [
+    {{
+      "title": "...",
+      "duration": "...",
+      "description": "...",
+      "highlights": ["...", "..."]
+    }}
+  ],
+  "education": [
+    {{
+      "degree": "...",
+      "institution": "...",
+      "duration": "..."
+    }}
+  ]
+}}
+
+ATS ANALYSIS RESULTS TO INCORPORATE:
+{analysis_result}
+
+RAW RESUME TEXT:
 {resume_text}
 """

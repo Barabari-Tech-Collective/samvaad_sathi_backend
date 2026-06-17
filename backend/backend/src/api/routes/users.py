@@ -143,6 +143,7 @@ async def get_me(
             university=current_user.university,
             target_position=current_user.target_position,
             years_experience=current_user.years_experience,
+            has_resume=bool(getattr(current_user, 'resume_text', None)),
             total_attempts=total_attempts,
             company=current_user.company,
         ),
@@ -198,6 +199,7 @@ async def update_profile(
         university=updated.university,
         target_position=updated.target_position,
         years_experience=updated.years_experience,
+        has_resume=bool(getattr(updated, 'resume_text', None)),
     )
 
 

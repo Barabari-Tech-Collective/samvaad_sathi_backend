@@ -20,6 +20,28 @@ from src.models.schemas.analysis import (
 )
 
 
+DEFAULT_ANALYSIS_TYPES = ("domain", "communication", "pace", "pause")
+
+
+def _has_transcribed_answer(question_attempt: QuestionAttempt) -> bool:
+    transcription = question_attempt.transcription
+    if not transcription:
+        return False
+    if isinstance(transcription, dict):
+        text = transcription.get("text") or transcription.get("transcript")
+        return bool(str(text or "").strip())
+    return bool(str(transcription).strip())
+
+
+def _missing_analysis_types(question_attempt: QuestionAttempt) -> list[str]:
+    analysis = question_attempt.analysis_json if isinstance(question_attempt.analysis_json, dict) else {}
+    return [
+        analysis_type
+        for analysis_type in DEFAULT_ANALYSIS_TYPES
+        if not isinstance(analysis.get(analysis_type), dict) or not analysis.get(analysis_type)
+    ]
+
+
 class AnalysisAggregationService:
     """Service for aggregating multiple analysis types into a single result."""
     
@@ -95,6 +117,55 @@ class AnalysisAggregationService:
         )
         
         return aggregated_analysis, metadata, saved, save_error
+
+    async def ensure_recorded_attempts_analyzed(
+        self,
+        *,
+        question_attempts: list[QuestionAttempt],
+        user_id: int,
+        db: AsyncSession,
+        logger: Any = None,
+    ) -> int:
+        """Analyze recorded attempts that are missing report-critical analysis sections."""
+        analyzed_count = 0
+
+        for question_attempt in question_attempts:
+            if not _has_transcribed_answer(question_attempt):
+                continue
+
+            missing_analysis_types = _missing_analysis_types(question_attempt)
+            if not missing_analysis_types:
+                continue
+
+            try:
+                _, metadata, saved, save_error = await self.aggregate_question_analysis(
+                    question_attempt_id=question_attempt.id,
+                    user_id=user_id,
+                    analysis_types=missing_analysis_types,
+                    auth_token="",
+                    db=db,
+                )
+                analyzed_count += 1
+
+                if logger and (metadata.failed_analyses or not saved):
+                    logger.warning(
+                        "Pre-report analysis incomplete for question_attempt_id=%s missing_types=%s failed_types=%s saved=%s save_error=%s",
+                        question_attempt.id,
+                        missing_analysis_types,
+                        metadata.failed_analyses,
+                        saved,
+                        save_error,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                if logger:
+                    logger.warning(
+                        "Pre-report analysis failed for question_attempt_id=%s missing_types=%s: %s",
+                        question_attempt.id,
+                        missing_analysis_types,
+                        exc,
+                    )
+
+        return analyzed_count
     
     async def _verify_question_attempt(
         self, 

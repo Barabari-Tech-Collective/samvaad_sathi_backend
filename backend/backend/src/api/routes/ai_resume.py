@@ -8,6 +8,7 @@ from fastapi import (
     Depends,
     HTTPException,
 )
+import sqlalchemy
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
 from src.api.dependencies.auth import get_current_user
@@ -19,6 +20,8 @@ from src.models.schemas.ai_resume import ResumeAnalysisResponse
 from src.repository.crud.ai_resume_analysis import (
     AIResumeAnalysisCRUDRepository,
 )
+from src.repository.crud.user import UserCRUDRepository
+from src.api.dependencies.repository import get_repository
 from src.services.ai_resume.parser_service import (
     extract_resume_text,
 )
@@ -49,6 +52,7 @@ async def analyze_resume(
     session: SQLAlchemyAsyncSession = Depends(
         get_async_session
     ),
+    user_repo: UserCRUDRepository = Depends(get_repository(repo_type=UserCRUDRepository)),
 ):
     """
     Upload and analyze resume against job description.
@@ -105,6 +109,10 @@ async def analyze_resume(
 
         session.add(db_analysis)
 
+        # Auto-save resume text to user profile
+        stmt = sqlalchemy.update(User).where(User.id == current_user.id).values(resume_text=extracted_text)
+        await session.execute(stmt)
+
         await session.commit()
 
         await session.refresh(db_analysis)
@@ -117,6 +125,10 @@ async def analyze_resume(
 
     except Exception as e:
         await session.rollback()
+
+        import traceback
+        with open("backend_error.log", "w") as f:
+            f.write(traceback.format_exc())
 
         raise fastapi.HTTPException(
             status_code=500,

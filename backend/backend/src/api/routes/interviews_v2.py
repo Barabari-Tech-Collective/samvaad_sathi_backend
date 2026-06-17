@@ -42,6 +42,7 @@ from src.repository.crud.structure_practice import (
 )
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.static_questions import get_static_questions
+from src.services.full_stack_interview_questions import generate_full_stack_questions_with_llm
 from src.services.syllabus_service import syllabus_service
 from src.services.question_supplements import (
     QuestionSupplementService,
@@ -66,6 +67,7 @@ from src.services.analytics_events import track_analytics_event
 
 logger = logging.getLogger(__name__)
 FOLLOW_UP_STRATEGY = "llm_transcription_based"
+FULL_STACK_ROLE = "Full Stack Developer"
 
 
 router = fastapi.APIRouter(prefix="/v2", tags=["interviews-v2"])
@@ -192,6 +194,15 @@ async def create_or_resume_interview_v2(
     difficulty = (payload.difficulty or "medium").lower()
     if difficulty not in ("easy", "medium", "hard", "expert"):
         difficulty = "medium"
+        
+    if payload.track == FULL_STACK_ROLE and difficulty == "medium" and getattr(payload, "use_resume", True):
+        resume_text = getattr(current_user, "resume_text", None)
+        if not resume_text or not str(resume_text).strip():
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST, 
+                detail="Cannot use resume for interview: No resume is saved to your profile."
+            )
+
     interview = await interview_repo.create_interview(user_id=current_user.id, track=payload.track, difficulty=difficulty)
     await track_analytics_event(
         interview_repo.async_session,
@@ -256,57 +267,49 @@ async def generate_questions_v2(
         has_resume = bool(resume_context)
         has_skills = bool(skills_list)
 
-        role = syllabus_service._role_manager.derive_role(interview.track)
-        topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=interview.difficulty)
-        topics = {
-            "tech": topic_bank.tech,
-            "tech_allied": topic_bank.tech_allied,
-            "behavioral": topic_bank.behavioral,
-            "archetypes": topic_bank.archetypes,
-            "depth_guidelines": topic_bank.depth_guidelines,
-        }
-        topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
-            resume_text=resume_context if isinstance(resume_context, str) else None,
-            skills=[str(s) for s in skills_list],
-            fallback_topics=topics.get("tech_allied", []),
-        )
-        question_ratio = syllabus_service.compute_question_ratio(
-            years_experience=years,
-            has_resume_text=has_resume,
-            has_skills=has_skills,
-        )
-        ratio = {
-            "tech": question_ratio.tech,
-            "tech_allied": question_ratio.tech_allied,
-            "behavioral": question_ratio.behavioral,
-        }
-        influence = {
-            "target_role": role,
-            "difficulty": interview.difficulty,
-            "experience_years": years,
-            "skills": skills_list,
-            "headline": getattr(current_user, "target_position", None),
-        }
-
-        question_count = 5
-
-        if interview.difficulty == "easy":
-            static_items = get_static_questions(role=role, count=question_count, ratio=ratio)
-            questions = [item["text"] for item in static_items]
-            llm_error = None
-            latency_ms = 0
-            llm_model = "static"
-            items = static_items
-        else:
-            questions, llm_error, latency_ms, llm_model, items = await generate_interview_questions_with_llm(
+        if interview.track == FULL_STACK_ROLE and interview.difficulty == "medium" and not has_resume:
+            qs = {
+                "questions": ["Before proceeding with a Medium level Full Stack Developer interview, please add your resume."],
+                "llm_error": None,
+                "latency_ms": 0,
+                "llm_model": "static",
+                "items": [{"text": "Before proceeding with a Medium level Full Stack Developer interview, please add your resume.", "topic": "System", "category": "system", "isFollowUp": False, "parentQuestionId": None, "followUpStrategy": None, "supplement": None, "difficulty": interview.difficulty, "interviewQuestionId": 0}]
+            }
+            return GeneratedQuestionsInResponse(
+                interview_id=interview.id,
                 track=interview.track,
-                context_text=resume_context,
-                count=question_count,
-                difficulty=interview.difficulty,
-                syllabus_topics=topics,
-                ratio=ratio,
-                influence=influence,
+                count=1,
+                questions=qs["questions"],
+                question_ids=[0],
+                items=[
+                    QuestionItem(
+                        interview_question_id=item.get("interviewQuestionId"),
+                        text=item.get("text", ""),
+                        topic=item.get("topic"),
+                        difficulty=item.get("difficulty"),
+                        category=item.get("category"),
+                        is_follow_up=item.get("isFollowUp", False),
+                        parent_question_id=item.get("parentQuestionId"),
+                        follow_up_strategy=item.get("followUpStrategy"),
+                        supplement=item.get("supplement"),
+                    )
+                    for item in qs.get("items", [])
+                ],
+                cached=False,
+                llm_model=qs.get("llm_model"),
+                llm_latency_ms=qs.get("latency_ms"),
+                llm_error=qs.get("llm_error"),
             )
+
+        question_count = 5  # Base questions, leaves room for dynamic follow-ups
+
+        questions, llm_error, latency_ms, llm_model, items = await generate_full_stack_questions_with_llm(
+            domain=interview.track,
+            years_experience=years,
+            difficulty=interview.difficulty,
+            count=question_count,
+            seed=f"{current_user.id}:{interview.id}"
+        )
 
         if not questions:
             questions = [
@@ -325,19 +328,17 @@ async def generate_questions_v2(
                         "text": item.get("text", ""),
                         "topic": item.get("topic"),
                         "category": item.get("category"),
+                        "follow_up_strategy": item.get("followUpStrategy") or FOLLOW_UP_STRATEGY,
                     }
                 )
         else:
             for question in questions:
-                questions_data.append({"text": question, "topic": None, "category": None})
-
-        eligible_indices: list[int] = []
-        for idx, data in enumerate(questions_data):
-            category = str(data.get("category") or "tech").lower()
-            if category != "behavioral":
-                eligible_indices.append(idx)
-        for idx in eligible_indices[:2]:
-            questions_data[idx]["follow_up_strategy"] = FOLLOW_UP_STRATEGY
+                questions_data.append({
+                    "text": question, 
+                    "topic": None, 
+                    "category": None, 
+                    "follow_up_strategy": FOLLOW_UP_STRATEGY
+                })
 
         persisted = await question_repo.create_batch(
             interview_id=interview.id,

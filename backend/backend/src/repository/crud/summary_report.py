@@ -29,7 +29,20 @@ class SummaryReportCRUDRepository(BaseCRUDRepository):
             .returning(SummaryReport)
         )
         res = await self.async_session.execute(stmt)
-        return res.scalar_one()
+        summary_result = res.scalar_one()
+        
+        from src.services.analytics import _extract_overall_score
+        from src.models.db.report import Report
+        overall_score = _extract_overall_score(None, summary_result)
+        if overall_score is not None:
+            r_stmt = (
+                pg_insert(Report)
+                .values(interview_id=interview_id, overall_score=overall_score)
+                .on_conflict_do_update(index_elements=[Report.interview_id], set_={"overall_score": overall_score})
+            )
+            await self.async_session.execute(r_stmt)
+            
+        return summary_result
 
     async def get_last_x_for_user(self, user_id: int, limit: int = 10) -> List[Tuple[SummaryReport, Interview]]:
         """

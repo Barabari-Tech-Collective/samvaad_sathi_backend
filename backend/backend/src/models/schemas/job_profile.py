@@ -1,10 +1,54 @@
+from pydantic import BaseModel
+from typing import List, Optional
 import datetime
-
 import pydantic
-
 from src.models.schemas.base import BaseSchemaModel
 
+# --- feature/roles-page-api schemas ---
+class JobProfileBase(BaseModel):
+    title: str
+    description: Optional[str] = None
 
+class JobProfileCreateV2(JobProfileBase):
+    pass
+
+class JobProfileResponse(JobProfileBase):
+    id: int
+    created_at: datetime.datetime
+
+    class Config:
+        from_attributes = True
+
+class JobProfileSummaryResponse(BaseModel):
+    totalRoles: int
+    pendingReview: int
+    approved: int
+    rejected: int
+
+class JobProfileListResponse(BaseModel):
+    items: List[JobProfileResponse]
+    total: int
+
+class JobProfileActivityResponse(BaseModel):
+    id: int
+    title: str
+    action: str
+    message: str
+    createdAt: datetime.datetime
+
+class JobProfileUploadResponse(BaseModel):
+    success: bool
+    originalFileName: str
+    fileType: str
+    fileSize: int
+
+class JobProfileExtractSkillsRequest(BaseModel):
+    jobDescription: str
+
+class JobProfileExtractSkillsResponse(BaseModel):
+    skills: List[str]
+
+# --- upstream/master schemas ---
 class JobProfileCreate(BaseSchemaModel):
     job_name: str = pydantic.Field(min_length=2, max_length=160)
     job_description: str = pydantic.Field(min_length=20)
