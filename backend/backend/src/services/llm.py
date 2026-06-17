@@ -935,6 +935,20 @@ async def generate_question_supplements_with_llm(
             trimmed.pop()
         return "\n".join(trimmed).strip()
 
+    def _sanitize_mermaid(content: str) -> str:
+        c = content.strip()
+        was_wrapped = False
+        if c.startswith("```mermaid"):
+            c = c[len("```mermaid"):].strip()
+            was_wrapped = True
+        if c.endswith("```"):
+            c = c[:-3].strip()
+        if was_wrapped:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"[Mermaid Sanitizer] Before:\n{content}\nAfter:\n{c}")
+        return c
+
     sanitized: list[LLMSupplementItem] = []
     if result:
         for item in result.items:
@@ -945,6 +959,10 @@ async def generate_question_supplements_with_llm(
             if supplement_type not in {"code", "diagram"}:
                 continue
             fmt = (item.format or "").strip() or ("mermaid" if supplement_type == "diagram" else None)
+            
+            if supplement_type == "diagram" and fmt == "mermaid":
+                snippet = _sanitize_mermaid(snippet)
+                
             sanitized.append(
                 LLMSupplementItem(
                     questionId=item.questionId,

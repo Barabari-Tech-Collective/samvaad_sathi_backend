@@ -70,6 +70,8 @@ async def register_user(
                                     target_position=None,
                                     years_experience=None,
                                     total_attempts=0,
+                                    has_resume_text=bool(getattr(user, "resume_text", None)),
+                                    skills=user.skills.get("items", []) if isinstance(getattr(user, "skills", None), dict) else [],
                                     company=None),
     )
 
@@ -112,6 +114,8 @@ async def login_user(
                                     target_position=None,
                                     years_experience=None,
                                     total_attempts=0,
+                                    has_resume_text=bool(getattr(user, "resume_text", None)),
+                                    skills=user.skills.get("items", []) if isinstance(getattr(user, "skills", None), dict) else [],
                                     company=None),
     )
 
@@ -144,6 +148,8 @@ async def get_me(
             target_position=current_user.target_position,
             years_experience=current_user.years_experience,
             total_attempts=total_attempts,
+            has_resume_text=bool(getattr(current_user, "resume_text", None)),
+            skills=current_user.skills.get("items", []) if isinstance(getattr(current_user, "skills", None), dict) else [],
             company=current_user.company,
         ),
     )
@@ -198,6 +204,8 @@ async def update_profile(
         university=updated.university,
         target_position=updated.target_position,
         years_experience=updated.years_experience,
+        has_resume_text=bool(getattr(updated, "resume_text", None)),
+        skills=updated.skills.get("items", []) if isinstance(getattr(updated, "skills", None), dict) else [],
     )
 
 
