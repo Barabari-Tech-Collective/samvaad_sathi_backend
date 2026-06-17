@@ -18,6 +18,7 @@ from src.models.schemas.resume_builder import (
 )
 from src.repository.crud.ai_resume_analysis import AIResumeAnalysisCRUDRepository
 from src.services.ai_resume.template_service import generate_structured_resume_data
+from src.repository.crud.user import UserCRUDRepository
 
 router = APIRouter(prefix="/resume-builder", tags=["Resume Builder V2"])
 
@@ -178,11 +179,22 @@ async def download_resume_pdf(
             for proj in data['projects']:
                 bullets = proj.get('highlights') or proj.get('bullets') or []
                 highlights_li = "".join([f"<li>{item}</li>" for item in bullets if item])
+                
+                links_html = ""
+                if proj.get('github_link') or proj.get('hosted_link'):
+                    links_parts = []
+                    if proj.get('github_link'):
+                        links_parts.append(f"<a href='{proj.get('github_link')}' style='color: #1a73e8; text-decoration: none;'>GitHub</a>")
+                    if proj.get('hosted_link'):
+                        links_parts.append(f"<a href='{proj.get('hosted_link')}' style='color: #1a73e8; text-decoration: none;'>Live Project</a>")
+                    links_html = f"<div class='item-subtitle' style='margin-top: 1px; margin-bottom: 3px;'>{' | '.join(links_parts)}</div>"
+
                 html_content += f"""
                 <div class="flex-row">
                     <span class="right">{proj.get('duration', '')}</span>
                     <span class="item-title">{proj.get('title', '')}</span>
                 </div>
+                {links_html}
                 {"<ul>" + highlights_li + "</ul>" if highlights_li else ("<p style='margin-top: 4px;'>" + proj.get('description', '') + "</p>" if proj.get('description') else "")}
                 """
 
@@ -223,3 +235,70 @@ async def download_resume_pdf(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Document transmission process exception intercept: {str(e)}")
+
+@router.post("/{resume_id}/sync-to-profile")
+async def sync_resume_to_profile(
+    resume_id: int,
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        repo = ResumeBuilderRepository(session)
+        resume = await repo.get_resume_by_id_and_user(resume_id, current_user.id)
+        if not resume:
+            raise HTTPException(status_code=404, detail="Resume not found.")
+            
+        data = resume.resume_data
+        
+        # Format the data into a plain text string
+        lines = []
+        header = data.get('header', {})
+        lines.append(header.get('fullName', header.get('name', '')))
+        lines.append(header.get('title', ''))
+        
+        summary = data.get('summary', '')
+        if summary:
+            lines.append("\nSummary:\n" + summary)
+            
+        experience = data.get('experience', [])
+        if experience:
+            lines.append("\nExperience:")
+            for exp in experience:
+                lines.append(f"{exp.get('role', '')} at {exp.get('company', '')} ({exp.get('duration', '')})")
+                for b in exp.get('highlights', exp.get('bullets', [])):
+                    lines.append(f"- {b}")
+                    
+        projects = data.get('projects', [])
+        if projects:
+            lines.append("\nProjects:")
+            for proj in projects:
+                lines.append(f"{proj.get('title', '')} ({proj.get('duration', '')})")
+                for b in proj.get('highlights', proj.get('bullets', [])):
+                    lines.append(f"- {b}")
+                    
+        skills = data.get('skills', [])
+        if skills:
+            lines.append("\nSkills: " + ", ".join(skills))
+            
+        education = data.get('education', [])
+        if education:
+            lines.append("\nEducation:")
+            for edu in education:
+                lines.append(f"{edu.get('degree', '')} at {edu.get('institution', '')}")
+                
+        resume_text = "\n".join(lines).strip()
+        
+        user_repo = UserCRUDRepository(session)
+        await user_repo.update_resume_data(
+            user_id=current_user.id,
+            resume_text=resume_text,
+            years_experience=None, 
+            skills=skills
+        )
+        
+        return {"status": "SYNCED"}
+    except Exception as e:
+        import traceback
+        with open('sync_error.log', 'w') as f:
+            f.write(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
