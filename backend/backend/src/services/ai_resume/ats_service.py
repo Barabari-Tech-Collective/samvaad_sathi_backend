@@ -104,10 +104,14 @@ async def generate_ats_analysis(
 
             # Restructure JSON node keys to map perfectly to your 4 React dashboard cards
             parsed_response["scoreBreakdown"] = {
+                # "skillsMatch": sb.get("skillsMatch", 70),
+                # "experience": sb.get("experienceMatch", 70),  # Handles fresher/project mapping automatically
+                # "formatting": formatting_final_score,
+                # "keywords": sb.get("keywordDensity", sb.get("educationValidation", 70))
                 "skillsMatch": sb.get("skillsMatch", 70),
-                "experience": sb.get("experienceMatch", 70),  # Handles fresher/project mapping automatically
-                "formatting": formatting_final_score,
-                "keywords": sb.get("keywordDensity", sb.get("educationValidation", 70))
+                "experienceMatch": sb.get("experienceMatch", 70),
+                "formattingScore": formatting_final_score,
+                "keywordDensity": sb.get("keywordDensity", sb.get("educationValidation", 70))
             }
 
 
