@@ -6,46 +6,64 @@ def build_ats_analysis_prompt(
 ) -> str:
     """
     Builds structured ATS analysis prompt strictly tracking candidate inputs.
-    Dynamically adapts based on the target_role value.
+    Enforces deep parsing metrics for Education (Institution, Duration, Percentage/CGPA).
     """
-    
-    # 1. Dynamically classify role type for custom tracking logic
     role_lower = target_role.lower()
+    is_fresher = any(k in experience_level.lower() for k in ["fresher", "intern", "entry", "0 years"])
+
+    # 1. Handle Dynamic Link Tracking Rules
     if any(k in role_lower for k in ["design", "ui", "ux", "graphics", "product designer"]):
         role_track_type = "DESIGN / CREATIVE TRACK"
-        special_instructions = """
-        - Prioritize visual portfolio evaluation, Behance/Dribbble/Figma links, and case studies.
-        - Do NOT penalize the user for missing GitHub repositories.
-        - Ensure project evaluation searches for design file/live preview links.
+        link_validation_instruction = """
+        - CORE LINK MATRIX (40% of Total Score): Search strictly for visual portfolio links (Behance, Dribbble, Figma, or Personal Portfolios). 
+        - Heavily deduct points if no design file showcase or live preview links are structurally stated. Do not penalize for missing GitHub.
         """
     else:
         role_track_type = "TECHNICAL / ENGINEERING TRACK"
-        special_instructions = """
-        - Prioritize technical stack alignment, frameworks, and system architectures.
-        - Ensure project evaluation explicitly checks for active live links or GitHub repository links.
-        - Penalize the profile metrics if open-source/code repository links are entirely missing.
+        link_validation_instruction = """
+        - CORE LINK MATRIX (40% of Total Score): Search strictly for active code repositories or live deployments (GitHub, GitLab, Vercel, Netlify).
+        - Deduct points significantly if active functional workspace strings are missing.
+        """
+
+    # 2. Dynamic Fresher UI Rule Hook
+    if is_fresher:
+        experience_rubric_instruction = """
+        - FRESHER PROFILE DETECTED: The user has no formal corporate job history.
+        - CRITICAL RULE: Assess their academic projects, open-source work, or bootcamps. 
+        - Assign this combined Project quality rating score directly to the 'experienceMatch' breakdown node so the frontend score cards render beautifully.
+        """
+    else:
+        experience_rubric_instruction = """
+        - EXPERIENCED PROFILE DETECTED: Evaluate corporate roles, industry timeline durability, frameworks scaled, and real-world milestones.
         """
 
     return f"""
-You are an expert ATS (Applicant Tracking System) optimizer and premium executive tech recruiter.
-Analyze the candidate's resume text against the provided job description objectively.
+You are an expert ATS (Applicant Tracking System) optimizer and premium recruiter.
+Analyze the candidate's resume text against the job description strictly according to the weighted rubric below.
 
 TARGET EVALUATION PARAMETERS:
 - CANDIDATE TARGET ROLE: {target_role}
 - EXPECTED EXPERIENCE LEVEL: {experience_level}
 - EVALUATION TRACK: {role_track_type}
 
-TRACK INSTRUCTIONS:
-{special_instructions}
+STRICT SCORING WEIGHT DISTRIBUTION MATRICES (10/40/10/40):
+1. MATCHING SKILLS (10%): Evaluation of tech keywords against the Job Description. Maps to 'skillsMatch'.
+2. WORKING LINKS & DEPLOYMENTS (40%): Presence of active, valid clickable hyperlinked URLs. Maps to 'workingLinksAndDeployments'.
+3. EDUCATION VALIDATION (10%): Academic timeline tracking, institutions, and CGPA/percentages. Maps to 'educationValidation'.
+4. PROJECTS & WORK DESCRIPTIONS (40%): Structural validation of descriptions containing metrics and frameworks. Maps to 'projectsAndExperienceDescription'.
 
-SCORE TIERS FOR VALIDATION:
-- EXCELLENT MATCH (Core skills aligned + metrics included): 85 - 98.
-- AVERAGE MATCH (Skills present but lacks optimization/keywords): 60 - 84.
-- WEAK MATCH (Massive skill or context gaps): 10 - 59.
+{link_validation_instruction}
+{experience_rubric_instruction}
 
-Return response in EXACT clean valid JSON format matching the schema below without any markdown formatting wrappers.
-IMPORTANT: You MUST extract the actual skills, project names, and URLs from the resume text. DO NOT output the placeholder names or fake URLs from the schema blueprint below. If a project does not have a URL in the resume, leave projectUrl as an empty string "".
+EDUCATION STRUCTURAL VERIFICATION RULES:
+- Scrutinize the resume text for academic background credentials.
+- You must explicitly check for:
+  1. University Name / College Name
+  2. Duration / Graduation Timeline (e.g., 2021 - 2025)
+  3. Performance Score (Percentage or CGPA metric)
+- If ANY of these three parameters are missing or incomplete, flag it clearly inside the 'educationEvaluation' feedback object and lower the 'educationValidation' score block.
 
+Return response in EXACT clean valid JSON format matching the schema below without markdown formatting wrappers.
 {{
   "atsScore": 75,
   "summary": "High-level summary of match capability.",
@@ -64,6 +82,13 @@ IMPORTANT: You MUST extract the actual skills, project names, and URLs from the 
     "rating": "Good_Or_Bad_Or_Average",
     "feedback": "Specific feedback on how well their experience matches the job description."
   }},
+  "educationEvaluation": {{
+    "hasInstitution": true,
+    "hasDuration": false,
+    "hasScore": false,
+    "rating": "Needs_Improvement",
+    "feedback": "CRITICAL CRITERIA MISSING: Your graduation timeline and academic scores (Percentage/CGPA) are completely missing from the education layout block. Recruiters favor candidates with explicit score breakdowns."
+  }},
   "projectEvaluation": [
     {{
       "projectName": "Extracted_Project_Name",
@@ -80,7 +105,8 @@ IMPORTANT: You MUST extract the actual skills, project names, and URLs from the 
   }},
   "finalRecommendations": [
     "Actionable recommendation 1 based on their resume",
-    "Actionable recommendation 2 based on their resume"
+    "Actionable recommendation 2 based on their resume",
+    "Actionable recommendation 3 based on their resume"
   ],
   "hygieneCheck": {{
     "grammarIssues": [],

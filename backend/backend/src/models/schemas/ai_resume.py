@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 class ScoreBreakdown(BaseModel):
     skillsMatch: int
@@ -14,6 +14,14 @@ class SkillsAnalysis(BaseModel):
 
 class ExperienceEvaluationSchema(BaseModel):
     rating: str  # Excellent | Good | Average | Bad
+    feedback: str
+
+# Added schema to back education tracking requirements 
+class EducationEvaluationSchema(BaseModel):
+    hasInstitution: bool
+    hasDuration: bool
+    hasScore: bool
+    rating: str          # Excellent | Good | Needs_Improvement
     feedback: str
 
 class ProjectEvaluationItem(BaseModel):
@@ -43,7 +51,9 @@ class ResumeAnalysisResponse(BaseModel):
     scoreBreakdown: ScoreBreakdown
     skillsAnalysis: SkillsAnalysis
     experienceEvaluation: ExperienceEvaluationSchema
+    educationEvaluation: EducationEvaluationSchema
     projectEvaluation: List[ProjectEvaluationItem]
     suggestedProject: Optional[SuggestedProjectSchema] = None
     finalRecommendations: List[str]
     hygieneCheck: HygieneCheck
+    verifiedLinksMetadata: Optional[Dict[str, Any]] = None
