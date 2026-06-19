@@ -40,7 +40,8 @@ class UserProfileOut(BaseSchemaModel):
     university: str | None
     target_position: str | None
     years_experience: float | None
-    has_resume: bool = False
+    has_resume_text: bool = False
+    skills: list[str] | None = None
     # company removed from response
 
 
@@ -57,6 +58,9 @@ class UserWithToken(BaseSchemaModel):
     years_experience: float | None
     has_resume: bool = False
     total_attempts: int = pydantic.Field(default=0, ge=0, description="Total number of summary reports (attempts)")
+    has_resume_text: bool = False
+    skills: list[str] | None = None
+    # company removed from response
 
 
 class UserInResponse(BaseSchemaModel):
