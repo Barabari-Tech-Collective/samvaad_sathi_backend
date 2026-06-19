@@ -183,6 +183,11 @@ async def download_resume_pdf(
                     <span class="right">{proj.get('duration', '')}</span>
                     <span class="item-title">{proj.get('title', '')}</span>
                 </div>
+                {f'<div style="font-size: 8.5pt; color: #666666; margin-top: 2px;">' + 
+                  ((' <a href="' + proj.get('githubUrl') + '" style="color: #444444; text-decoration: none; margin-right: 8px;">GitHub Repo Link</a>') if proj.get('githubUrl') else '') +
+                  ((' | ' if proj.get('githubUrl') and proj.get('liveUrl') else '')) +
+                  ((' <a href="' + proj.get('liveUrl') + '" style="color: #444444; text-decoration: none;">Live Link</a>') if proj.get('liveUrl') else '') +
+                  '</div>' if (proj.get('githubUrl') or proj.get('liveUrl')) else ''}
                 {"<ul>" + highlights_li + "</ul>" if highlights_li else ("<p style='margin-top: 4px;'>" + proj.get('description', '') + "</p>" if proj.get('description') else "")}
                 """
 
