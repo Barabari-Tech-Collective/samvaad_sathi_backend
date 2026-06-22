@@ -255,6 +255,13 @@ async def generate_questions_v2(
         if interview is None:
             raise fastapi.HTTPException(status_code=fastapi.status.HTTP_400_BAD_REQUEST, detail="No active interview to generate questions for")
 
+    import sqlalchemy
+    # Acquire advisory lock on interview ID to prevent concurrent generation
+    # Using bound parameters for production-level SQL injection prevention
+    await question_repo.async_session.execute(
+        sqlalchemy.text("SELECT pg_advisory_xact_lock(:id)").bindparams(id=interview.id)
+    )
+
     existing = await question_repo.list_by_interview(interview_id=interview.id)
     persisted = existing
     cached = bool(existing)
@@ -301,7 +308,7 @@ async def generate_questions_v2(
                 llm_error=qs.get("llm_error"),
             )
 
-        question_count = 5  # Base questions, leaves room for dynamic follow-ups
+        question_count = 7 if interview.track == FULL_STACK_ROLE else 5  # Base questions, leaves room for dynamic follow-ups
 
         questions, llm_error, latency_ms, llm_model, items = await generate_full_stack_questions_with_llm(
             domain=interview.track,
@@ -340,11 +347,17 @@ async def generate_questions_v2(
                     "follow_up_strategy": FOLLOW_UP_STRATEGY
                 })
 
-        persisted = await question_repo.create_batch(
-            interview_id=interview.id,
-            questions_data=questions_data,
-            resume_used=payload.use_resume,
-        )
+        # Double check to prevent race condition double-insertion
+        existing_again = await question_repo.list_by_interview(interview_id=interview.id)
+        if existing_again:
+            logger.warning(f"Race condition detected: questions already exist for interview {interview.id}. Skipping insert.")
+            persisted = existing_again
+        else:
+            persisted = await question_repo.create_batch(
+                interview_id=interview.id,
+                questions_data=questions_data,
+                resume_used=payload.use_resume,
+            )
 
         supplements_map = await _get_supplement_map(
             interview_id=interview.id,

@@ -431,6 +431,20 @@ async def generate_full_stack_questions_with_llm(
         if not isinstance(items, list):
             items = []
             
+        # Strictly enforce the requested count
+        if len(items) > count:
+            items = items[:count]
+        elif len(items) < count:
+            needed = count - len(items)
+            fallback_qs = get_full_stack_questions(domain, years_experience, difficulty, needed, seed)
+            for fq in fallback_qs:
+                items.append({
+                    "text": fq["text"],
+                    "topic": fq["topic"],
+                    "category": fq["category"],
+                    "followUpStrategy": "default"
+                })
+            
         questions = [item.get("text", "") for item in items if isinstance(item, dict) and item.get("text")]
         return questions, error, latency_ms, model, items
     except Exception as e:
