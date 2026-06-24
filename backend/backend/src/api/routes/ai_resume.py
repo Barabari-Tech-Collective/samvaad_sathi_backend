@@ -80,6 +80,16 @@ async def analyze_resume(
         extracted_text = await extract_resume_text(
             resumeFile
         )
+        
+        from src.services.ai_resume.url_validator import extract_professional_urls, validate_urls
+        urls = extract_professional_urls(extracted_text)
+        is_valid = await validate_urls(urls)
+        
+        if not is_valid:
+            raise fastapi.HTTPException(
+                status_code=400,
+                detail="No proper working links found. Please ensure your resume contains valid GitHub, LinkedIn, or portfolio links."
+            )
 
         # Generate ATS analysis
         analysis_result = await generate_ats_analysis(

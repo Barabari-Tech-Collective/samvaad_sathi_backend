@@ -53,6 +53,14 @@ class FollowUpService:
         track = interview.track if interview else "general"
         difficulty = interview.difficulty if interview else "medium"
 
+        # Enforce strict question count for Full Stack Developer mode
+        if track == "Full Stack Developer":
+            unasked_qs = await self._interview_question_repo.get_questions_without_attempts(interview_id=attempt.interview_id)
+            unasked_base_qs = [q for q in unasked_qs if not getattr(q, "is_follow_up", False)]
+            if not unasked_base_qs:
+                logger.debug("Skipping follow-up generation for Full Stack Developer because no unasked base questions remain to splice.")
+                return None
+
         follow_up_text, llm_error, latency_ms, llm_model = await generate_follow_up_question(
             track=track,
             difficulty=difficulty,
@@ -79,6 +87,16 @@ class FollowUpService:
             question_id=follow_up_question.id,
             question_text=follow_up_question.text,
         )
+
+        if track == "Full Stack Developer":
+            unasked_qs = await self._interview_question_repo.get_questions_without_attempts(interview_id=attempt.interview_id)
+            unasked_base_qs = [q for q in unasked_qs if not getattr(q, "is_follow_up", False) and q.id != follow_up_question.id]
+            if unasked_base_qs:
+                last_q = unasked_base_qs[-1]
+                logger.info("Splicing queue for strict count: deleting unasked base question %s", last_q.id)
+                await self._async_session.delete(last_q)
+                await self._async_session.commit()
+
         metadata = {
             "parent_question_id": question.id,
             "follow_up_question_id": follow_up_question.id,

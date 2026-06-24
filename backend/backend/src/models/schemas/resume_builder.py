@@ -40,11 +40,17 @@ class ResumeProjectSchema(BaseModel):
     hosted_link: Optional[str] = ""
     bullets: Optional[List[str]] = []
     technologies: Optional[List[str]] = []
+    duration: Optional[str] = ""
+    bullets: Optional[List[str]] = []
+    highlights: Optional[List[str]] = []
+    githubUrl: Optional[str] = ""
+    liveUrl: Optional[str] = ""
 
 class ResumeEducationSchema(BaseModel):
     institution: str = ""
     degree: str = ""
     year: str = ""
+    duration: Optional[str] = ""
 
 class FullResumeContentSchema(BaseModel):
     header: ResumeHeaderSchema = Field(default_factory=ResumeHeaderSchema)

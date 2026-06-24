@@ -108,6 +108,11 @@ async def extract_pdf_text(file: UploadFile) -> str:
 
             # Extract text from page
             extracted_text += page.get_text()
+            
+            # Extract hidden hyperlinks (annotations) from the page
+            for link in page.get_links():
+                if "uri" in link:
+                    extracted_text += " " + link["uri"] + " "
 
         pdf_document.close()
 
