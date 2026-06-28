@@ -1,107 +1,98 @@
+import json
+
 def build_ats_analysis_prompt(
     resume_text: str,
     target_role: str,
     experience_level: str,
     job_description: str,
+    deterministic_report: dict,
 ) -> str:
     """
-    Builds structured ATS analysis prompt strictly tracking candidate inputs.
-    Enforces deep parsing metrics for Education (Institution, Duration, Percentage/CGPA).
+    Builds the complete production ATS optimization prompt.
+    Forces OpenAI to return separate, individual feedback blocks for every project.
     """
     role_lower = target_role.lower()
     is_fresher = any(k in experience_level.lower() for k in ["fresher", "intern", "entry", "0 years"])
 
-    # 1. Handle Dynamic Link Tracking Rules
     if any(k in role_lower for k in ["design", "ui", "ux", "graphics", "product designer"]):
         role_track_type = "DESIGN / CREATIVE TRACK"
-        link_validation_instruction = """
-        - CORE LINK MATRIX (40% of Total Score): Search strictly for visual portfolio links (Behance, Dribbble, Figma, or Personal Portfolios). 
-        - Heavily deduct points if no design file showcase or live preview links are structurally stated. Do not penalize for missing GitHub.
-        """
+        link_validation_instruction = "- Focus on visual portfolios (Behance, Dribbble, Figma)."
     else:
         role_track_type = "TECHNICAL / ENGINEERING TRACK"
-        link_validation_instruction = """
-        - CORE LINK MATRIX (40% of Total Score): Search strictly for active code repositories or live deployments (GitHub, GitLab, Vercel, Netlify).
-        - Deduct points significantly if active functional workspace strings are missing.
-        """
+        link_validation_instruction = "- Focus on active code bases (GitHub) and live cloud deployments."
 
-    # 2. Dynamic Fresher UI Rule Hook
-    if is_fresher:
-        experience_rubric_instruction = """
-        - FRESHER PROFILE DETECTED: The user has no formal corporate job history.
-        - CRITICAL RULE: Assess their academic projects, open-source work, or bootcamps. 
-        - Assign this combined Project quality rating score directly to the 'experienceMatch' breakdown node so the frontend score cards render beautifully.
-        """
-    else:
-        experience_rubric_instruction = """
-        - EXPERIENCED PROFILE DETECTED: Evaluate corporate roles, industry timeline durability, frameworks scaled, and real-world milestones.
-        """
+    exact_total_score = deterministic_report["atsScore"]
+    exact_breakdown = deterministic_report["scoreBreakdown"]
+
+    # Extract target project list computed by Python to construct an explicit target template structure
+    python_projects = deterministic_report.get("deterministicMetrics", {}).get("projectModule", {}).get("projectEvaluation", [])
+    
+    project_json_schema_builder = []
+    for proj in python_projects:
+        name = proj["projectName"]
+        score = proj["score"]
+        gaps_str = ", ".join(proj["detectedGaps"]) if proj["detectedGaps"] else "None"
+        project_json_schema_builder.append(
+            f'{{\n      "projectName": "{name}",\n      "feedback": "Write unique, deep engineering critique specifically for the \'{name}\' project. Address why it scored {score}/40 based on these verified issues: {gaps_str}."\n    }}'
+        )
+    
+    schema_projects_block = ",\n    ".join(project_json_schema_builder)
 
     return f"""
 You are an expert ATS (Applicant Tracking System) optimizer and premium recruiter.
-Analyze the candidate's resume text against the job description strictly according to the weighted rubric below.
+Your objective is to provide professional natural language summaries, granular feedback, and roadmap recommendations for a candidate based on their resume and a target job description.
+
+CRITICAL ARCHITECTURAL REQUIREMENT:
+A deterministic Python engine has already analyzed the technical elements of this resume and calculated the EXACT numerical scores. You are strictly FORBIDDEN from altering, guessing, or recalculating these numbers. You must map them directly into your JSON output fields as specified below.
+
+TARGET SYSTEM SCORES TO INJECT (USE THESE EXACT NUMBERS):
+- MASTER ATS SCORE: {exact_total_score}
+- skillsMatch BREAKDOWN: {exact_breakdown['skillsMatch']}
+- experienceMatch BREAKDOWN: {exact_breakdown['experienceMatch']}
+- formattingScore BREAKDOWN: {exact_breakdown['formattingScore']}
+- keywordDensity BREAKDOWN: {exact_breakdown['keywordDensity']}
 
 TARGET EVALUATION PARAMETERS:
 - CANDIDATE TARGET ROLE: {target_role}
 - EXPECTED EXPERIENCE LEVEL: {experience_level}
 - EVALUATION TRACK: {role_track_type}
 
-STRICT SCORING WEIGHT DISTRIBUTION MATRICES (10/40/10/40):
-1. MATCHING SKILLS (10%): Evaluation of tech keywords against the Job Description. Maps to 'skillsMatch'.
-2. WORKING LINKS & DEPLOYMENTS (40%): Presence of active, valid clickable hyperlinked URLs. Maps to 'workingLinksAndDeployments'.
-3. EDUCATION VALIDATION (10%): Academic timeline tracking, institutions, and CGPA/percentages. Maps to 'educationValidation'.
-4. PROJECTS & WORK DESCRIPTIONS (40%): Structural validation of descriptions containing metrics and frameworks. Maps to 'projectsAndExperienceDescription'.
-
 {link_validation_instruction}
-{experience_rubric_instruction}
 
-EDUCATION STRUCTURAL VERIFICATION RULES:
-- Scrutinize the resume text for academic background credentials.
-- You must explicitly check for:
-  1. University Name / College Name
-  2. Duration / Graduation Timeline (e.g., 2021 - 2025)
-  3. Performance Score (Percentage or CGPA metric)
-- If ANY of these three parameters are missing or incomplete, flag it clearly inside the 'educationEvaluation' feedback object and lower the 'educationValidation' score block.
+DETAILED PYTHON METRIC ANALYSIS LOGS FOR YOUR REFERENCE CONTEXT:
+{json.dumps(deterministic_report)}
 
-Return response in EXACT clean valid JSON format matching the schema below without markdown formatting wrappers.
+Return response in EXACT clean valid JSON format matching the schema below without markdown formatting wrappers or triple backticks.
+
 {{
-  "atsScore": 75,
-  "summary": "High-level summary of match capability.",
+  "atsScore": {exact_total_score},
+  "summary": "High-level professional explanation detailing how their profile maps to the core role specifications, explicitly justifying why they received their pre-computed score of {exact_total_score}/100.",
   "scoreBreakdown": {{
-    "skillsMatch": 80,
-    "experienceMatch": 70,
-    "formattingScore": 85,
-    "keywordDensity": 65
+    "skillsMatch": {exact_breakdown['skillsMatch']},
+    "experienceMatch": {exact_breakdown['experienceMatch']},
+    "formattingScore": {exact_breakdown['formattingScore']},
+    "keywordDensity": {exact_breakdown['keywordDensity']}
   }},
   "skillsAnalysis": {{
-    "strongSkills": ["Extracted_Skill_1", "Extracted_Skill_2", "Extracted_Skill_3"],
+    "strongSkills": ["Extracted_Skill_1", "Extracted_Skill_2"],
     "missingSkills": ["Missing_Skill_1", "Missing_Skill_2"],
     "deprioritizedSkills": ["Irrelevant_Skill_1"]
   }},
   "experienceEvaluation": {{
-    "rating": "Good_Or_Bad_Or_Average",
-    "feedback": "Specific feedback on how well their experience matches the job description."
+    "rating": "Fresher profile configuration applied. Scoring focus shifted heavily onto project metrics and academic builds.",
+    "feedback": "Deep natural language analysis explaining their occupational history or project depth relative to the JD requirements."
   }},
   "educationEvaluation": {{
-    "hasInstitution": true,
-    "hasDuration": false,
-    "hasScore": false,
-    "rating": "Needs_Improvement",
-    "feedback": "CRITICAL CRITERIA MISSING: Your graduation timeline and academic scores (Percentage/CGPA) are completely missing from the education layout block. Recruiters favor candidates with explicit score breakdowns."
+    "educationExplanation": "Write natural language feedback explaining layout gaps or structural advice regarding academic records here."
   }},
   "projectEvaluation": [
-    {{
-      "projectName": "Extracted_Project_Name",
-      "rating": "Good_Or_Needs_Improvement",
-      "feedback": "Specific feedback for this project based on job description.",
-      "projectUrl": "EXTRACTED_URL_OR_EMPTY_STRING"
-    }}
+    {schema_projects_block}
   ],
   "suggestedProject": {{
     "title": "Generated_Project_Idea_Title",
     "description": "Why this project would help them get the job.",
-    "difficulty": "Beginner_Or_Intermediate_Or_Advanced",
-    "tags": ["Generated_Tag_1", "Generated_Tag_2"]
+    "difficulty": "Intermediate",
+    "tags": ["Node.js", "React"]
   }},
   "finalRecommendations": [
     "Actionable recommendation 1 based on their resume",
@@ -109,12 +100,15 @@ Return response in EXACT clean valid JSON format matching the schema below witho
     "Actionable recommendation 3 based on their resume"
   ],
   "hygieneCheck": {{
-    "grammarIssues": [],
-    "hasLinkedIn": true,
-    "hasGithub": true,
-    "hasPortfolio": false,
-    "hasPhone": true,
-    "hasEmail": true
+    "grammarIssues": ["List any weak phrases, stylistic errors, or grammatical bugs detected in their text"],
+    "hasLinkedIn": {str(deterministic_report['hygieneCheck']['hasLinkedIn']).lower()},
+    "linkedInWorking": {str(deterministic_report['hygieneCheck']['linkedInWorking']).lower()},
+    "hasGithub": {str(deterministic_report['hygieneCheck']['hasGithub']).lower()},
+    "githubWorking": {str(deterministic_report['hygieneCheck']['githubWorking']).lower()},
+    "hasPortfolio": {str(deterministic_report['hygieneCheck']['hasPortfolio']).lower()},
+    "portfolioWorking": {str(deterministic_report['hygieneCheck']['portfolioWorking']).lower()},
+    "hasPhone": {str(deterministic_report['hygieneCheck']['hasPhone']).lower()},
+    "hasEmail": {str(deterministic_report['hygieneCheck']['hasEmail']).lower()}
   }}
 }}
 
@@ -124,7 +118,6 @@ JOB DESCRIPTION SPECIFICATION:
 RESUME TEXT DATA TO EVALUATE:
 {resume_text}
 """
-
 def build_structuring_prompt(
     resume_text: str,
     analysis_result: dict,

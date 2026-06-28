@@ -28,7 +28,7 @@ class SmartLinkValidator:
             })
         
         # Pattern 2: Domain-only links
-        pattern_domain = r'(?:github\.com|gitlab\.com|bitbucket\.org|linkedin\.com|behance\.net|dribbble\.com|figma\.com|twitter\.com|instagram\.com|youtube\.com|[a-zA-Z0-9-]+\.[a-zA-Z]{2,})/[^\s\)]+'
+        pattern_domain = r'(?:github\.com|gitlab\.com|bitbucket\.org|linkedin\.com|behance\.net|dribbble\.com|figma\.com|twitter\.com|instagram\.com|youtube\.com|medium\.com|[a-zA-Z0-9-]+\.[a-zA-Z]{2,})/[^\s\)]+'
         for match in re.finditer(pattern_domain, text):
             url = match.group().rstrip('.,;:()')
             if not any(link["original"] == url for link in links_found):
@@ -39,7 +39,7 @@ class SmartLinkValidator:
                 })
         
         # Pattern 3: Text-based link indicators
-        pattern_text_label = r'(?:GitHub|GitLab|Bitbucket|LinkedIn|Portfolio|Website|Blog|Behance|Dribbble)[\s:]*([^\s\)]+(?:github\.com|gitlab\.com|linkedin\.com|behance\.net|dribbble\.com|[a-zA-Z0-9-]+\.[a-zA-Z]{2,})/[^\s\)]+)'
+        pattern_text_label = r'(?:GitHub|GitLab|Bitbucket|LinkedIn|Portfolio|Website|Blog|Behance|Dribbble|Medium)[\s:]*([^\s\)]+(?:github\.com|gitlab\.com|linkedin\.com|behance\.net|dribbble\.com|medium\.com|[a-zA-Z0-9-]+\.[a-zA-Z]{2,})/[^\s\)]+)'
         for match in re.finditer(pattern_text_label, text, re.IGNORECASE):
             url = match.group(1).rstrip('.,;:()')
             if not any(link["original"] == url for link in links_found):
@@ -120,6 +120,8 @@ class SmartLinkValidator:
             "links": {},
             "summary": {"working": 0, "broken": 0, "unable_to_verify": 0}
         }
+
+        print("[Link Validator] Total Links Extracted:", results["total_links_found"])
         
         async with httpx.AsyncClient() as client:
             for link_info in links_data:

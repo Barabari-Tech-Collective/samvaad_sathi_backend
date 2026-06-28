@@ -11,7 +11,7 @@ ALLOWED_FILE_TYPES = [
 ]
 
 # Max file size (5 MB example)
-MAX_FILE_SIZE_MB = 5
+MAX_FILE_SIZE_MB = 10
 
 
 async def validate_resume_file(file: UploadFile):
@@ -85,58 +85,96 @@ async def extract_resume_text(file: UploadFile) -> str:
         )
 
 
+# async def extract_pdf_text(file: UploadFile) -> str:
+#     """
+#     Extract text from PDF using PyMuPDF.
+#     """
+
+#     try:
+#         # Read uploaded file bytes
+#         contents = await file.read()
+
+#         # Open PDF from memory
+#         pdf_document = fitz.open(
+#             stream=contents,
+#             filetype="pdf",
+#         )
+
+#         extracted_text = ""
+
+#         # Loop through all pages
+#         for page_number in range(len(pdf_document)):
+#             page = pdf_document.load_page(page_number)
+
+#             # Extract text from page
+#             extracted_text += page.get_text()
+
+#         pdf_document.close()
+
+#         # Reset file pointer
+#         await file.seek(0)
+
+#         if not extracted_text.strip():
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail="No text found in PDF resume",
+#             )
+
+#         return extracted_text.strip()
+
+#     except HTTPException:
+#         raise
+
+#     except Exception as e:
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"PDF parsing failed: {str(e)}",
+#         )
+
 async def extract_pdf_text(file: UploadFile) -> str:
     """
     Extract text from PDF using PyMuPDF.
+    Enhanced to capture hidden clickable hyperlinks and append them to the text buffer.
     """
-
     try:
-        # Read uploaded file bytes
         contents = await file.read()
-
-        # Open PDF from memory
-        pdf_document = fitz.open(
-            stream=contents,
-            filetype="pdf",
-        )
-
+        pdf_document = fitz.open(stream=contents, filetype="pdf")
+        
         extracted_text = ""
+        hyperlinks_found = []
 
-        # Loop through all pages
+        # Loop through pages to parse text + embedded link schemas
         for page_number in range(len(pdf_document)):
             page = pdf_document.load_page(page_number)
-
-            # Extract text from page
-            extracted_text += page.get_text()
+            extracted_text += page.get_text() + "\n"
             
-            # Extract hidden hyperlinks (annotations) from the page
-            for link in page.get_links():
+            # FIXED: Extract underlying clickable URLs (e.g. hidden behind "here" anchors)
+            page_links = page.get_links()
+            for link in page_links:
                 if "uri" in link:
-                    extracted_text += " " + link["uri"] + " "
+                    hyperlinks_found.append(link["uri"])
 
         pdf_document.close()
-
-        # Reset file pointer
         await file.seek(0)
 
         if not extracted_text.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="No text found in PDF resume",
-            )
+            raise HTTPException(status_code=400, detail="No text found in PDF resume")
+
+        # Append all verified hidden hyperlinks directly to the text dump 
+        # so SmartLinkValidator can run network checks on them perfectly
+        if hyperlinks_found:
+            extracted_text += "\n\n----- EXTRACTED EMBEDDED HYPERLINKS -----\n"
+            extracted_text += "\n".join(list(set(hyperlinks_found)))
 
         return extracted_text.strip()
 
     except HTTPException:
         raise
-
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"PDF parsing failed: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"PDF link-parsing failed: {str(e)}")
+    
 
-
+    
 async def extract_docx_text(file: UploadFile) -> str:
     """
     Extract text from DOCX using python-docx.
