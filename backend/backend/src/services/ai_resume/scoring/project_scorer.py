@@ -51,18 +51,12 @@ class ProjectScorer:
             #     has_deployment = True
             # deploy_points = 10 if has_deployment else 0
             # 2. GitHub Code Repository Check (+10)
-            has_github = "github.com" in url_text or "github.com" in body_text or "gitlab.com" in url_text or "github" in body_text
-            # If they have anchor link text indicators next to the code stack, treat it as present
-            if "link:" in body_text and any(tech in body_text for tech in ["react", "node", "express", "python"]):
-                has_github = True
+            has_github = "github.com" in url_text or "gitlab.com" in url_text
             gh_points = 10 if has_github else 0
 
             # 3. Live Cloud Deployment URL Check (+10)
-            has_deployment = any(host in url_text or host in body_text for host in ["vercel", "netlify", "render.com", "heroku", "aws", "github.io"])
-            if direct_url and "github.com" not in url_text:
-                has_deployment = True
-            # FIXED FALLBACK: If the text states a deployment link keyword indicator like "link: here", do not penalize it with a 0
-            if "link:" in body_text or "url:" in body_text or "demo" in body_text:
+            has_deployment = any(host in url_text for host in ["vercel", "netlify", "render.com", "heroku", "aws", "github.io"])
+            if direct_url and "github.com" not in url_text and "gitlab.com" not in url_text:
                 has_deployment = True
             deploy_points = 10 if has_deployment else 0
 

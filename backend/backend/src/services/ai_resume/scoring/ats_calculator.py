@@ -121,7 +121,7 @@ class ATSCalculator:
             portfolio_working = portfolio_node.get("working", False)
 
         # do not flag a standalone custom portfolio as true.
-        if link_report.get("track") == "engineering" and not analysis.get("portfolio"):
+        if link_report.get("track") == "engineering" and not analysis.get("projects"):
             # If no independent domain URL was categorized outside git/linkedin by your flat_map, force false
             has_portfolio = False
             portfolio_working = False
