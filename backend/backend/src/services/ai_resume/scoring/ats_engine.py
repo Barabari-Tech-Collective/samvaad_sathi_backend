@@ -76,18 +76,7 @@ class ATSEngine:
             raw_resume_text=raw_resume_text,
             project_report=project_report
         )
-        # FIXED: Text-based fail-safe checks for link presence to capture plain-text handlers
-        text_lower = raw_resume_text.lower()
-        
-        if "github" in text_lower or "github.com" in text_lower:
-            master_report["hygieneCheck"]["hasGithub"] = True
-            # If links are clearly present in project bullet points, enforce working status fallback
-            if "link:" in text_lower or "http" in text_lower:
-                master_report["hygieneCheck"]["githubWorking"] = True
 
-        if "linkedin" in text_lower or "linkedin.com" in text_lower:
-            master_report["hygieneCheck"]["hasLinkedIn"] = True
-            master_report["hygieneCheck"]["linkedInWorking"] = True
 
         # Matches patterns like: +91 9618211626, 9912081886, +91-98765-43210, +1 (555) 019-2834
         phone_regex = re.compile(
@@ -96,6 +85,7 @@ class ATSEngine:
         
         # Scrape and audit raw resume text buffer
         raw_text_strip = raw_resume_text.strip()
+        text_lower = raw_resume_text.lower()
         
         # Execute structural regex search loop
         has_phone = bool(phone_regex.search(raw_text_strip))
