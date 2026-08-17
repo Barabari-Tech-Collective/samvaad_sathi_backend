@@ -1,4 +1,5 @@
 import fastapi
+import asyncio
 from fastapi import File, UploadFile
 from typing import List, Optional
 import logging
@@ -397,6 +398,7 @@ async def upload_knowledge_questions(
     import zipfile
     import xml.etree.ElementTree as ET
     import PyPDF2
+    import pdfplumber
     
     # 1. Existing validation
     extension, size = await validate_file(file)
@@ -418,18 +420,15 @@ async def upload_knowledge_questions(
             extracted_text = content.decode("utf-8", errors="ignore")
         elif ext == ".pdf":
             try:
-                pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
                 texts = []
-                for page in pdf_reader.pages:
-                    try:
-                        page_text = page.extract_text() or ""
+                with pdfplumber.open(io.BytesIO(content)) as pdf:
+                    for page in pdf.pages:
+                        page_text = page.extract_text(layout=True) or ""
                         if page_text.strip():
                             texts.append(page_text)
-                    except Exception:
-                        continue
                 extracted_text = "\n".join(texts)
             except Exception as e:
-                logger.error(f"Error parsing PDF file: {e}")
+                logger.error(f"Error parsing PDF file with pdfplumber: {e}")
                 extracted_text = ""
         elif ext == ".docx":
             try:
@@ -448,195 +447,48 @@ async def upload_knowledge_questions(
         elif ext == ".doc":
             extracted_text = content.decode("utf-8", errors="ignore")
             
-        # Fix PDF extraction where lowercase letters are immediately followed by an uppercase question prefix
+        # Fix PDF extraction where text is immediately followed by a question number or level
         if extracted_text:
-            extracted_text = re.sub(r'([a-z])(Question:|What|Explain|How|When|Why|Write|Discuss|Compare|Describe)\b', r'\1\n\2', extracted_text)
+            extracted_text = re.sub(r'([^\s\d])\s*(\d+[\.\)])\s+', r'\1\n\2 ', extracted_text)
+            extracted_text = re.sub(r'([a-z\.])\s*(LEVEL\s*\d+|Domain\s*\d+)', r'\1\n\2', extracted_text, flags=re.IGNORECASE)
             
         # Parse text if we extracted anything
         if extracted_text.strip():
-            lines = [line.strip() for line in extracted_text.split("\n")]
+            # Call heuristic parser to parse the entire text
+            from src.services.knowledge_parser import parse_knowledge_base_text
+            result, error, latency_ms, model = parse_knowledge_base_text(extracted_text)
             
-            # Clean unwanted lines
-            filtered_lines = []
-            unwanted_substrings = [
-                "Barabari Tech Collective",
-                "Expanded Interview Knowledge Base",
-                "Engineering Interview Guidelines",
-                "Copyright",
-                "Confidential",
-                "Page",
-                "v2.0 May 2026",
-                "Assessment Level",
-                "Sample Questions / Topics",
-                "Document Prepared By",
-                "Sharath Nair",
-                "Engineering Manager"
-            ]
+            if error or not result:
+                raise fastapi.HTTPException(
+                    status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"AI parsing failed: {error or 'No result returned'}"
+                )
             
-            for line in lines:
-                clean = line.strip()
-                if not clean:
-                    continue
-                if clean in ("•", "-", "*"):
-                    continue
+            # Convert LLM Pydantic response to API response format
+            for topic in result.topics:
+                levels_res = []
+                topic_question_count = 0
+                for lvl in topic.levels:
+                    levels_res.append({
+                        "level": lvl.level,
+                        "questionCount": len(lvl.questions),
+                        "questions": lvl.questions
+                    })
+                    topic_question_count += len(lvl.questions)
                 
-                is_unwanted = False
-                for sub in unwanted_substrings:
-                    if sub.lower() in clean.lower():
-                        is_unwanted = True
-                        break
-                if not is_unwanted:
-                    filtered_lines.append(clean)
+                if topic_question_count > 0:
+                    total_questions += topic_question_count
+                    topics_list.append({
+                        "topicName": topic.topicName,
+                        "candidateType": topic.candidateType,
+                        "questionCount": topic_question_count,
+                        "levels": levels_res
+                    })
+                    if topic.topicName not in topics_detected:
+                        topics_detected.append(topic.topicName)
                     
-            def is_question_start_prefix(clean_line: str) -> bool:
-                question_prefixes = [
-                    "What", "Explain", "How", "When", "Why", "Write", "Discuss",
-                    "Advanced CSS", "Advanced TypeScript", "JWT vs", "Microservices vs", "gRPC vs"
-                ]
-                for prefix in question_prefixes:
-                    if clean_line.lower().startswith(prefix.lower()):
-                        if len(clean_line) == len(prefix) or clean_line[len(prefix)].isspace() or clean_line[len(prefix)] in (",", ";", ":", "-", "."):
-                            return True
-                return False
-
-            topics_map = {}
-            # Structure: (topic_name, candidate_type) -> { level_num -> [questions] }
-            
-            current_candidate_type = "Freshers"
-            current_topic = "Frontend"
-            current_level = 1
-            
-            last_question_key = None
-            
-            for line in filtered_lines:
-                clean_for_header = re.sub(r'^[#*\-\s\+•]+', '', line).strip()
-                
-                # Detect candidate type
-                if "part 1" in line.lower() and "freshers" in line.lower():
-                    current_candidate_type = "Freshers"
-                    continue
-                elif "part 2" in line.lower() and "experienced" in line.lower():
-                    current_candidate_type = "Experienced"
-                    continue
-                    
-                # Detect topic header
-                is_topic_hdr = False
-                for vt in ["Frontend", "Backend (Java)", "Node.js"]:
-                    if clean_for_header.lower() == vt.lower():
-                        current_topic = vt
-                        is_topic_hdr = True
-                        break
-                if is_topic_hdr:
-                    continue
-                    
-                # Detect level header
-                level_match = re.match(r'^level\s*([1-4])', clean_for_header, re.IGNORECASE)
-                if level_match:
-                    current_level = int(level_match.group(1))
-                    continue
-                    
-                # Check if section label to ignore
-                is_section_lbl = False
-                for lbl in ["Easy & Fundamentals", "Resume & Project Based", "Production Based", "Advanced"]:
-                    if clean_for_header.lower() == lbl.lower():
-                        is_section_lbl = True
-                        break
-                if is_section_lbl:
-                    continue
-                    
-                # Clean question text of leading numbers, bullet symbols
-                question_text = re.sub(r'^\d+[\.\)]\s*', '', line)
-                question_text = re.sub(r'^[#*\-\s\+•]+', '', question_text).strip()
-                
-                if not question_text:
-                    continue
-                    
-                key = (current_topic, current_candidate_type, current_level)
-                topic_key = (current_topic, current_candidate_type)
-                
-                # Determine if it starts a new question or merges
-                starts_new = False
-                starts_with_prefix = is_question_start_prefix(question_text)
-                ends_with_qmark = question_text.endswith("?")
-                
-                if starts_with_prefix:
-                    starts_new = True
-                elif ends_with_qmark:
-                    if topic_key in topics_map and current_level in topics_map[topic_key] and topics_map[topic_key][current_level]:
-                        prev_q = topics_map[topic_key][current_level][-1]
-                        if prev_q.endswith("?"):
-                            starts_new = True
-                    else:
-                        starts_new = True
-                        
-                if starts_new or last_question_key is None or key != last_question_key:
-                    if not starts_new and last_question_key is None and not ends_with_qmark:
-                        # Ignore introductory text before the first actual question
-                        continue
-                        
-                    if topic_key not in topics_map:
-                        topics_map[topic_key] = {}
-                    if current_level not in topics_map[topic_key]:
-                        topics_map[topic_key][current_level] = []
-                    topics_map[topic_key][current_level].append(question_text)
-                    last_question_key = key
-                else:
-                    if topic_key in topics_map and current_level in topics_map[topic_key]:
-                        prev_questions = topics_map[topic_key][current_level]
-                        if prev_questions:
-                            prev_questions[-1] = prev_questions[-1] + " " + question_text
-                        else:
-                            prev_questions.append(question_text)
-                    else:
-                        if topic_key not in topics_map:
-                            topics_map[topic_key] = {}
-                        if current_level not in topics_map[topic_key]:
-                            topics_map[topic_key][current_level] = []
-                        topics_map[topic_key][current_level].append(question_text)
-                        last_question_key = key
-
-            # Construct the output structure
-            candidates_order = ["Freshers", "Experienced"]
-            topics_order = ["Frontend", "Backend (Java)", "Node.js"]
-            
-            topics_detected_set = set()
-            
-            for cand in candidates_order:
-                for top in topics_order:
-                    key = (top, cand)
-                    if key in topics_map:
-                        levels_dict = topics_map[key]
-                        levels_res = []
-                        topic_question_count = 0
-                        
-                        for lvl_num in sorted(levels_dict.keys()):
-                            q_list = levels_dict[lvl_num]
-                            q_list_clean = [q.strip() for q in q_list if q.strip()]
-                            if not q_list_clean:
-                                continue
-                            lvl_count = len(q_list_clean)
-                            topic_question_count += lvl_count
-                            levels_res.append({
-                                "level": lvl_num,
-                                "questionCount": lvl_count,
-                                "questions": q_list_clean
-                            })
-                            
-                        if topic_question_count > 0:
-                            total_questions += topic_question_count
-                            topics_detected_set.add(top)
-                            topics_list.append({
-                                "topicName": top,
-                                "candidateType": cand,
-                                "questionCount": topic_question_count,
-                                "levels": levels_res
-                            })
-                            
-            topics_detected = [t for t in topics_order if t in topics_detected_set]
-            for t in topics_detected_set:
-                if t not in topics_detected:
-                    topics_detected.append(t)
-                    
+    except fastapi.HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error parsing uploaded questions file: {e}")
         topics_detected = []
@@ -675,7 +527,14 @@ async def extract_skills(
             detail="job_description cannot be empty"
         )
         
-    extracted_skills = extract_skills_from_text(payload.job_description)
+    extracted_skills, error = await extract_skills_from_text(payload.job_description)
+    if error:
+        logger.error(f"Failed to extract skills via LLM: {error}")
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to extract skills. The AI service may be temporarily unavailable. Reason: {error}"
+        )
+
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
 
 
@@ -736,10 +595,10 @@ async def generate_questions_v2(
     track = profile.job_name
     context_text = profile.job_description
 
-    for l in payload.levels:
+    async def process_level(l):
         if l.count == 0:
-            continue
-
+            return []
+            
         difficulty = level_map[l.level]
         
         # Prepare syllabus and question ratio using existing syllabus service
@@ -782,27 +641,26 @@ async def generate_questions_v2(
         if payload.knowledge_reference_context:
             influence["knowledge_reference_context"] = payload.knowledge_reference_context
 
-        # Senior instruction: Make multiple smaller LLM calls to prevent large call failures (e.g. batch size of 5)
         remaining = l.count
-        batch_size = 5
-        level_generated_items = []
-
+        batch_size = 10
+        
+        # Calculate batches
+        batches = []
         while remaining > 0:
             current_batch = min(remaining, batch_size)
-            current_influence = dict(influence)
-            if level_generated_items:
-                current_influence["exclude_questions"] = [
-                    item["text"] for item in level_generated_items
-                ]
+            batches.append(current_batch)
+            remaining -= current_batch
 
+        async def fetch_batch(b_count, batch_idx):
+            current_influence = dict(influence)
             logger.info(
-                f"Generating batch of {current_batch} questions (remaining: {remaining}) for Job Profile {job_profile_id} at Level {l.level} ({difficulty})"
+                f"Generating parallel batch {batch_idx+1}/{len(batches)} ({b_count} questions) for Job Profile {job_profile_id} at Level {l.level} ({difficulty})"
             )
 
             questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
                 track=track,
                 context_text=context_text,
-                count=current_batch,
+                count=b_count,
                 difficulty=difficulty,
                 syllabus_topics=topics,
                 ratio=ratio,
@@ -815,15 +673,26 @@ async def generate_questions_v2(
                     status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Failed to generate questions for Level {l.level}: {error or 'No questions generated'}"
                 )
+            return structured_items
 
-            level_generated_items.extend(structured_items)
-            remaining -= current_batch
+        # Run all batches concurrently to prevent timeouts on Render
+        batch_results = await asyncio.gather(*[fetch_batch(b, i) for i, b in enumerate(batches)])
+        
+        level_generated_items = []
+        for res in batch_results:
+            level_generated_items.extend(res)
 
-        for item in level_generated_items:
+        return [(l.level, difficulty, item) for item in level_generated_items]
+
+    # Process all requested levels in parallel
+    results = await asyncio.gather(*[process_level(l) for l in payload.levels])
+
+    for level_results in results:
+        for level, difficulty, item in level_results:
             generated_questions_data.append({
                 "job_profile_id": profile.id,
                 "question_text": item["text"],
-                "level": l.level,
+                "level": level,
                 "difficulty": difficulty,
                 "question_type": item.get("category", "theoretical"),
                 "is_ai_generated": True,

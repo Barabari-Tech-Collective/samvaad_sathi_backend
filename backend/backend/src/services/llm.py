@@ -3,6 +3,7 @@ import random
 import time
 from typing import Any, Type, List, Dict, Literal, TypeVar, Optional, Union
 import logging
+
 import pydantic
 from pydantic import Field, AliasChoices
 from openai import AsyncOpenAI
@@ -39,6 +40,10 @@ def _get_client() -> AsyncOpenAI | None:
 class ResumeEntitiesLLM(pydantic.BaseModel):
     skills: list[str] = pydantic.Field(default_factory=list)
     years_experience: float | None = None
+
+
+class JobDescriptionSkillsLLM(pydantic.BaseModel):
+    skills: list[str] = pydantic.Field(default_factory=list)
 
 
 # Base class for items with date ranges
@@ -753,6 +758,7 @@ async def structured_output(
     system_prompt: str,
     user_content: Any,
     temperature: float = 0,
+    max_tokens: int = 2048,
 ) -> tuple[T | None, str | None, int | None, str]:
     """Call OpenAI asynchronously with JSON response_format and validate against Pydantic model."""
     model = settings.OPENAI_MODEL
@@ -790,10 +796,12 @@ async def structured_output(
             "new" if is_new_family else "legacy",
             token_param_key,
         )
+        is_new_family = any(model.lower().startswith(p) for p in ("gpt-5", "gpt-4.1", "o4", "o3"))
+        token_param_key = "max_completion_tokens" if is_new_family else "max_tokens"
         kwargs: dict[str, Any] = {
             "model": model,
             "response_format": {"type": "json_object"},
-            token_param_key: 2048, 
+            token_param_key: max_tokens,
             "messages": [
                 {"role": "system", "content": formatted_system_prompt},
                 {"role": "user", "content": user_content if isinstance(user_content, str) else json.dumps(user_content, ensure_ascii=False)},
@@ -998,6 +1006,44 @@ async def extract_resume_entities_v2_with_llm(text: str) -> tuple[dict[str, Any]
         # Fallback to minimal response on error
         latency_ms = None
         return {}, str(e), latency_ms, model
+
+
+async def extract_jd_skills_with_llm(text: str) -> tuple[list[str], str | None]:
+    """
+    Extract skills (technical, tools, soft skills, domain-specific) from a Job Description.
+    Returns (skills_list, error).
+    """
+    model = settings.OPENAI_MODEL
+    api_key = settings.OPENAI_API_KEY
+    if not api_key or not text:
+        return [], "OpenAI API key not configured or empty text provided."
+
+    error: str | None = None
+    skills: list[str] = []
+
+    sys_prompt = (
+        "Extract all relevant professional skills from the provided Job Description text. "
+        "Include technical skills, tools, frameworks, soft skills, and domain-specific methodologies "
+        "(e.g., 'User Research', 'Prototyping', 'Figma', 'Agile'). "
+        "Return ONLY a valid JSON object matching the schema: "
+        '{"skills": ["skill1", "skill2", ...]}'
+    )
+    input_text = text[:15000] # Limit size to prevent token limits
+
+    try:
+        result, perr, latency, model = await structured_output(
+            JobDescriptionSkillsLLM,
+            system_prompt=sys_prompt,
+            user_content=input_text,
+            temperature=0,
+        )
+        error = perr
+        if result:
+            skills = result.skills
+    except Exception as e:
+        error = f"Failed to extract skills: {str(e)}"
+
+    return skills, error
 
 
 async def generate_interview_questions_with_llm(
@@ -1497,3 +1543,4 @@ async def analyze_communication_with_llm(
     if result:
         analysis = result.model_dump()
     return analysis, error, latency_ms, model
+

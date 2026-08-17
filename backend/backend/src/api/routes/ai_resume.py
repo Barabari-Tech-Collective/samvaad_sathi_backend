@@ -31,6 +31,7 @@ from src.services.ai_resume.template_service import (
 from src.services.ai_resume.ats_service import (
     generate_ats_analysis,
 )
+from src.services.barabari_integration import submit_resume_score_to_barabari
 
 router = fastapi.APIRouter(
     prefix="/ai-resume",
@@ -124,6 +125,14 @@ async def analyze_resume(
 
         await session.commit()
         await session.refresh(db_analysis)
+
+        if current_user.student_id:
+            await submit_resume_score_to_barabari(
+                student_id=current_user.student_id,
+                resume_score=analysis_result["atsScore"],
+                request_id=analysis_id,
+                target_role=targetRole,
+            )
 
         return analysis_result
 

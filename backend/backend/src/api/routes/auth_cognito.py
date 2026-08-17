@@ -36,9 +36,12 @@ def _get_oauth(request: Request) -> OAuth:
 
 
 @router.get("/login")
-async def login(request: Request):
+async def login(request: Request, studentId: str | None = None):
     oauth = _get_oauth(request)
     redirect_uri = request.url_for("auth_cognito_authorize")
+    # session, not the OAuth state param - authlib owns that for CSRF
+    if studentId:
+        request.session["pending_student_id"] = studentId
     return await oauth.cognito.authorize_redirect(request, redirect_uri)
 
 
@@ -79,6 +82,10 @@ async def authorize(
         random_password = secrets.token_urlsafe(16)
         user = await user_repo.create_user(email=email, password=random_password, name=name or email)
         await session_repo.create_session(user_id=user.id)
+
+    pending_student_id = request.session.pop("pending_student_id", None)
+    if pending_student_id:
+        user = await user_repo.set_student_id_if_unset(user_id=user.id, student_id=pending_student_id)
 
     # Mint existing JWT (carry Cognito subject if available) and store in session for retrieval
     cognito_sub = userinfo.get("sub")
