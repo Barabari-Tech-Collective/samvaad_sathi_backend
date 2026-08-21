@@ -76,6 +76,7 @@ class QuestionSupplementOut(BaseSchemaModel):
 class InterviewCreate(BaseSchemaModel):
     track: str
     difficulty: str | None = None  # easy | medium | hard
+    job_profile_id: int | None = None
 
 
 class GenerateQuestionsRequest(BaseSchemaModel):

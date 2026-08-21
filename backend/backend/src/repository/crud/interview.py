@@ -19,8 +19,8 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         query = await self.async_session.execute(statement=stmt)
         return query.scalar()  # type: ignore
 
-    async def create_interview(self, *, user_id: int, track: str, difficulty: str = "medium") -> Interview:
-        new_interview = Interview(user_id=user_id, track=track, difficulty=difficulty, status="active")
+    async def create_interview(self, *, user_id: int, track: str, difficulty: str = "medium", job_profile_id: int | None = None) -> Interview:
+        new_interview = Interview(user_id=user_id, track=track, difficulty=difficulty, status="active", job_profile_id=job_profile_id)
         self.async_session.add(new_interview)
         await self.async_session.commit()
         await self.async_session.refresh(new_interview)

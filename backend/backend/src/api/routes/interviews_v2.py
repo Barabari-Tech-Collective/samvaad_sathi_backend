@@ -182,7 +182,7 @@ async def create_or_resume_interview_v2(
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
 ) -> InterviewInResponse:
     active = await interview_repo.get_active_by_user(user_id=current_user.id)
-    if active is not None and active.track == payload.track:
+    if active is not None and active.track == payload.track and active.job_profile_id == payload.job_profile_id:
         res = InterviewInResponse(
             interview_id=active.id,
             track=active.track,
@@ -213,7 +213,7 @@ async def create_or_resume_interview_v2(
                 detail="Cannot use resume for interview: No resume is saved to your profile."
             )
 
-    interview = await interview_repo.create_interview(user_id=current_user.id, track=payload.track, difficulty=difficulty)
+    interview = await interview_repo.create_interview(user_id=current_user.id, track=payload.track, difficulty=difficulty, job_profile_id=payload.job_profile_id)
     await track_analytics_event(
         interview_repo.async_session,
         event_type="interview_started",
@@ -263,6 +263,7 @@ async def generate_questions_v2(
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
     question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewQuestionCRUDRepository)),
     question_attempt_repo: QuestionAttemptCRUDRepository = fastapi.Depends(get_repository(repo_type=QuestionAttemptCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> GeneratedQuestionsInResponse:
     supplement_service = QuestionSupplementService(async_session=question_repo.async_session)
     interview = None
@@ -312,15 +313,15 @@ async def generate_questions_v2(
                 question_ids=[0],
                 items=[
                     QuestionItem(
-                        interview_question_id=item.get("interviewQuestionId"),
-                        text=item.get("text", ""),
-                        topic=item.get("topic"),
-                        difficulty=item.get("difficulty"),
-                        category=item.get("category"),
-                        is_follow_up=item.get("isFollowUp", False),
-                        parent_question_id=item.get("parentQuestionId"),
-                        follow_up_strategy=item.get("followUpStrategy"),
-                        supplement=item.get("supplement"),
+                        interview_question_id=item.get("interviewQuestionId"),  # type: ignore
+                        text=item.get("text", ""),  # type: ignore
+                        topic=item.get("topic"),  # type: ignore
+                        difficulty=item.get("difficulty"),  # type: ignore
+                        category=item.get("category"),  # type: ignore
+                        is_follow_up=item.get("isFollowUp", False),  # type: ignore
+                        parent_question_id=item.get("parentQuestionId"),  # type: ignore
+                        follow_up_strategy=item.get("followUpStrategy"),  # type: ignore
+                        supplement=item.get("supplement"),  # type: ignore
                     )
                     for item in qs.get("items", [])
                 ],
@@ -341,13 +342,39 @@ async def generate_questions_v2(
 
         question_count = 7 if interview.track == FULL_STACK_ROLE else 5  # Base questions, leaves room for dynamic follow-ups
 
-        questions, llm_error, latency_ms, llm_model, items = await generate_full_stack_questions_with_llm(
-            domain=interview.track,
-            years_experience=years,
-            difficulty=interview.difficulty,
-            count=question_count,
-            seed=f"{current_user.id}:{interview.id}"
-        )
+        questions = None
+        llm_error = None
+        latency_ms = 0
+        llm_model = "static"
+        items = None
+        
+        if getattr(interview, "job_profile_id", None):
+            difficulty_map = {"easy": 1, "medium": 2, "hard": 3, "expert": 4}
+            mapped_level = difficulty_map.get(interview.difficulty, 2)
+            admin_questions = await job_profile_repo.get_job_profile_questions(interview.job_profile_id)
+            level_questions = [q for q in admin_questions if q.level == mapped_level]
+            if level_questions:
+                import random
+                random.seed(f"{current_user.id}:{interview.id}")
+                selected = random.sample(level_questions, min(len(level_questions), 5))
+                questions = [q.question_text for q in selected]
+                items = []
+                for q in selected:
+                    items.append({
+                        "text": q.question_text,
+                        "topic": "General",
+                        "category": "tech",
+                        "followUpStrategy": FOLLOW_UP_STRATEGY,
+                    })
+
+        if not questions:
+            questions, llm_error, latency_ms, llm_model, items = await generate_full_stack_questions_with_llm(
+                domain=interview.track,
+                years_experience=years,
+                difficulty=interview.difficulty,
+                count=question_count,
+                seed=f"{current_user.id}:{interview.id}"
+            )
 
         if not questions:
             questions = [
@@ -456,27 +483,35 @@ async def generate_questions_v2(
             "items": response_items,
         }
 
+    raw_items = qs.get("items")
+    items_list = raw_items if isinstance(raw_items, list) else []
+    raw_latency = qs.get("latency_ms")
+    latency_val = int(raw_latency) if isinstance(raw_latency, (int, float, str)) and raw_latency else None
+    
     response_payload = GeneratedQuestionsInResponse(
         interview_id=interview.id,
         track=interview.track,
         count=len(persisted),
         questions=[q.text for q in persisted],
         question_ids=[q.id for q in persisted],
-        items=[QuestionItem(
-            interview_question_id=item.get("interviewQuestionId"),
-            text=item.get("text", ""),
-            topic=item.get("topic"),
-            difficulty=item.get("difficulty"),
-            category=item.get("category"),
-            is_follow_up=item.get("isFollowUp", False),
-            parent_question_id=item.get("parentQuestionId"),
-            follow_up_strategy=item.get("followUpStrategy"),
-            supplement=item.get("supplement"),
-        ) for item in qs.get("items", [])],
+        items=[
+            QuestionItem(
+                interview_question_id=item.get("interviewQuestionId"),  # type: ignore
+                text=str(item.get("text", "")),  # type: ignore
+                topic=item.get("topic"),  # type: ignore
+                difficulty=item.get("difficulty"),  # type: ignore
+                category=item.get("category"),  # type: ignore
+                is_follow_up=bool(item.get("isFollowUp", False)),  # type: ignore
+                parent_question_id=item.get("parentQuestionId"),  # type: ignore
+                follow_up_strategy=item.get("followUpStrategy"),  # type: ignore
+                supplement=item.get("supplement"),  # type: ignore
+            )
+            for item in items_list if isinstance(item, dict)
+        ],
         cached=cached,
-        llm_model=qs.get("llm_model"),
-        llm_latency_ms=qs.get("latency_ms"),
-        llm_error=qs.get("llm_error"),
+        llm_model=str(qs.get("llm_model")) if qs.get("llm_model") else None,
+        llm_latency_ms=latency_val,
+        llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
     )
 
     # =========================================================================
@@ -643,6 +678,11 @@ async def generate_non_tech_questions_v2(
             "items": response_items,
         }
 
+    raw_items = qs.get("items")
+    items_list = raw_items if isinstance(raw_items, list) else []
+    raw_latency = qs.get("latency_ms")
+    latency_val = int(raw_latency) if isinstance(raw_latency, (int, float, str)) and raw_latency else None
+    
     return GeneratedQuestionsInResponse(
         interview_id=interview.id,
         track=interview.track,
@@ -651,22 +691,22 @@ async def generate_non_tech_questions_v2(
         question_ids=[q.id for q in persisted],
         items=[
             QuestionItem(
-                interview_question_id=item.get("interviewQuestionId"),
-                text=item.get("text", ""),
-                topic=item.get("topic"),
-                difficulty=item.get("difficulty"),
-                category=item.get("category"),
-                is_follow_up=item.get("isFollowUp", False),
-                parent_question_id=item.get("parentQuestionId"),
-                follow_up_strategy=item.get("followUpStrategy"),
-                supplement=item.get("supplement"),
+                interview_question_id=item.get("interviewQuestionId"),  # type: ignore
+                text=str(item.get("text", "")),  # type: ignore
+                topic=item.get("topic"),  # type: ignore
+                difficulty=item.get("difficulty"),  # type: ignore
+                category=item.get("category"),  # type: ignore
+                is_follow_up=bool(item.get("isFollowUp", False)),  # type: ignore
+                parent_question_id=item.get("parentQuestionId"),  # type: ignore
+                follow_up_strategy=item.get("followUpStrategy"),  # type: ignore
+                supplement=item.get("supplement"),  # type: ignore
             )
-            for item in qs.get("items", [])
+            for item in items_list if isinstance(item, dict)
         ],
         cached=cached,
-        llm_model=qs.get("llm_model"),
-        llm_latency_ms=qs.get("latency_ms"),
-        llm_error=qs.get("llm_error"),
+        llm_model=str(qs.get("llm_model")) if qs.get("llm_model") else None,
+        llm_latency_ms=latency_val,
+        llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
     )
 
 
@@ -1123,25 +1163,21 @@ async def create_structure_practice_session(
         )
         
         # Build questions list with framework info
-        questions_list = [
-            {
+        questions_list = []
+        for idx, q in enumerate(questions):
+            framework = detect_framework(hints_map.get(q.text, ""))
+            sections = get_framework_sections(framework)
+            initial_hint = get_initial_hint(framework)
+            questions_list.append({
                 "question_id": q.id,
                 "text": q.text,
                 "structure_hint": hints_map.get(q.text, "Structure your answer clearly with examples."),
-                "framework": detect_framework(hints_map.get(q.text, "")),
+                "framework": framework,
                 "index": idx,
-            }
-            for idx, q in enumerate(questions)
-        ]
-        
-        # Add sections and current_section to each question
-        for q in questions_list:
-            framework = q["framework"]
-            sections = get_framework_sections(framework)
-            initial_hint = get_initial_hint(framework)
-            q["sections"] = sections
-            q["current_section"] = initial_hint["section_name"]
-            q["current_hint"] = initial_hint["hint"]
+                "sections": sections,
+                "current_section": initial_hint["section_name"],
+                "current_hint": initial_hint["hint"],
+            })
         
         track = interview.track
     else:
@@ -1235,25 +1271,21 @@ async def create_structure_practice_session(
         )
         
         # Build questions list with framework info
-        questions_list = [
-            {
+        questions_list = []
+        for idx, q in enumerate(db_questions):
+            framework = detect_framework(hints_map.get(q.text, ""))
+            sections = get_framework_sections(framework)
+            initial_hint = get_initial_hint(framework)
+            questions_list.append({
                 "question_id": q.id,
                 "text": q.text,
                 "structure_hint": hints_map.get(q.text, "Structure your answer clearly with examples."),
-                "framework": detect_framework(hints_map.get(q.text, "")),
+                "framework": framework,
                 "index": idx,
-            }
-            for idx, q in enumerate(db_questions)
-        ]
-        
-        # Add sections and current_section to each question
-        for q in questions_list:
-            framework = q["framework"]
-            sections = get_framework_sections(framework)
-            initial_hint = get_initial_hint(framework)
-            q["sections"] = sections
-            q["current_section"] = initial_hint["section_name"]
-            q["current_hint"] = initial_hint["hint"]
+                "sections": sections,
+                "current_section": initial_hint["section_name"],
+                "current_hint": initial_hint["hint"],
+            })
         
         # Link the interview to the practice session
         request.interview_id = new_interview.id
@@ -1597,7 +1629,7 @@ async def analyze_structure_practice_answer(
         framework_progress=framework_progress,
         time_per_section=time_per_section,
         key_insight=analysis_result.key_insight,
-        analyzed_at=datetime.datetime.utcnow(),
+        analyzed_at=datetime.datetime.now(datetime.timezone.utc),
         llm_model=llm_model,
         llm_latency_ms=latency_ms,
     )

@@ -26,8 +26,12 @@ class Interview(Base):  # type: ignore
         sqlalchemy.DateTime(timezone=True), nullable=True, index=True
     )
     duration_seconds: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(sqlalchemy.Integer, nullable=True)
+    job_profile_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.ForeignKey("job_profile.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     user = relationship("User", back_populates="interviews")
+    job_profile = relationship("JobProfile")
     questions = relationship(
         "InterviewQuestion", back_populates="interview", cascade="all, delete-orphan", passive_deletes=True
     )
