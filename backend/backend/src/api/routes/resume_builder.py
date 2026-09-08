@@ -1,7 +1,11 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 import io
+
+logger = logging.getLogger(__name__)
 
 # Core architectural dependency inject hooks matched to your layout
 from src.api.dependencies.auth import get_current_user
@@ -302,7 +306,5 @@ async def sync_resume_to_profile(
         
         return {"status": "SYNCED"}
     except Exception as e:
-        import traceback
-        with open('sync_error.log', 'w') as f:
-            f.write(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to sync resume to profile for user_id=%s", current_user.id)
+        raise HTTPException(status_code=500, detail="Failed to sync resume to profile. Please try again.")

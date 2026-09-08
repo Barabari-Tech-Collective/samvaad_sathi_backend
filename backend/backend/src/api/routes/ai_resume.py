@@ -1,3 +1,4 @@
+import logging
 import uuid
 import fastapi
 from fastapi import (
@@ -10,6 +11,8 @@ from fastapi import (
 )
 import sqlalchemy
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
+
+logger = logging.getLogger(__name__)
 
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.session import get_async_session
@@ -148,13 +151,11 @@ async def analyze_resume(
     except Exception as e:
         await session.rollback()
 
-        import traceback
-        with open("backend_error.log", "w") as f:
-            f.write(traceback.format_exc())
+        logger.exception("Resume analysis failed for user_id=%s", current_user.id)
 
         raise fastapi.HTTPException(
             status_code=500,
-            detail=f"Resume analysis failed: {str(e)}",
+            detail="Resume analysis failed. Please try again.",
         )
 
 
