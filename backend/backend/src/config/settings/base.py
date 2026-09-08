@@ -95,7 +95,7 @@ class BackendBaseSettings(BaseSettings):
     # ------------------------------
     # Sessions / OAuth (Cognito)
     # ------------------------------
-    SESSION_SECRET_KEY: str = decouple.config("SESSION_SECRET_KEY", cast=str, default="change-me-session-secret")  # type: ignore
+    SESSION_SECRET_KEY: str = decouple.config("SESSION_SECRET_KEY", cast=str)  # type: ignore
     COGNITO_REGION: str = decouple.config("COGNITO_REGION", cast=str, default="ap-south-1")  # type: ignore
     COGNITO_USERPOOL_ID: str = decouple.config("COGNITO_USERPOOL_ID", cast=str, default="")  # type: ignore
     COGNITO_CLIENT_ID: str = decouple.config("COGNITO_CLIENT_ID", cast=str, default="")  # type: ignore
