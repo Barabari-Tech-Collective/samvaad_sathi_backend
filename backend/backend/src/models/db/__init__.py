@@ -10,4 +10,4 @@ from .pacing_practice import PacingPracticeSession  # noqa: F401
 from .job_profile import JobProfile  # noqa: F401
 from .analytics_event import AnalyticsEvent  # noqa: F401
 from .job_profile_question import JobProfileQuestion  # noqa: F401
-
+from .user_resume import UserResume  # noqa: F401

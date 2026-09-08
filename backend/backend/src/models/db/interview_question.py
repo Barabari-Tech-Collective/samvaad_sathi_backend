@@ -33,6 +33,9 @@ class InterviewQuestion(Base):  # type: ignore
     follow_up_strategy: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=64), nullable=True
     )
+    audio_url: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=512), nullable=True
+    )
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True), nullable=False, server_default=sqlalchemy_functions.now()
     )

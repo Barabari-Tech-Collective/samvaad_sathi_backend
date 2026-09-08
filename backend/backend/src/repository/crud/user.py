@@ -57,6 +57,7 @@ class UserCRUDRepository(BaseCRUDRepository):
         degree: str | None = None,
         university: str | None = None,
         company: str | None = None,
+        original_resume_s3_key: str | None = None,
     ) -> User:
         stmt = sqlalchemy.select(User).where(User.id == user_id)
         query = await self.async_session.execute(statement=stmt)
@@ -80,7 +81,33 @@ class UserCRUDRepository(BaseCRUDRepository):
             user.university = university.strip()
         if company is not None and company.strip():
             user.company = company.strip()
+        if original_resume_s3_key is not None:
+            user.original_resume_s3_key = original_resume_s3_key
 
+        await self.async_session.commit()
+        await self.async_session.refresh(user)
+        return user
+
+    async def update_original_resume_s3_key(self, *, user_id: int, s3_key: str) -> User:
+        stmt = sqlalchemy.select(User).where(User.id == user_id)
+        query = await self.async_session.execute(statement=stmt)
+        user: User | None = query.scalar()  # type: ignore
+        if not user:
+            raise EntityDoesNotExist("User does not exist!")
+
+        user.original_resume_s3_key = s3_key
+        await self.async_session.commit()
+        await self.async_session.refresh(user)
+        return user
+
+    async def update_only_resume_text(self, *, user_id: int, resume_text: str) -> User:
+        stmt = sqlalchemy.select(User).where(User.id == user_id)
+        query = await self.async_session.execute(statement=stmt)
+        user: User | None = query.scalar()  # type: ignore
+        if not user:
+            raise EntityDoesNotExist("User does not exist!")
+
+        user.resume_text = resume_text
         await self.async_session.commit()
         await self.async_session.refresh(user)
         return user
@@ -152,4 +179,35 @@ class UserCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(user)
         return user
 
+    async def delete_user(self, *, user_id: int) -> None:
+        """Deletes a user and ensures their S3 resumes are cleaned up to prevent orphaned objects."""
+        from src.models.db.user_resume import UserResume
+        from src.services.s3_service import BUCKET_NAME, s3_client
+        import asyncio
+        import logging
+        
+        logger = logging.getLogger(__name__)
 
+        # 1. Fetch user's resumes to delete them from S3
+        stmt = sqlalchemy.select(UserResume).where(UserResume.user_id == user_id)
+        result = await self.async_session.execute(stmt)
+        user_resumes = result.scalars().all()
+        
+        # 2. Cleanup S3 path to prevent orphaned bucket objects
+        loop = asyncio.get_running_loop()
+        for resume in user_resumes:
+            if resume.s3_key and s3_client and BUCKET_NAME:
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda k: s3_client.delete_object(Bucket=BUCKET_NAME, Key=k),
+                        resume.s3_key
+                    )
+                    logger.info(f"Cleaned up S3 object {resume.s3_key} for deleted user {user_id}")
+                except Exception as e:
+                    logger.error(f"Failed to clean up S3 object {resume.s3_key} for deleted user {user_id}: {e}")
+        
+        # 3. Now delete the user (DB CASCADE will automatically delete the UserResume rows)
+        del_stmt = sqlalchemy.delete(User).where(User.id == user_id)
+        await self.async_session.execute(del_stmt)
+        await self.async_session.commit()

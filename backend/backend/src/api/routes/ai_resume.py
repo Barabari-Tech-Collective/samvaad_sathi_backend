@@ -6,6 +6,7 @@ from fastapi import (
     Form,
     Depends,
     HTTPException,
+    BackgroundTasks,
 )
 import sqlalchemy
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
@@ -45,6 +46,7 @@ router = fastapi.APIRouter(
     summary="Analyze resume using ATS AI",
 )
 async def analyze_resume(
+    background_tasks: BackgroundTasks,
     resumeFile: UploadFile = File(...),
     targetRole: str = Form(...),
     experienceLevel: str = Form(...),
@@ -76,6 +78,10 @@ async def analyze_resume(
                 status_code=400,
                 detail="Job description is required",
             )
+
+        # Read bytes for S3 upload before passing to extractor
+        raw_bytes = await resumeFile.read()
+        await resumeFile.seek(0)
 
         # 1. Extract rich parser payload (contains text, documentMap, embeddedLinks)
         parser_payload = await extract_resume_text(resumeFile)
@@ -119,9 +125,7 @@ async def analyze_resume(
 
         session.add(db_analysis)
 
-        # Auto-save clean resume text string to user profile
-        stmt = sqlalchemy.update(User).where(User.id == current_user.id).values(resume_text=pure_resume_text)
-        await session.execute(stmt)
+        # Removed: We no longer overwrite the master resume_text for ATS checks
 
         await session.commit()
         await session.refresh(db_analysis)
@@ -133,6 +137,8 @@ async def analyze_resume(
                 request_id=analysis_id,
                 target_role=targetRole,
             )
+
+        # Removed: We no longer upload ATS resumes to overwrite the original_resume_s3_key
 
         return analysis_result
 

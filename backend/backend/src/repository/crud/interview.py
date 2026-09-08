@@ -19,8 +19,8 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         query = await self.async_session.execute(statement=stmt)
         return query.scalar()  # type: ignore
 
-    async def create_interview(self, *, user_id: int, track: str, difficulty: str = "medium") -> Interview:
-        new_interview = Interview(user_id=user_id, track=track, difficulty=difficulty, status="active")
+    async def create_interview(self, *, user_id: int, track: str, difficulty: str = "medium", job_profile_id: int | None = None) -> Interview:
+        new_interview = Interview(user_id=user_id, track=track, difficulty=difficulty, status="active", job_profile_id=job_profile_id)
         self.async_session.add(new_interview)
         await self.async_session.commit()
         await self.async_session.refresh(new_interview)
@@ -160,5 +160,18 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         result = [(interview, summary_reports_by_interview.get(interview.id, [])) for interview in interviews]
         
         return result, next_cursor
+
+    async def count_user_interviews_by_profile_and_difficulty(self, user_id: int, job_profile_id: int, difficulty: str, current_interview_id: int) -> int:
+        """Counts the number of previous interviews the user has created for this profile/difficulty."""
+        stmt = (
+            sqlalchemy.select(sqlalchemy.func.count(Interview.id))
+            .where(Interview.user_id == user_id)
+            .where(Interview.job_profile_id == job_profile_id)
+            .where(Interview.difficulty == difficulty)
+            .where(Interview.id < current_interview_id)
+        )
+        query = await self.async_session.execute(statement=stmt)
+        count = query.scalar()
+        return count or 0
 
 

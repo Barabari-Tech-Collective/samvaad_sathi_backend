@@ -39,6 +39,9 @@ class User(Base):  # type: ignore
     name: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(length=128), nullable=False)
     # Optional resume fields
     resume_text: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
+    original_resume_s3_key: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=512), nullable=True
+    )
 
     # --- New profile attributes ---
     degree: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
@@ -79,6 +82,9 @@ class User(Base):  # type: ignore
     )
     interviews = relationship(
         "Interview", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    resumes = relationship(
+        "UserResume", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
 
     __mapper_args__ = {"eager_defaults": True}

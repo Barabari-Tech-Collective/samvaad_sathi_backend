@@ -7,6 +7,58 @@ from typing import Any, Dict, Tuple
 
 import fastapi
 import PyPDF2
+
+def _verify_pdf_magic_bytes(raw_bytes: bytes) -> None:
+    if not raw_bytes.startswith(b"%PDF"):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="File content does not appear to be a valid PDF.",
+        )
+
+def _extract_text_from_pdf(raw_bytes: bytes) -> str:
+    extracted_text = ""
+    try:
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(raw_bytes))
+        texts: list[str] = []
+        if len(pdf_reader.pages) > 0:
+            for page_num, page in enumerate(pdf_reader.pages):
+                try:
+                    page_text = page.extract_text() or ""
+                    if page_text.strip():
+                        texts.append(page_text)
+                except Exception as page_error:
+                    print(f"Warning: Failed to extract text from page {page_num + 1}: {page_error}")
+                    continue
+            extracted_text = "\n".join(texts)
+            if not extracted_text.strip():
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
+                        fallback_texts = []
+                        for page in pdf.pages:
+                            page_text = page.extract_text()
+                            if page_text and page_text.strip():
+                                fallback_texts.append(page_text)
+                        extracted_text = "\n".join(fallback_texts)
+                except ImportError:
+                    print("Warning: pdfplumber not available for fallback PDF extraction")
+                except Exception as fallback_error:
+                    print(f"Warning: pdfplumber fallback failed: {fallback_error}")
+    except Exception as pdf_error:
+        print(f"PDF extraction error: {pdf_error}")
+        try:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
+                fallback_texts = []
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text and page_text.strip():
+                        fallback_texts.append(page_text)
+                extracted_text = "\n".join(fallback_texts)
+        except Exception:
+            extracted_text = ""
+    return extracted_text
+
 from src.api.dependencies.repository import get_repository
 from src.repository.crud.user import UserCRUDRepository
 from src.services.llm import extract_resume_entities_with_llm, extract_resume_entities_v2_with_llm
@@ -15,6 +67,11 @@ from src.api.dependencies.auth import get_current_user
 from src.models.schemas.resume import ResumeExtractionResponse, MyResumeResponse, KnowledgeSetResponse
 
 
+from src.services.s3_service import _background_upload_and_enforce_limit
+from src.api.dependencies.session import get_async_session
+from sqlalchemy.ext.asyncio import AsyncSession
+import sqlalchemy
+from src.models.db.user_resume import UserResume
 router = fastapi.APIRouter(prefix="", tags=["resume"])
 
 
@@ -30,6 +87,7 @@ router = fastapi.APIRouter(prefix="", tags=["resume"])
     ),
 )
 async def extract_resume(
+    background_tasks: fastapi.BackgroundTasks,
     file: fastapi.UploadFile = fastapi.File(
         ..., description="Resume file to upload. Allowed types: application/pdf, text/plain (max 5MB)"
     ),
@@ -64,62 +122,15 @@ async def extract_resume(
 
     raw_bytes = bytes(buffer)
 
+    if content_type == "application/pdf":
+        _verify_pdf_magic_bytes(raw_bytes)
+
     # Extract text depending on the content type
     extracted_text = ""
     if content_type == "text/plain":
         extracted_text = raw_bytes.decode("utf-8", errors="ignore")
     elif content_type == "application/pdf":
-        try:
-            # Primary extraction with PyPDF2
-            pdf_reader = PyPDF2.PdfReader(io.BytesIO(raw_bytes))
-            texts: list[str] = []
-            
-            # Check if PDF has pages
-            if len(pdf_reader.pages) == 0:
-                extracted_text = ""
-            else:
-                for page_num, page in enumerate(pdf_reader.pages):
-                    try:
-                        page_text = page.extract_text() or ""
-                        if page_text.strip():  # Only add non-empty pages
-                            texts.append(page_text)
-                    except Exception as page_error:
-                        # Log page extraction error but continue with other pages
-                        print(f"Warning: Failed to extract text from page {page_num + 1}: {page_error}")
-                        continue
-                
-                extracted_text = "\n".join(texts)
-                
-                # If no text extracted, try pdfplumber as fallback
-                if not extracted_text.strip():
-                    try:
-                        import pdfplumber
-                        with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
-                            fallback_texts = []
-                            for page in pdf.pages:
-                                page_text = page.extract_text()
-                                if page_text and page_text.strip():
-                                    fallback_texts.append(page_text)
-                            extracted_text = "\n".join(fallback_texts)
-                    except ImportError:
-                        print("Warning: pdfplumber not available for fallback PDF extraction")
-                    except Exception as fallback_error:
-                        print(f"Warning: pdfplumber fallback failed: {fallback_error}")
-                        
-        except Exception as pdf_error:
-            print(f"PDF extraction error: {pdf_error}")
-            # Final fallback: try pdfplumber directly
-            try:
-                import pdfplumber
-                with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
-                    fallback_texts = []
-                    for page in pdf.pages:
-                        page_text = page.extract_text()
-                        if page_text and page_text.strip():
-                            fallback_texts.append(page_text)
-                    extracted_text = "\n".join(fallback_texts)
-            except Exception:
-                extracted_text = ""
+        extracted_text = _extract_text_from_pdf(raw_bytes)
 
     # Normalize whitespace and control characters
     normalized = re.sub(r"\s+", " ", extracted_text or "").strip()
@@ -158,7 +169,7 @@ async def extract_resume(
     normalized_skills: list[str] = []
     seen: set[str] = set()
     for s in skills:
-        s_str = _norm_skill(str(s))
+        s_str = _norm_skill(s)
         if not s_str:
             continue
         if not re.search(r"[a-z]", s_str):
@@ -243,6 +254,23 @@ async def extract_resume(
             company=company_hint,
         )
         response["saved"] = True
+        
+        import hashlib
+        size_bytes = len(raw_bytes)
+        file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        
+        # Queue the background task to upload the original PDF to S3 only if DB update succeeds
+        background_tasks.add_task(
+            _background_upload_and_enforce_limit,
+            raw_bytes,
+            current_user.id,
+            file.filename or "resume.pdf",
+            content_type,
+            normalized if normalized else None,
+            "onboarding",
+            size_bytes,
+            file_sha256
+        )
     except Exception as e:
         response["saved"] = False
         response["save_error"] = str(e)
@@ -318,7 +346,7 @@ async def get_knowledge_set(
 
     # Normalize and validate
     def _norm_skill(s: str) -> str:
-        return re.sub(r"\s+", " ", str(s)).strip().lower()
+        return re.sub(r"\s+", " ", s).strip().lower()
 
     normalized_skills: list[str] = []
     seen: set[str] = set()
@@ -347,3 +375,159 @@ async def get_knowledge_set(
 
     return {"ok": True, "cached": cached, **result}
 
+
+@router.get(
+    path="/download-original",
+    name="resume:download-original",
+    response_model=dict,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Download original resume",
+    description="Returns a short-lived presigned URL to download the user's originally uploaded resume.",
+)
+async def download_original_resume(
+    current_user=fastapi.Depends(get_current_user),
+    session: AsyncSession = fastapi.Depends(get_async_session),
+):
+    stmt = sqlalchemy.select(UserResume).where(
+        UserResume.user_id == current_user.id,
+        UserResume.source == "onboarding"
+    ).order_by(UserResume.created_at.desc()).limit(1)
+    result = await session.execute(stmt)
+    latest_resume = result.scalar_one_or_none()
+    
+    if not latest_resume:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="No original resume found for this user."
+        )
+        
+    from src.services.s3_service import get_presigned_url
+    url = get_presigned_url(latest_resume.s3_key)
+    
+    if not url:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate download URL."
+        )
+        
+    return {"url": url}
+
+@router.post(
+    path="/save-final-resume",
+    name="resume:save-final-resume",
+    response_model=dict,
+    status_code=fastapi.status.HTTP_201_CREATED,
+    summary="Save a final ATS resume",
+    description="Uploads a finalized resume from the ATS tool to S3 and enforces the max 3 resume limit.",
+)
+async def save_final_resume(
+    file: fastapi.UploadFile = fastapi.File(
+        ..., description="Resume file to upload. Allowed types: application/pdf (max 5MB)"
+    ),
+    current_user=fastapi.Depends(get_current_user),
+    user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
+):
+    if file.content_type not in ["application/pdf"]:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Only PDF files are supported for saving final resumes.",
+        )
+
+    # Enforce a max upload size of 5 MB while buffering content in chunks
+    max_bytes = 5 * 1024 * 1024
+    total_size = 0
+    buffer = bytearray()
+    chunk_size = 1024 * 64
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_bytes:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="Uploaded file exceeds 5 MB limit",
+            )
+        buffer.extend(chunk)
+
+    raw_bytes = bytes(buffer)
+
+    if total_size == 0:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty",
+        )
+
+    # Verify PDF magic bytes
+    _verify_pdf_magic_bytes(raw_bytes)
+
+    import hashlib
+    size_bytes = len(raw_bytes)
+    file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+
+    # We no longer auto-update User.resume_text here. The user must explicitly set it via /set-active-resume.
+    extracted_text = _extract_text_from_pdf(raw_bytes)
+    normalized_text = re.sub(r"\s+", " ", extracted_text or "").strip()
+
+    # Await the task directly to ensure it succeeds before returning 201
+    try:
+        s3_key = await _background_upload_and_enforce_limit(
+            raw_bytes,
+            current_user.id,
+            file.filename or "ats_final.pdf",
+            file.content_type,
+            normalized_text if normalized_text else None,
+            "ats_final",
+            size_bytes,
+            file_sha256
+        )
+        return {"message": "Final resume saved successfully.", "s3_key": s3_key}
+    except Exception as e:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save resume. Please try again."
+        )
+
+from pydantic import BaseModel
+class SetActiveResumeRequest(BaseModel):
+    user_resume_id: int
+
+@router.post(
+    path="/set-active-resume",
+    name="resume:set-active-resume",
+    response_model=dict,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Set an explicitly saved resume as the active resume",
+    description="Overrides the main profile resume (used for mock interviews) with a previously saved ATS resume.",
+)
+async def set_active_resume(
+    request: SetActiveResumeRequest,
+    current_user=fastapi.Depends(get_current_user),
+    session: AsyncSession = fastapi.Depends(get_async_session),
+    user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
+):
+    stmt = sqlalchemy.select(UserResume).where(
+        UserResume.id == request.user_resume_id,
+        UserResume.user_id == current_user.id
+    )
+    result = await session.execute(stmt)
+    resume_record = result.scalar_one_or_none()
+    
+    if not resume_record:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="Saved resume not found or does not belong to you."
+        )
+        
+    if not resume_record.resume_text:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="This saved resume has no extractable text."
+        )
+        
+    await user_repo.update_only_resume_text(
+        user_id=current_user.id, 
+        resume_text=resume_record.resume_text
+    )
+    
+    return {"message": "Successfully set as the active resume for mock interviews."}

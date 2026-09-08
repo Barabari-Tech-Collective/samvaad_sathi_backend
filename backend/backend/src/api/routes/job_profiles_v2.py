@@ -9,6 +9,7 @@ from src.models.schemas.job_profile import (
     JobProfileSummaryResponse, 
     JobProfileResponse, 
     JobProfileCreateV2,
+    JobProfileUpdateV2,
     JobProfileListResponse,
     JobProfileActivityResponse,
     JobProfileUploadResponse,
@@ -123,6 +124,35 @@ async def create_job_profile(
         employment_type=payload.employment_type,
     )
     return JobProfileResponse.model_validate(profile)
+
+
+@router.put(
+    path="/job-profiles/{job_profile_id}",
+    name="job-profiles:update",
+    response_model=JobProfileResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Update an existing Job Profile",
+)
+async def update_job_profile(
+    job_profile_id: int,
+    payload: JobProfileUpdateV2,
+    current_user=fastapi.Depends(get_current_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileResponse:
+    update_data = payload.model_dump(exclude_unset=True)
+    
+    updated_profile = await job_profile_repo.update_profile(
+        profile_id=job_profile_id,
+        update_data=update_data
+    )
+    
+    if not updated_profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+        
+    return JobProfileResponse.model_validate(updated_profile)
 
 
 @router.get(

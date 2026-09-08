@@ -188,17 +188,20 @@ def select_non_tech_interview_questions(
     role_name: str,
     company_name: str | None,
     seed: str,
+    past_interview_count: int = 0,
 ) -> list[dict[str, str]]:
     bank = build_non_tech_question_bank(role_name=role_name, company_name=company_name)
     labels = non_tech_category_labels()
 
-    randomizer = random.Random(seed)
     selected: list[dict[str, str]] = []
     for category in non_tech_category_keys():
         bucket = bank.get(category, [])
         if len(bucket) < 20:
             raise ValueError(f"Question bank for category '{category}' must contain at least 20 questions")
-        question_text = randomizer.choice(bucket)
+        
+        idx = past_interview_count % len(bucket)
+        question_text = bucket[idx]
+        
         selected.append(
             {
                 "text": question_text,
