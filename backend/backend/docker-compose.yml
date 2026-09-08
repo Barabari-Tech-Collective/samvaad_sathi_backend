@@ -1,4 +1,16 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: samvaad-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -12,6 +24,9 @@ services:
     environment:
       # Prefer injecting the API key at runtime or via Docker secrets/CI; override here if needed
       - OPENAI_API_KEY
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
     volumes:
       # Bind host uploads dir to container
       - ../../uploads:/app/uploads
@@ -20,4 +35,19 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: samvaad-worker
+    command: ["arq", "src.worker.main.WorkerSettings"]
+    env_file:
+      - ../.env
+    environment:
+      - OPENAI_API_KEY
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
     restart: unless-stopped

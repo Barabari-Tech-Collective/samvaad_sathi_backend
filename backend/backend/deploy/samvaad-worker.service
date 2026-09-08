@@ -1,0 +1,17 @@
+[Unit]
+Description=Samvaad Sathi arq background worker
+After=network.target redis-server.service
+Wants=redis-server.service
+
+[Service]
+Type=simple
+# Adjust these two paths to match your actual deployment layout.
+WorkingDirectory=/opt/samvaad-sathi/backend/backend
+EnvironmentFile=/opt/samvaad-sathi/.env
+ExecStart=/opt/samvaad-sathi/backend/backend/venv/bin/arq src.worker.main.WorkerSettings
+Restart=on-failure
+RestartSec=5
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target

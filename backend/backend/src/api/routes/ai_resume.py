@@ -38,6 +38,7 @@ from src.services.ai_resume.ats_service import (
     generate_ats_analysis,
 )
 from src.services.barabari_integration import submit_resume_score_to_barabari
+from src.worker.queue import enqueue_job
 
 router = fastapi.APIRouter(
     prefix="/ai-resume",
@@ -143,13 +144,24 @@ async def analyze_resume(
         await session.refresh(db_analysis)
 
         if current_user.student_id:
-            background_tasks.add_task(
-                submit_resume_score_to_barabari,
+            queued = await enqueue_job(
+                "submit_resume_score_task",
                 student_id=current_user.student_id,
                 resume_score=analysis_result["atsScore"],
                 request_id=analysis_id,
                 target_role=targetRole,
             )
+            if not queued:
+                # Redis/arq unreachable - fall back to an in-process best-effort
+                # task rather than dropping the callback entirely. No retry or
+                # durability in this path, same as before this change.
+                background_tasks.add_task(
+                    submit_resume_score_to_barabari,
+                    student_id=current_user.student_id,
+                    resume_score=analysis_result["atsScore"],
+                    request_id=analysis_id,
+                    target_role=targetRole,
+                )
 
         # Removed: We no longer upload ATS resumes to overwrite the original_resume_s3_key
 

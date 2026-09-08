@@ -1,5 +1,10 @@
-"""Callback to Barabari's resume-score endpoint. Best-effort - never blocks or
-fails the caller's request if Barabari's side is down."""
+"""Callback to Barabari's resume-score endpoint.
+
+Runs as an arq background job (see src/worker/tasks.py), never inline in the
+request path, so it never blocks or fails the caller's request if Barabari's
+side is down. Raises on failure so arq's built-in retry can act on it - the
+caller enqueues the job and moves on; arq's own logging covers final,
+after-retries failures."""
 
 import logging
 
@@ -49,6 +54,7 @@ async def submit_resume_score_to_barabari(
             )
     except Exception:
         logger.exception(
-            "RequestId: %s | Failed to submit resume score to Barabari for student: %s",
+            "RequestId: %s | Failed to submit resume score to Barabari for student: %s (will retry via arq if attempts remain)",
             request_id, student_id,
         )
+        raise
