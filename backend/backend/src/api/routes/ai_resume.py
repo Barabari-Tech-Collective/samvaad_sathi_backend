@@ -15,7 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 logger = logging.getLogger(__name__)
 
 from src.api.dependencies.auth import get_current_user
+from src.api.dependencies.rate_limit import rate_limiter
 from src.api.dependencies.session import get_async_session
+from src.config.manager import settings
 
 from src.models.db.user import User
 from src.models.db.ai_resume_analysis import AIResumeAnalysis
@@ -57,6 +59,13 @@ async def analyze_resume(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
     user_repo: UserCRUDRepository = Depends(get_repository(repo_type=UserCRUDRepository)),
+    _rate_limit=Depends(
+        rate_limiter(
+            key_prefix="resume_analysis",
+            limit=settings.RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR,
+            window_seconds=3600,
+        )
+    ),
 ):
     """
     Upload and analyze resume against job description.

@@ -125,6 +125,25 @@ class BackendBaseSettings(BaseSettings):
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
 
+    # ------------------------------
+    # Redis (self-hosted on the same EC2 instance, no managed service)
+    # ------------------------------
+    REDIS_HOST: str = decouple.config("REDIS_HOST", cast=str, default="localhost")  # type: ignore
+    REDIS_PORT: int = decouple.config("REDIS_PORT", cast=int, default=6379)  # type: ignore
+    REDIS_DB: int = decouple.config("REDIS_DB", cast=int, default=0)  # type: ignore
+    REDIS_PASSWORD: str = decouple.config("REDIS_PASSWORD", cast=str, default="")  # type: ignore
+
+    # Per-user rate limits on endpoints calling metered third-party APIs
+    # (OpenAI/ElevenLabs) - protects the API bill from runaway usage by a
+    # single user or a client-side bug, not primarily a security control.
+    RATE_LIMIT_TTS_PER_MINUTE: int = decouple.config("RATE_LIMIT_TTS_PER_MINUTE", cast=int, default=20)  # type: ignore
+    RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR: int = decouple.config("RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR", cast=int, default=10)  # type: ignore
+
+    # How long cached TTS audio for identical (text, voice_id) pairs is kept.
+    # Interview questions repeat heavily across users, so caching cuts both
+    # ElevenLabs cost and per-request latency on cache hits.
+    TTS_CACHE_TTL_SECONDS: int = decouple.config("TTS_CACHE_TTL_SECONDS", cast=int, default=60 * 60 * 24 * 30)  # type: ignore
+
     model_config = SettingsConfigDict(
         case_sensitive=True,
         env_file=f"{str(ROOT_DIR)}/.env",
