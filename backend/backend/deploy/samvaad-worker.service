@@ -4,14 +4,19 @@ After=network.target redis-server.service
 Wants=redis-server.service
 
 [Service]
-Type=simple
-# Adjust these two paths to match your actual deployment layout.
-WorkingDirectory=/opt/samvaad-sathi/backend/backend
-EnvironmentFile=/opt/samvaad-sathi/.env
-ExecStart=/opt/samvaad-sathi/backend/backend/venv/bin/arq src.worker.main.WorkerSettings
-Restart=on-failure
-RestartSec=5
 User=ubuntu
+Group=ubuntu
+
+WorkingDirectory=/home/ubuntu/apps/samvaad_sathi_backend/backend/backend
+
+Environment="PATH=/home/ubuntu/apps/samvaad_sathi_backend/venv/bin"
+
+# No EnvironmentFile needed - settings/base.py reads .env directly via
+# python-decouple from ROOT_DIR (backend/.env), same as the main service.
+ExecStart=/home/ubuntu/apps/samvaad_sathi_backend/venv/bin/arq src.worker.main.WorkerSettings
+
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
