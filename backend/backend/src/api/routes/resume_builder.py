@@ -1,3 +1,4 @@
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -25,6 +26,11 @@ from src.services.ai_resume.template_service import generate_structured_resume_d
 from src.repository.crud.user import UserCRUDRepository
 
 router = APIRouter(prefix="/resume-builder", tags=["Resume Builder V2"])
+
+# FullResumeContentSchema's text/list fields have no per-field size caps, so this
+# guards against an oversized payload bloating the DB (resumes are text; 200KB is
+# generous headroom over any legitimate resume's worth of content).
+MAX_RESUME_DATA_BYTES = 200_000
 
 @router.get("/templates", response_model=list[TemplateCompactResponse])
 async def get_all_templates(current_user: User = Depends(get_current_user)):
@@ -101,7 +107,13 @@ async def update_resume_content(
 ):
     repo = ResumeBuilderRepository(session)
     clean_json_payload = payload.data.dict()
-    
+
+    if len(json.dumps(clean_json_payload)) > MAX_RESUME_DATA_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Resume content is too large.",
+        )
+
     updated_resume = await repo.update_resume_data(resume_id, current_user.id, clean_json_payload)
     if not updated_resume:
         raise HTTPException(status_code=404, detail="Update transaction denied or execution failure.")

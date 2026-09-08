@@ -134,7 +134,8 @@ async def analyze_resume(
         await session.refresh(db_analysis)
 
         if current_user.student_id:
-            await submit_resume_score_to_barabari(
+            background_tasks.add_task(
+                submit_resume_score_to_barabari,
                 student_id=current_user.student_id,
                 resume_score=analysis_result["atsScore"],
                 request_id=analysis_id,

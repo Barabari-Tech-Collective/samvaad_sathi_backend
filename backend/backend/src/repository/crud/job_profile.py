@@ -142,8 +142,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(profile)
         return profile
 
-    async def list_all(self) -> list[JobProfile]:
-        stmt = sqlalchemy.select(JobProfile).order_by(JobProfile.id.desc())
+    async def list_all(self, *, limit: int = 1000) -> list[JobProfile]:
+        stmt = sqlalchemy.select(JobProfile).order_by(JobProfile.id.desc()).limit(limit)
         query = await self.async_session.execute(statement=stmt)
         return list(query.scalars().all())
 
