@@ -4,7 +4,7 @@ import traceback
 from typing import Any
 from fastapi import HTTPException
 
-from src.services.llm import get_llm_client, get_active_llm_model_and_key
+from src.services.llm import get_llm_client, get_active_llm_model_and_key, get_provider_completion_kwargs
 from src.utilities.link_validator import SmartLinkValidator
 from src.services.ai_resume.scoring.ats_engine import ATSEngine
 from src.services.ai_resume.scoring.project_mapper import ProjectLinkMapper
@@ -134,6 +134,7 @@ async def generate_ats_analysis(
                     "content": prompt,
                 },
             ],
+            **get_provider_completion_kwargs(),
         )
 
         ai_response = response.choices[0].message.content

@@ -1,7 +1,7 @@
 import json
 from fastapi import HTTPException
 
-from src.services.llm import get_llm_client, get_active_llm_model_and_key
+from src.services.llm import get_llm_client, get_active_llm_model_and_key, get_provider_completion_kwargs
 from src.services.ai_resume.prompt_builder import build_structuring_prompt
 
 async def generate_structured_resume_data(
@@ -44,6 +44,7 @@ async def generate_structured_resume_data(
                     "content": prompt,
                 },
             ],
+            **get_provider_completion_kwargs(),
         )
 
         # Extract AI content

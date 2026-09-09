@@ -4,7 +4,7 @@ import time
 from typing import Any
 from openai import AsyncOpenAI
 from src.config.manager import settings
-from src.services.llm import get_active_llm_model_and_key, get_active_llm_provider
+from src.services.llm import get_active_llm_model_and_key, get_active_llm_provider, get_provider_completion_kwargs
 
 # Level mapping: Level 1 = easy, Level 2 = medium, Level 3 = hard, Level 4 = expert
 
@@ -443,6 +443,7 @@ async def generate_full_stack_questions_with_llm(
             ],
             response_format={"type": "json_object"},
             temperature=0.7,
+            **get_provider_completion_kwargs(),
         )
         latency_ms = int((time.perf_counter() - start) * 999)
         content = result.choices[-1].message.content or "{}"

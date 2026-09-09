@@ -63,6 +63,21 @@ def get_llm_client() -> AsyncOpenAI | None:
     return _client
 
 
+def get_provider_completion_kwargs() -> dict[str, Any]:
+    """Extra chat.completions.create() kwargs required for the active
+    provider, beyond model/messages/response_format. DeepSeek V4 defaults to
+    an extended "Thinking" mode whose reasoning tokens consume the SAME
+    max_tokens budget as the final answer - verified live: a plain
+    extraction call spent its entire 2048-token budget on internal
+    reasoning and returned empty content (finish_reason=length) in 16s;
+    disabling it dropped that to 1.1s with a correct answer in 55 tokens.
+    Must be applied to every DeepSeek call, not just ones that seem slow -
+    thinking mode also silently rejects temperature/top_p/penalty params."""
+    if get_active_llm_provider() == "deepseek":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {}
+
+
 class ResumeEntitiesLLM(pydantic.BaseModel):
     skills: list[str] = pydantic.Field(default_factory=list)
     years_experience: float | None = None
@@ -1197,6 +1212,7 @@ async def structured_output(
         # Only include temperature for older models; new families accept only the default
         if not is_new_family:
             kwargs["temperature"] = temperature
+        kwargs.update(get_provider_completion_kwargs())
         request_start = time.perf_counter()
         resp = await client.chat.completions.create(**kwargs)
         openai_latency_ms = int(
