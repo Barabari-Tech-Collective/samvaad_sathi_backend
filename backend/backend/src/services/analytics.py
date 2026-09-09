@@ -100,22 +100,19 @@ class AnalyticsService:
             energy = _normalize_score(_to_float(communication.get("energy") or communication.get("energy_score")))
             consistency = _normalize_score(_to_float(communication.get("consistency") or communication.get("consistency_score")))
             technical_accuracy = _normalize_score(
-                _to_float(
-                    ((domain.get("criteria") or {}).get("correctness") or {}).get("score")
-                    or domain.get("domain_score")
-                )
+                _criteria_score(domain.get("criteria"), "correctness")
+                or _to_float(domain.get("domain_score"))
             )
             structure_quality = _normalize_score(
-                _to_float(communication.get("structure_score") or ((communication.get("criteria") or {}).get("structure") or {}).get("score"))
+                _to_float(communication.get("structure_score"))
+                or _criteria_score(communication.get("criteria"), "structure")
             )
             relevance = _normalize_score(
-                _to_float(((domain.get("criteria") or {}).get("relevance") or {}).get("score"))
+                _criteria_score(domain.get("criteria"), "relevance")
             )
 
-            has_examples = bool(
-                _to_float(((domain.get("criteria") or {}).get("examples") or {}).get("score"))
-                and _to_float(((domain.get("criteria") or {}).get("examples") or {}).get("score")) > 0
-            )
+            examples_score = _criteria_score(domain.get("criteria"), "examples")
+            has_examples = bool(examples_score and examples_score > 0)
 
             if wpm is not None:
                 metric_history["wpm"].append(_history_point(interview, qa, round(wpm, 2)))
@@ -272,10 +269,8 @@ class AnalyticsService:
                 communication.get("recommendations")
             )
             knowledge_score = _normalize_score(
-                _to_float(
-                    ((domain.get("criteria") or {}).get("correctness") or {}).get("score")
-                    or domain.get("domain_score")
-                )
+                _criteria_score(domain.get("criteria"), "correctness")
+                or _to_float(domain.get("domain_score"))
             )
             speech_score = _normalize_score(
                 _to_float(
@@ -1221,7 +1216,10 @@ class AnalyticsService:
             analysis = qa.analysis_json or {}
             domain = analysis.get("domain") or {}
             comm = analysis.get("communication") or {}
-            knowledge = _normalize_score(_to_float(((domain.get("criteria") or {}).get("correctness") or {}).get("score") or domain.get("domain_score")))
+            knowledge = _normalize_score(
+                _criteria_score(domain.get("criteria"), "correctness")
+                or _to_float(domain.get("domain_score"))
+            )
             speech = _normalize_score(_to_float(comm.get("communication_score") or comm.get("overall_score")))
             combined = _avg_non_null([knowledge, speech])
             if combined is not None:
@@ -1399,6 +1397,22 @@ def _extract_knowledge_score(report: Report | None, summary_report: SummaryRepor
             )
         )
     return None
+
+
+def _criteria_score(criteria: dict | None, key: str) -> float | None:
+    """DomainAnalysisLLM/CommunicationAnalysisLLM's `criteria` field is typed
+    dict[str, Any] (deliberately loose), and live LLM output has been
+    observed to return either a plain number (`{"correctness": 80}`) or a
+    nested object (`{"correctness": {"score": 80, "reasons": [...]}}`) for
+    the same schema across different calls, regardless of provider. Calling
+    `.get("score")` on a plain number crashes with AttributeError - this
+    handles both shapes."""
+    if not isinstance(criteria, dict):
+        return None
+    value = criteria.get(key)
+    if isinstance(value, dict):
+        return _to_float(value.get("score"))
+    return _to_float(value)
 
 
 def _to_float(value: Any) -> float | None:

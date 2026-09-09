@@ -454,8 +454,10 @@ async def communication_based_analysis(
         structure = base
         crit = analysis.get("criteria")
         if isinstance(crit, dict):
-            clarity = _num(crit.get("clarity", {}).get("score"), base)
-            structure = _num(crit.get("structure", {}).get("score"), base)
+            clarity_score = crit.get("clarity", {}).get("score") if isinstance(crit.get("clarity"), dict) else None
+            clarity = _num(clarity_score, base)
+            structure_score = crit.get("structure", {}).get("score") if isinstance(crit.get("structure"), dict) else None
+            structure = _num(structure_score, base)
             vocab_score = crit.get("vocabulary", {}).get("score") if isinstance(crit.get("vocabulary"), dict) else None
             jargon_score = crit.get("jargon_use", {}).get("score") if isinstance(crit.get("jargon_use"), dict) else None
             vocab = _num(vocab_score if isinstance(vocab_score, (int, float)) else jargon_score, base)
