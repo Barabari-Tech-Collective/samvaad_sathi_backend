@@ -351,18 +351,17 @@ async def synthesize_summary_sections(
     Drive the LLM to create the restructured summary report from per-question analyses.
     Returns: (summary_json, error, latency_ms, model)
     """
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "LLM summary synthesis START total_questions=%s input_count=%s max_questions=%s model=%s",
         total_questions,
         len(per_question_inputs),
         max_questions,
-        settings.OPENAI_MODEL,
+        model,
     )
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
     if not api_key:
         logger.error(
-            "LLM summary synthesis ABORTED: OPENAI_API_KEY missing"
+            "LLM summary synthesis ABORTED: %s_API_KEY missing", get_active_llm_provider().upper()
         )
         # No key: return empty structures; caller can fallback to heuristic
         return {}, None, None, model
@@ -596,15 +595,14 @@ async def synthesize_summary_sections_lite(
     Drive the LLM to create the restructured summary report (Lite) from per-question analyses.
     Returns: (summary_json, error, latency_ms, model)
     """
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "LLM LITE summary synthesis START total_questions=%s input_count=%s max_questions=%s model=%s",
         total_questions,
         len(per_question_inputs),
         max_questions,
-        settings.OPENAI_MODEL,
+        model,
     )
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
     if not api_key:
         # No key: return empty structures; caller can fallback to heuristic
         return {}, None, None, model
@@ -1320,8 +1318,7 @@ async def structured_output(
 
 
 async def extract_resume_entities_with_llm(text: str) -> tuple[list[str], float | None, str | None, int | None, str]:
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not text:
         return [], None, None, None, model
 
@@ -1364,8 +1361,7 @@ async def extract_resume_entities_v2_with_llm(text: str) -> tuple[dict[str, Any]
 
     Returns (data_dict, error, latency_ms, model). On missing API key or empty text, returns empty dict and no error.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not text:
         return {}, None, None, model
 
@@ -1404,8 +1400,7 @@ async def extract_jd_skills_with_llm(text: str) -> tuple[list[str], str | None]:
     Extract skills (technical, tools, soft skills, domain-specific) from a Job Description.
     Returns (skills_list, error).
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not text:
         return [], "OpenAI API key not configured or empty text provided."
 
@@ -1451,8 +1446,7 @@ async def generate_interview_questions_with_llm(
     Generate interview questions using an LLM given a track and optional context (e.g., resume_text).
     Returns (questions, error, latency_ms, model). On missing API key, returns empty questions and no error.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key:
         return [], None, None, model, None
 
@@ -1605,8 +1599,7 @@ async def generate_follow_up_question(
     """
     Generate a concise follow-up question using the candidate's recent answer excerpt.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not answer_excerpt:
         return None, "Follow-up generation skipped (missing API key or answer excerpt)", None, model
 
@@ -1645,8 +1638,7 @@ async def generate_question_supplements_with_llm(
     Generate supplemental snippets (diagram or code) for interview questions.
     Returns list of LLMSupplementItem entries and metadata about the call.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not question_payload:
         return [], None, None, model
 
@@ -1786,8 +1778,7 @@ async def analyze_domain_with_llm(
     Perform domain knowledge analysis using LLM. Returns (analysis_json, error, latency_ms, model).
     Never raises; on missing API key returns empty analysis and no error.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "[LLM DOMAIN] START | model=%s | question_length=%s | transcription_length=%s",
         model,
@@ -1896,8 +1887,7 @@ async def analyze_communication_with_llm(
     Perform communication analysis using LLM. Returns (analysis_json, error, latency_ms, model).
     Never raises; on missing API key returns empty analysis and no error.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "[LLM COMM] START | model=%s | question_length=%s | transcription_length=%s | aux_metrics_keys=%s",
         model,
