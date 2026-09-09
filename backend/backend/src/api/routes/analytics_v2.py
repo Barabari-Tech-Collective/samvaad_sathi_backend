@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import math
 from collections import defaultdict
-from typing import Any
+from typing import Any, Sequence
 
 import fastapi
 import sqlalchemy
@@ -49,7 +49,7 @@ from src.models.schemas.analytics_v2 import (
 from src.services.analytics import AnalyticsService
 
 
-COMMON_ERROR_RESPONSES = {
+COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     401: {"description": "Authentication required or invalid bearer token."},
     500: {"description": "Unexpected server error while computing analytics."},
 }
@@ -102,7 +102,7 @@ def _extract_distribution_buckets(raw_distribution: list[dict[str, Any]]) -> lis
     return buckets
 
 
-def _safe_avg(values: list[float | int | None]) -> float | None:
+def _safe_avg(values: Sequence[float | int | None]) -> float | None:
     clean = [float(v) for v in values if isinstance(v, (float, int))]
     if not clean:
         return 0.0
@@ -551,7 +551,7 @@ async def get_students_table(
     items: list[dict[str, Any]] = []
     for user in users:
         user_interviews = interviews_by_user.get(user.id, [])
-        scores = [reports_map.get(interview.id) for interview in user_interviews if reports_map.get(interview.id) is not None]
+        scores = [float(reports_map.get(interview.id) or 0.0) for interview in user_interviews if reports_map.get(interview.id) is not None]
         avg_score = round(sum(scores) / len(scores), 2) if scores else 0
 
         latest_score = 0
