@@ -99,20 +99,27 @@ class AnalyticsService:
             )
             energy = _normalize_score(_to_float(communication.get("energy") or communication.get("energy_score")))
             consistency = _normalize_score(_to_float(communication.get("consistency") or communication.get("consistency_score")))
+            def _get_criteria_score(criteria_dict: dict, key: str):
+                item = (criteria_dict or {}).get(key)
+                return item.get("score") if isinstance(item, dict) else item
+
+            domain_criteria = domain.get("criteria") or {}
+            comm_criteria = communication.get("criteria") or {}
+
             technical_accuracy = _normalize_score(
                 _to_float(
-                    ((domain.get("criteria") or {}).get("correctness") or {}).get("score")
+                    _get_criteria_score(domain_criteria, "correctness")
                     or domain.get("domain_score")
                 )
             )
             structure_quality = _normalize_score(
-                _to_float(communication.get("structure_score") or ((communication.get("criteria") or {}).get("structure") or {}).get("score"))
+                _to_float(communication.get("structure_score") or _get_criteria_score(comm_criteria, "structure"))
             )
             relevance = _normalize_score(
-                _to_float(((domain.get("criteria") or {}).get("relevance") or {}).get("score"))
+                _to_float(_get_criteria_score(domain_criteria, "relevance"))
             )
 
-            examples_score = _to_float(((domain.get("criteria") or {}).get("examples") or {}).get("score"))
+            examples_score = _to_float(_get_criteria_score(domain_criteria, "examples"))
             has_examples = examples_score is not None and examples_score > 0
 
             if wpm is not None:
