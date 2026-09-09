@@ -994,9 +994,10 @@ async def get_interviews_table(
 
     offset = (page - 1) * limit
     rows_stmt = _apply_interview_filters(
-        sqlalchemy.select(Interview, User.name, User.university, Report.overall_score)
+        sqlalchemy.select(Interview, User.name, User.university, Report, SummaryReport)
         .join(User, User.id == Interview.user_id)
-        .outerjoin(Report, Report.interview_id == Interview.id),
+        .outerjoin(Report, Report.interview_id == Interview.id)
+        .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id),
         start_date=start_date,
         end_date=end_date,
         role=role,
@@ -1005,19 +1006,24 @@ async def get_interviews_table(
     ).order_by(Interview.created_at.desc()).offset(offset).limit(limit)
 
     rows = list((await session.execute(rows_stmt)).all())
-    items = [
-        {
+    
+    from src.services.analytics import _extract_overall_score, _extract_sub_scores
+    items = []
+    for interview, student_name, university, report, summary_report in rows:
+        score = _extract_overall_score(report, summary_report)
+        speech_score, knowledge_score = _extract_sub_scores(report, summary_report)
+        items.append({
             "interview_id": interview.id,
             "student_name": student_name,
             "college": university,
             "role": interview.track,
             "difficulty": interview.difficulty,
             "score": _metric_or_zero(score, digits=2),
+            "speech_score": _metric_or_zero(speech_score, digits=2),
+            "knowledge_score": _metric_or_zero(knowledge_score, digits=2),
             "duration": _metric_or_zero(interview.duration_seconds),
             "date": interview.created_at,
-        }
-        for interview, student_name, university, score in rows
-    ]
+        })
     return TablePageResponse(table_type="interviews", items=items, page=page, limit=limit, total=total)
 
 

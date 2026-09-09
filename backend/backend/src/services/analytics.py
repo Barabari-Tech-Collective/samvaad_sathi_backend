@@ -1361,6 +1361,20 @@ def _extract_overall_score(report: Report | None, summary_report: SummaryReport 
     return None
 
 
+def _extract_sub_scores(report: Report | None, summary_report: SummaryReport | None) -> tuple[float | None, float | None]:
+    if summary_report and isinstance(summary_report.report_json, dict):
+        score_summary = summary_report.report_json.get("overallScoreSummary") or summary_report.report_json.get("scoreSummary") or {}
+        
+        knowledge_comp = score_summary.get("knowledgeCompetence") or {}
+        knowledge_pct = _to_float(knowledge_comp.get("averagePct") or knowledge_comp.get("percentage"))
+        
+        speech_struct = score_summary.get("speechStructure") or score_summary.get("speechAndStructure") or {}
+        speech_pct = _to_float(speech_struct.get("averagePct") or speech_struct.get("percentage"))
+        
+        return _normalize_score(speech_pct), _normalize_score(knowledge_pct)
+    return None, None
+
+
 def _improvement_percent_from_interviews(
     interviews: list[Interview],
     reports: dict[int, Report],
