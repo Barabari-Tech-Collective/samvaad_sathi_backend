@@ -470,8 +470,8 @@ async def get_students_summary(
     service = AnalyticsService(session)
     system_metrics = await service.get_system_analytics()
 
-    total_interviews = int((await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0)
-    completed_interviews = int(
+    total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0
+    completed_interviews = (
         (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.status == "completed"))).scalar() or 0
     )
     overview = system_metrics.get("overview", {})
@@ -517,7 +517,7 @@ async def get_students_table(
         )
 
     total_stmt = sqlalchemy.select(sqlalchemy.func.count()).select_from(users_stmt.subquery())
-    total = int((await session.execute(total_stmt)).scalar() or 0)
+    total = (await session.execute(total_stmt)).scalar() or 0
 
     offset = (page - 1) * limit
     users_stmt = users_stmt.order_by(User.created_at.desc()).offset(offset).limit(limit)
@@ -778,7 +778,7 @@ async def get_student_interviews(
 ):
     del current_user
     total_stmt = sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.user_id == student_id)
-    total = int((await session.execute(total_stmt)).scalar() or 0)
+    total = (await session.execute(total_stmt)).scalar() or 0
     offset = (page - 1) * limit
 
     stmt = (
@@ -854,8 +854,8 @@ async def get_colleges_summary(
     college_items = await service.get_college_segment_analytics()
 
     total_colleges = len(college_items)
-    total_students = int((await session.execute(sqlalchemy.select(sqlalchemy.func.count(User.id)))).scalar() or 0)
-    total_interviews = int((await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0)
+    total_students = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(User.id)))).scalar() or 0
+    total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0
     avg_scores = [item.get("avg_score") for item in college_items if isinstance(item.get("avg_score"), (int, float))]
     average_score = round(sum(avg_scores) / len(avg_scores), 2) if avg_scores else 0
 
@@ -934,8 +934,8 @@ async def get_interviews_summary(
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
-    total_interviews = int((await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0)
-    completed_interviews = int(
+    total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0
+    completed_interviews = (
         (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.status == "completed"))).scalar() or 0
     )
     average_duration = (await session.execute(sqlalchemy.select(sqlalchemy.func.avg(Interview.duration_seconds)))).scalar_one_or_none()
@@ -996,7 +996,7 @@ async def get_interviews_table(
         difficulty=difficulty,
         college=college,
     )
-    total = int((await session.execute(sqlalchemy.select(sqlalchemy.func.count()).select_from(base_stmt.subquery()))).scalar() or 0)
+    total = (await session.execute(sqlalchemy.select(sqlalchemy.func.count()).select_from(base_stmt.subquery()))).scalar() or 0
 
     offset = (page - 1) * limit
     rows_stmt = _apply_interview_filters(
@@ -1123,7 +1123,7 @@ async def get_college_detail_summary(
     college_items = await service.get_college_segment_analytics(college=college_name)
     summary = college_items[0] if college_items else {}
 
-    students_count = int(
+    students_count = (
         (
             await session.execute(
                 sqlalchemy.select(sqlalchemy.func.count(User.id)).where(User.university == college_name)
@@ -1131,7 +1131,7 @@ async def get_college_detail_summary(
         ).scalar()
         or 0
     )
-    students_with_interviews = int(
+    students_with_interviews = (
         (
             await session.execute(
                 sqlalchemy.select(sqlalchemy.func.count(sqlalchemy.distinct(Interview.user_id)))
@@ -1760,7 +1760,7 @@ async def get_forecasting(
     points: list[ForecastPoint] = []
     for day_index in range(1, days_ahead + 1):
         date_value = last_date + datetime.timedelta(days=day_index)
-        predicted = round(float(baseline), 2)
+        predicted = round(baseline, 2)
         points.append(
             ForecastPoint(
                 date=date_value,
