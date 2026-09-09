@@ -4,6 +4,7 @@ import time
 from typing import Any
 from openai import AsyncOpenAI
 from src.config.manager import settings
+from src.services.llm import get_active_llm_model_and_key, get_active_llm_provider
 
 # Level mapping: Level 1 = easy, Level 2 = medium, Level 3 = hard, Level 4 = expert
 
@@ -355,16 +356,25 @@ def get_full_stack_questions(
 _client: AsyncOpenAI | None = None
 
 def _get_client() -> AsyncOpenAI | None:
+    """Deliberately separate from llm.py's get_llm_client(): this path already
+    has a static-question fallback, so it uses a short timeout/single retry to
+    fail fast into that fallback rather than inheriting llm.py's longer
+    150s/3-retry settings meant for calls with no fallback. Still respects
+    LLM_PROVIDER for which provider/model/key to use."""
     global _client
     if _client is not None:
         return _client
-    if not settings.OPENAI_API_KEY:
+    _, api_key = get_active_llm_model_and_key()
+    if not api_key:
         return None
-    _client = AsyncOpenAI(
-        api_key=settings.OPENAI_API_KEY,
-        max_retries=1,
-        timeout=29.0,
-    )
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "max_retries": 1,
+        "timeout": 29.0,
+    }
+    if get_active_llm_provider() == "deepseek":
+        client_kwargs["base_url"] = settings.DEEPSEEK_BASE_URL
+    _client = AsyncOpenAI(**client_kwargs)
     return _client
 
 async def generate_full_stack_questions_with_llm(
@@ -384,7 +394,7 @@ async def generate_full_stack_questions_with_llm(
             "Use the non-tech question generation path instead."
         )
 
-    model = settings.OPENAI_MODEL
+    model, _ = get_active_llm_model_and_key()
     client = _get_client()
     if not client:
         # Fallback to static if no API key

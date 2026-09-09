@@ -117,6 +117,15 @@ class BackendBaseSettings(BaseSettings):
     # LLM/ OpenAI client timeout in seconds (request-level). Increase for longer prompts/outputs.
     OPENAI_TIMEOUT_SECONDS: float = decouple.config("OPENAI_TIMEOUT_SECONDS", cast=float, default=150.0)  # type: ignore
 
+    # Which provider src/services/llm.py's structured_output() calls actually use.
+    # "openai" (default, unchanged behavior) or "deepseek". Whisper (whisper.py) and
+    # TTS (pronunciation_tts.py, elevenlabs_tts.py) are NOT affected by this - neither
+    # DeepSeek nor this setting apply to those; see the scaling plan's Phase 7/8 split.
+    LLM_PROVIDER: str = decouple.config("LLM_PROVIDER", cast=str, default="openai")  # type: ignore
+    DEEPSEEK_API_KEY: str = decouple.config("DEEPSEEK_API_KEY", cast=str, default="")  # type: ignore
+    DEEPSEEK_BASE_URL: str = decouple.config("DEEPSEEK_BASE_URL", cast=str, default="https://api.deepseek.com")  # type: ignore
+    DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-v4-flash")  # type: ignore
+
     # ElevenLabs TTS
     ELEVENLABS_API_KEY: str = decouple.config("ELEVENLABS_API_KEY", cast=str, default="")  # type: ignore
     ELEVENLABS_VOICE_ID: str = decouple.config("ELEVENLABS_VOICE_ID", cast=str, default="hpp4J3VqNfWAUOO0d1Us")  # type: ignore

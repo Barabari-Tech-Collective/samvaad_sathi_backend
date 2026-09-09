@@ -13,26 +13,52 @@ logger = logging.getLogger(__name__)
 # Lazy client holder; create only when needed and when API key is present
 _client: AsyncOpenAI | None = None
 
-def _get_client() -> AsyncOpenAI | None:
+
+def get_active_llm_provider() -> str:
+    provider = (settings.LLM_PROVIDER or "openai").strip().lower()
+    return provider if provider in ("openai", "deepseek") else "openai"
+
+
+def get_active_llm_model_and_key() -> tuple[str, str]:
+    """Model string and API key for whichever provider LLM_PROVIDER selects.
+    DeepSeek's API is OpenAI-ChatCompletions-compatible, so the same
+    AsyncOpenAI client class works for both - only base_url/api_key/model
+    differ (see get_llm_client())."""
+    if get_active_llm_provider() == "deepseek":
+        return settings.DEEPSEEK_MODEL, settings.DEEPSEEK_API_KEY
+    return settings.OPENAI_MODEL, settings.OPENAI_API_KEY
+
+
+def get_llm_client() -> AsyncOpenAI | None:
     global _client
     if _client is not None:
         return _client
-    api_key = settings.OPENAI_API_KEY
+
+    provider = get_active_llm_provider()
+    _, api_key = get_active_llm_model_and_key()
     if not api_key:
-        logger.error("OPENAI_API_KEY is missing; LLM client cannot be initialized")
+        logger.error(
+            "%s_API_KEY is missing; LLM client cannot be initialized",
+            provider.upper(),
+        )
         return None
-    
+
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": float(getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0)),
+        "max_retries": 3,
+    }
+    if provider == "deepseek":
+        client_kwargs["base_url"] = settings.DEEPSEEK_BASE_URL
+
     logger.info(
-        "Initializing OpenAI AsyncClient model=%s timeout=%s max_retries=3",
-        getattr(settings, "OPENAI_MODEL", None),
-        getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0),
+        "Initializing %s AsyncClient model=%s timeout=%s max_retries=3",
+        provider,
+        settings.DEEPSEEK_MODEL if provider == "deepseek" else settings.OPENAI_MODEL,
+        client_kwargs["timeout"],
     )
-    _client = AsyncOpenAI(
-        api_key=api_key,
-        timeout=float(getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0)),
-        max_retries=3,
-    )
-    logger.info("OpenAI AsyncClient initialized successfully")
+    _client = AsyncOpenAI(**client_kwargs)
+    logger.info("%s AsyncClient initialized successfully", provider)
 
     return _client
 
@@ -1117,18 +1143,21 @@ async def structured_output(
     temperature: float = 0,
     max_tokens: int = 2048,
 ) -> tuple[T | None, str | None, int | None, str]:
-    """Call OpenAI asynchronously with JSON response_format and validate against Pydantic model."""
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    """Call the configured LLM provider (OpenAI or DeepSeek, see LLM_PROVIDER)
+    asynchronously with JSON response_format and validate against a Pydantic model."""
+    provider = get_active_llm_provider()
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
-        "[LLM] structured_output START | model=%s | schema=%s | temperature=%s",
+        "[LLM] structured_output START | provider=%s | model=%s | schema=%s | temperature=%s",
+        provider,
         model,
         model_class.__name__,
         temperature,
     )
     if not api_key:
         logger.warning(
-            "[LLM] structured_output SKIPPED | reason=missing_openai_api_key | model=%s | schema=%s",
+            "[LLM] structured_output SKIPPED | reason=missing_%s_api_key | model=%s | schema=%s",
+            provider,
             model,
             model_class.__name__,
         )
@@ -1136,25 +1165,28 @@ async def structured_output(
 
     start = time.perf_counter()
     try:
-        client = _get_client()
+        client = get_llm_client()
         if client is None:
             return None, None, None, model
-        # Use Chat Completions for all models; switch token param for newer families
+        # gpt-5/o3/o4/gpt-4.1 require max_completion_tokens instead of max_tokens -
+        # an OpenAI-specific quirk for their newer/reasoning model families. DeepSeek
+        # doesn't have this distinction, so only check it when provider is openai.
         raw = "{}"
-        is_new_family = any(model.lower().startswith(p) for p in ("gpt-5","gpt-4o" "gpt-4.1", "o4", "o3"))
+        is_new_family = provider == "openai" and any(
+            model.lower().startswith(p) for p in ("gpt-5", "gpt-4o", "gpt-4.1", "o4", "o3")
+        )
         token_param_key = "max_completion_tokens" if is_new_family else "max_tokens"
         formatted_system_prompt = system_prompt
         if "json" not in formatted_system_prompt.lower():
             formatted_system_prompt += "\n\nIMPORTANT: Respond strictly in valid JSON format."
         logger.info(
-            "[LLM] OpenAI REQUEST | model=%s | schema=%s | family=%s | token_param=%s",
+            "[LLM] %s REQUEST | model=%s | schema=%s | family=%s | token_param=%s",
+            provider,
             model,
             model_class.__name__,
             "new" if is_new_family else "legacy",
             token_param_key,
         )
-        is_new_family = any(model.lower().startswith(p) for p in ("gpt-5", "gpt-4.1", "o4", "o3"))
-        token_param_key = "max_completion_tokens" if is_new_family else "max_tokens"
         kwargs: dict[str, Any] = {
             "model": model,
             "response_format": {"type": "json_object"},
@@ -1173,7 +1205,8 @@ async def structured_output(
             (time.perf_counter() - request_start) * 1000
         )
         logger.info(
-            "[LLM] OpenAI RESPONSE | model=%s | schema=%s | latency_ms=%s | choices=%s",
+            "[LLM] %s RESPONSE | model=%s | schema=%s | latency_ms=%s | choices=%s",
+            provider,
             model,
             model_class.__name__,
             openai_latency_ms,
@@ -1267,7 +1300,8 @@ async def structured_output(
         )
 
         logger.exception(
-            "[LLM] OPENAI/STRUCTURED OUTPUT FAILED | model=%s | schema=%s | latency_ms=%s | exception_type=%s | error=%s",
+            "[LLM] STRUCTURED OUTPUT FAILED | provider=%s | model=%s | schema=%s | latency_ms=%s | exception_type=%s | error=%s",
+            provider,
             model,
             model_class.__name__,
             latency_ms,
