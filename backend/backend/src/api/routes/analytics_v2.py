@@ -540,7 +540,7 @@ async def get_students_table(
         
         from src.services.analytics import _extract_overall_score
         reports_map = {
-            int(interview_id): _extract_overall_score(report_dict.get(interview_id), summary_dict.get(interview_id))
+            interview_id: _extract_overall_score(report_dict.get(interview_id), summary_dict.get(interview_id))
             for interview_id in interview_ids
         }
 
@@ -551,7 +551,7 @@ async def get_students_table(
     items: list[dict[str, Any]] = []
     for user in users:
         user_interviews = interviews_by_user.get(user.id, [])
-        scores = [float(reports_map.get(interview.id) or 0.0) for interview in user_interviews if reports_map.get(interview.id) is not None]
+        scores = [(reports_map.get(interview.id) or 0.0) for interview in user_interviews if reports_map.get(interview.id) is not None]
         avg_score = round(sum(scores) / len(scores), 2) if scores else 0
 
         latest_score = 0

@@ -863,7 +863,7 @@ class AnalyticsService:
     async def _count_rows(self, model: Any, user_id: int) -> int:
         stmt = sqlalchemy.select(sqlalchemy.func.count()).select_from(model).where(model.user_id == user_id)
         result = await self._db.execute(stmt)
-        return int(result.scalar() or 0)
+        return result.scalar() or 0
 
     async def _count_structure_answers(self, user_id: int) -> int:
         stmt = (
@@ -872,7 +872,7 @@ class AnalyticsService:
             .where(StructurePractice.user_id == user_id)
         )
         result = await self._db.execute(stmt)
-        return int(result.scalar() or 0)
+        return result.scalar() or 0
 
     async def _improvement_after_practice(self, user_id: int) -> dict[str, Any]:
         earliest_practice = await self._earliest_practice_timestamp(user_id)
@@ -980,7 +980,7 @@ class AnalyticsService:
 
     async def _practice_effectiveness(self, *, user_ids: set[int] | None = None) -> dict[str, Any]:
         if user_ids is not None:
-            candidate_user_ids = [int(uid) for uid in user_ids if uid is not None]
+            candidate_user_ids = [uid for uid in user_ids if uid is not None]
         else:
             users = list((await self._db.execute(sqlalchemy.select(User.id))).all())
             candidate_user_ids = [int(r[0]) for r in users if r and r[0] is not None]
@@ -1029,7 +1029,7 @@ class AnalyticsService:
             pre_avg = _avg_non_null(pre_scores)
             post_avg = _avg_non_null(post_scores)
             if pre_avg is not None and post_avg is not None:
-                deltas.append(float(post_avg - pre_avg))
+                deltas.append(post_avg - pre_avg)
             contributing_users += 1
 
         return {
@@ -1180,7 +1180,7 @@ class AnalyticsService:
         student_alerts: list[dict[str, Any]] = []
         for uid in user_ids:
             improvement = improvement_by_user.get(uid)
-            score_history_len = int(scored_count_by_user.get(uid, 0))
+            score_history_len = scored_count_by_user.get(uid, 0)
             if score_history_len >= 3 and (improvement is None or improvement <= 0):
                 student_alerts.append(
                     {
@@ -1201,7 +1201,7 @@ class AnalyticsService:
                     }
                 )
 
-            total_questions = int(total_questions_by_user.get(uid, 0))
+            total_questions = total_questions_by_user.get(uid, 0)
             retry_ratio = (reattempted_by_user.get(uid, 0) / total_questions) if total_questions else 0.0
             if retry_ratio >= 0.4 and (improvement is None or improvement <= 0):
                 student_alerts.append(
