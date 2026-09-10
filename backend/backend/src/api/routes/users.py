@@ -1,8 +1,11 @@
 import fastapi
+import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
+from src.api.dependencies.session import get_async_session
 from src.config.manager import settings
+from src.models.db.user_resume import UserResume
 from src.models.schemas.user import (
     UserCreate,
     UserLogin,
@@ -129,10 +132,39 @@ async def login_user(
 async def get_me(
     current_user=fastapi.Depends(get_current_user),
     summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
+    session=fastapi.Depends(get_async_session),
 ) -> UserInResponse:
-    # Get total attempts count
+    # Get total interview attempts count
     total_attempts = await summary_repo.count_by_user(user_id=current_user.id)
-    
+
+    # Fetch the latest onboarding resume filename (if any) for display on the Profile page
+    stmt = (
+        sqlalchemy.select(UserResume.filename)
+        .where(
+            UserResume.user_id == current_user.id,
+            UserResume.source == "onboarding",
+        )
+        .order_by(UserResume.created_at.desc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    onboarding_resume_filename: str | None = result.scalar_one_or_none()
+
+    # Fetch the latest ATS final resume filename + id (needed for the "Replace" button on Profile page)
+    ats_stmt = (
+        sqlalchemy.select(UserResume.id, UserResume.filename)
+        .where(
+            UserResume.user_id == current_user.id,
+            UserResume.source == "ats_final",
+        )
+        .order_by(UserResume.created_at.desc())
+        .limit(1)
+    )
+    ats_result = await session.execute(ats_stmt)
+    ats_row = ats_result.one_or_none()
+    ats_resume_id: int | None = ats_row[0] if ats_row else None
+    ats_resume_filename: str | None = ats_row[1] if ats_row else None
+
     token = jwt_generator.generate_access_token_for_user(user=current_user)
     return UserInResponse(
         user_id=current_user.id,
@@ -150,6 +182,9 @@ async def get_me(
             has_resume=bool(getattr(current_user, 'resume_text', None)),
             total_attempts=total_attempts,
             has_resume_text=bool(getattr(current_user, "resume_text", None)),
+            onboarding_resume_filename=onboarding_resume_filename,
+            ats_resume_filename=ats_resume_filename,
+            ats_resume_id=ats_resume_id,
             skills=current_user.skills.get("items", []) if isinstance(getattr(current_user, "skills", None), dict) else [],
             company=current_user.company,
         ),
