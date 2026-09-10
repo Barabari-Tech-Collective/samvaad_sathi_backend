@@ -386,7 +386,7 @@ async def generate_full_stack_questions_with_llm(
             "Use the non-tech question generation path instead."
         )
 
-    model = settings.OPENAI_MODEL
+    model = settings.LLM_MODEL
     client = _get_client()
     if not client:
         # Fallback to static if no API key

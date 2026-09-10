@@ -116,7 +116,7 @@ async def generate_ats_analysis(
         )
 
         response = await client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=settings.LLM_MODEL,
             # temperature=0.3,
             temperature=1,
             response_format={"type": "json_object"},

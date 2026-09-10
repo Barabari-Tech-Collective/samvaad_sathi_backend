@@ -116,6 +116,7 @@ class BackendBaseSettings(BaseSettings):
     OPENAI_API_KEY: str = decouple.config("OPENAI_API_KEY", cast=str, default="")  # type: ignore
     OPENAI_API_BASE: str | None = decouple.config("OPENAI_API_BASE", cast=str, default=None)  # type: ignore
     DEEPSEEK_API_KEY: str | None = decouple.config("DEEPSEEK_API_KEY", cast=str, default=None)  # type: ignore
+    DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-chat")  # type: ignore
     # LLM/ OpenAI client timeout in seconds (request-level). Increase for longer prompts/outputs.
     OPENAI_TIMEOUT_SECONDS: float = decouple.config("OPENAI_TIMEOUT_SECONDS", cast=float, default=150.0)  # type: ignore
 
@@ -143,6 +144,13 @@ class BackendBaseSettings(BaseSettings):
     def LLM_API_BASE(self) -> str | None:
         """Only use the custom base URL if the DEEPSEEK_API_KEY is actually present."""
         return self.OPENAI_API_BASE if self.DEEPSEEK_API_KEY else None
+
+    @property
+    def LLM_MODEL(self) -> str:
+        """Returns DEEPSEEK_MODEL when DeepSeek routing is active, otherwise OPENAI_MODEL.
+        Must be kept in lockstep with LLM_API_KEY/LLM_API_BASE so the model name always
+        matches whichever provider the client is actually pointed at."""
+        return self.DEEPSEEK_MODEL if self.DEEPSEEK_API_KEY else self.OPENAI_MODEL
 
     @property
     def set_backend_app_attributes(self) -> dict[str, str | bool | None]:

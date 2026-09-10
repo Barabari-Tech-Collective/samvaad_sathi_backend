@@ -28,7 +28,7 @@ async def generate_structured_resume_data(
 
         # Call OpenAI
         response = await client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=settings.LLM_MODEL,
             temperature=1,
             response_format={"type": "json_object"},
             messages=[
