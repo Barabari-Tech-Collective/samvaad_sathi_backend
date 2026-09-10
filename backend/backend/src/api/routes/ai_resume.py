@@ -90,7 +90,7 @@ async def analyze_resume(
         if isinstance(parser_payload, dict):
             pure_resume_text = parser_payload.get("text", "")
         else:
-            pure_resume_text = str(parser_payload)
+            pure_resume_text = parser_payload
             parser_payload = {"text": pure_resume_text, "documentMap": [], "embeddedLinks": []}
 
         # 2. Turn the unstructured text data into a structured schema layout
