@@ -20,6 +20,7 @@ def _get_client() -> AsyncOpenAI | None:
         return None
     _client = AsyncOpenAI(
         api_key=api_key,
+        base_url=settings.OPENAI_API_BASE if settings.OPENAI_API_BASE else None,
         timeout=float(getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0)),
         max_retries=3,
     )

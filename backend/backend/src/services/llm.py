@@ -29,6 +29,7 @@ def _get_client() -> AsyncOpenAI | None:
     )
     _client = AsyncOpenAI(
         api_key=api_key,
+        base_url=settings.OPENAI_API_BASE if settings.OPENAI_API_BASE else None,
         timeout=float(getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0)),
         max_retries=3,
     )
@@ -820,9 +821,9 @@ async def structured_output(
             model,
             model_class.__name__,
             openai_latency_ms,
-            len(resp.choices) if resp.choices else 0,
+            len(resp.choices) if getattr(resp, "choices", None) else 0,  # type: ignore
         )
-        raw = resp.choices[0].message.content or "{}"
+        raw = resp.choices[0].message.content or "{}"  # type: ignore
         logger.debug(
             "[LLM] RAW RESPONSE | schema=%s | response_length=%s | response_preview=%s",
             model_class.__name__,
