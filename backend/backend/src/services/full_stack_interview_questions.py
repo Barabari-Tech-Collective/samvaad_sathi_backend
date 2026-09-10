@@ -352,10 +352,11 @@ def _get_client() -> AsyncOpenAI | None:
     global _client
     if _client is not None:
         return _client
-    if not settings.OPENAI_API_KEY:
+    api_key = settings.DEEPSEEK_API_KEY or settings.OPENAI_API_KEY
+    if not api_key:
         return None
     _client = AsyncOpenAI(
-        api_key=settings.OPENAI_API_KEY,
+        api_key=api_key,
         base_url=settings.OPENAI_API_BASE if settings.OPENAI_API_BASE else None,
         max_retries=1,
         timeout=29.0,

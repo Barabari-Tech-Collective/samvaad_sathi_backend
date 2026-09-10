@@ -15,7 +15,7 @@ from src.services.ai_resume.prompt_builder import (
 
 # Initialize OpenAI client
 client = AsyncOpenAI(
-    api_key=settings.OPENAI_API_KEY,
+    api_key=settings.DEEPSEEK_API_KEY or settings.OPENAI_API_KEY,
     base_url=settings.OPENAI_API_BASE if settings.OPENAI_API_BASE else None,
 )
 

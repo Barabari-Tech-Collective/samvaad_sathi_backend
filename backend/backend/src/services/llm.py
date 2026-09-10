@@ -17,7 +17,7 @@ def _get_client() -> AsyncOpenAI | None:
     global _client
     if _client is not None:
         return _client
-    api_key = settings.OPENAI_API_KEY
+    api_key = settings.DEEPSEEK_API_KEY or settings.OPENAI_API_KEY
     if not api_key:
         logger.error("OPENAI_API_KEY is missing; LLM client cannot be initialized")
         return None
