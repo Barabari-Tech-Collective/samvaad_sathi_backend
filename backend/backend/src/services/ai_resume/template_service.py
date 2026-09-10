@@ -7,8 +7,8 @@ from src.services.ai_resume.prompt_builder import build_structuring_prompt
 
 # Initialize OpenAI client
 client = AsyncOpenAI(
-    api_key=settings.DEEPSEEK_API_KEY or settings.OPENAI_API_KEY,
-    base_url=settings.OPENAI_API_BASE if settings.OPENAI_API_BASE else None,
+    api_key=settings.LLM_API_KEY,
+    base_url=settings.LLM_API_BASE,
 )
 
 async def generate_structured_resume_data(
