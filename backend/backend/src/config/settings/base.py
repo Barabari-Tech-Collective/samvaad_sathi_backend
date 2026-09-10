@@ -114,6 +114,8 @@ class BackendBaseSettings(BaseSettings):
     MAX_AUDIO_SIZE_MB: int = decouple.config("MAX_AUDIO_SIZE_MB", cast=int, default=25)  # type: ignore
     OPENAI_MODEL: str = decouple.config("OPENAI_MODEL", cast=str, default="gpt-4o-mini")  # type: ignore
     OPENAI_API_KEY: str = decouple.config("OPENAI_API_KEY", cast=str, default="")  # type: ignore
+    OPENAI_API_BASE: str | None = decouple.config("OPENAI_API_BASE", cast=str, default=None)  # type: ignore
+    DEEPSEEK_API_KEY: str | None = decouple.config("DEEPSEEK_API_KEY", cast=str, default=None)  # type: ignore
     # LLM/ OpenAI client timeout in seconds (request-level). Increase for longer prompts/outputs.
     OPENAI_TIMEOUT_SECONDS: float = decouple.config("OPENAI_TIMEOUT_SECONDS", cast=float, default=150.0)  # type: ignore
 
@@ -131,6 +133,16 @@ class BackendBaseSettings(BaseSettings):
         validate_assignment=True,
         extra='allow'
     )
+
+    @property
+    def LLM_API_KEY(self) -> str | None:
+        """Returns DEEPSEEK_API_KEY if present, otherwise OPENAI_API_KEY for standard LLM traffic."""
+        return self.DEEPSEEK_API_KEY or self.OPENAI_API_KEY
+
+    @property
+    def LLM_API_BASE(self) -> str | None:
+        """Only use the custom base URL if the DEEPSEEK_API_KEY is actually present."""
+        return self.OPENAI_API_BASE if self.DEEPSEEK_API_KEY else None
 
     @property
     def set_backend_app_attributes(self) -> dict[str, str | bool | None]:

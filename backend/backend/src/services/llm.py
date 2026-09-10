@@ -17,7 +17,7 @@ def _get_client() -> AsyncOpenAI | None:
     global _client
     if _client is not None:
         return _client
-    api_key = settings.OPENAI_API_KEY
+    api_key = settings.LLM_API_KEY
     if not api_key:
         logger.error("OPENAI_API_KEY is missing; LLM client cannot be initialized")
         return None
@@ -29,6 +29,7 @@ def _get_client() -> AsyncOpenAI | None:
     )
     _client = AsyncOpenAI(
         api_key=api_key,
+        base_url=settings.LLM_API_BASE,
         timeout=float(getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0)),
         max_retries=3,
     )
@@ -1177,9 +1178,9 @@ async def structured_output(
             model,
             model_class.__name__,
             openai_latency_ms,
-            len(resp.choices) if resp.choices else 0,
+            len(resp.choices) if getattr(resp, "choices", None) else 0,  # type: ignore
         )
-        raw = resp.choices[0].message.content or "{}"
+        raw = resp.choices[0].message.content or "{}"  # type: ignore
         logger.debug(
             "[LLM] RAW RESPONSE | schema=%s | response_length=%s | response_preview=%s",
             model_class.__name__,

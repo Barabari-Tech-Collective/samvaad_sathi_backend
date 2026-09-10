@@ -15,7 +15,8 @@ from src.services.ai_resume.prompt_builder import (
 
 # Initialize OpenAI client
 client = AsyncOpenAI(
-    api_key=settings.OPENAI_API_KEY,
+    api_key=settings.LLM_API_KEY,
+    base_url=settings.LLM_API_BASE,
 )
 
 ats_engine = ATSEngine()
@@ -54,7 +55,7 @@ async def generate_ats_analysis(
         # 1. Async network validation & platform classification
         link_validator = SmartLinkValidator()
         # Ingest pre-extracted spatial links or fallback text buffer
-        extracted_targets = embedded_links if embedded_links else resume_text
+        extracted_targets = embedded_links if embedded_links else []
         verified_links_context = await link_validator.validate_all_links_async(extracted_targets)
 
         print("\n--- [STEP 1: SmartLinkValidator Output Links] ---")
