@@ -170,7 +170,7 @@ class AnalyticsService:
             f_avg = _avg_non_null(follow_up_scores)
             n_avg = _avg_non_null(non_follow_up_scores)
             if f_avg is not None and n_avg is not None:
-                follow_up_delta = round(f_avg - n_avg, 2) if f_avg is not None and n_avg is not None else None
+                follow_up_delta = round(f_avg - n_avg, 2)
 
         return {
             "performance": {
