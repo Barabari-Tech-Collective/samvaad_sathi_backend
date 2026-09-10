@@ -38,6 +38,9 @@ def upgrade() -> None:
     op.create_index(op.f('ix_structure_practice_status'), 'structure_practice', ['status'], unique=False)
     op.create_index(op.f('ix_structure_practice_track'), 'structure_practice', ['track'], unique=False)
     op.create_index(op.f('ix_structure_practice_user_id'), 'structure_practice', ['user_id'], unique=False)
+    # Note: structure_practice_answer was originally created earlier,
+    # but was accidentally dropped in migration 95d25f35a7f6 (May 2026).
+    # We are re-creating it here because it is currently missing on staging.
     op.create_table('structure_practice_answer',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('practice_id', sa.Integer(), nullable=False),
