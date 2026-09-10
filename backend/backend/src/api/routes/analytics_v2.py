@@ -668,7 +668,7 @@ async def get_student_summary(
         KpiCard(key="total_interviews", label="Total Interviews", value=attempts.get("interviews_attempted", 0)),
         KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(performance.get("average_last_3"), digits=2)),
         KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_zero(performance.get("improvement_rate"), digits=2), unit="percent"),
-        KpiCard(key="last_active_date", label="Last Active Date", value=(str(performance.get("score_history", [])[-1].get("created_at")) if performance.get("score_history") and performance.get("score_history", [])[-1].get("created_at") else None)),
+        KpiCard(key="last_active_date", label="Last Active Date", value=(performance.get("score_history", [])[-1].get("created_at").isoformat().replace("+00:00", "Z") if performance.get("score_history") and performance.get("score_history", [])[-1].get("created_at") else None)),
         KpiCard(key="practice_completion_rate", label="Practice Completion Rate", value=_metric_or_zero(practice.get("completion_ratio"), digits=2), unit="ratio"),
         KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero((performance.get("score_history", [])[-1].get("speech_score") if performance.get("score_history") else None), digits=2)),
         KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero((performance.get("score_history", [])[-1].get("knowledge_score") if performance.get("score_history") else None), digits=2)),
