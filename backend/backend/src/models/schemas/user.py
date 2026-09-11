@@ -65,6 +65,9 @@ class UserWithToken(BaseSchemaModel):
     has_resume: bool = False
     total_attempts: int = pydantic.Field(default=0, ge=0, description="Total number of summary reports (attempts)")
     has_resume_text: bool = False
+    onboarding_resume_filename: str | None = None
+    ats_resume_filename: str | None = None
+    ats_resume_id: int | None = None
     skills: list[str] | None = None
     # company removed from response
 

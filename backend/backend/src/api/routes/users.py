@@ -1,9 +1,12 @@
 import fastapi
+import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
+from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
+from src.models.db.user_resume import UserResume
 from src.models.schemas.user import (
     UserCreate,
     UserLogin,
@@ -144,10 +147,34 @@ async def login_user(
 async def get_me(
     current_user=fastapi.Depends(get_current_user),
     summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
+    session=fastapi.Depends(get_async_session),
 ) -> UserInResponse:
-    # Get total attempts count
+    # Get total interview attempts count
     total_attempts = await summary_repo.count_by_user(user_id=current_user.id)
-    
+
+    # Fetch all user resumes to avoid multiple queries
+    resumes_stmt = (
+        sqlalchemy.select(UserResume.id, UserResume.filename, UserResume.source)
+        .where(UserResume.user_id == current_user.id)
+        .order_by(UserResume.created_at.desc(), UserResume.id.desc())
+    )
+    resumes_result = await session.execute(resumes_stmt)
+    resumes = resumes_result.all()
+
+    onboarding_resume_filename: str | None = None
+    ats_resume_id: int | None = None
+    ats_resume_filename: str | None = None
+
+    for resume in resumes:
+        if resume.source == "onboarding" and onboarding_resume_filename is None:
+            onboarding_resume_filename = resume.filename
+        elif resume.source == "ats_final" and ats_resume_filename is None:
+            ats_resume_id = resume.id
+            ats_resume_filename = resume.filename
+            
+        if onboarding_resume_filename and ats_resume_filename:
+            break
+
     token = jwt_generator.generate_access_token_for_user(user=current_user)
     return UserInResponse(
         user_id=current_user.id,
@@ -165,6 +192,9 @@ async def get_me(
             has_resume=bool(getattr(current_user, 'resume_text', None)),
             total_attempts=total_attempts,
             has_resume_text=bool(getattr(current_user, "resume_text", None)),
+            onboarding_resume_filename=onboarding_resume_filename,
+            ats_resume_filename=ats_resume_filename,
+            ats_resume_id=ats_resume_id,
             skills=current_user.skills.get("items", []) if isinstance(getattr(current_user, "skills", None), dict) else [],
             company=current_user.company,
         ),
