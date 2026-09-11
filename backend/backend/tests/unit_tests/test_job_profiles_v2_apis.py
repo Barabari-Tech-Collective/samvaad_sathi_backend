@@ -1447,16 +1447,41 @@ def test_upload_knowledge_questions_fallback_empty():
 
 
 # 8. POST /api/v2/job-profiles/extract-skills
-def test_extract_skills_success():
+@patch(f"{__name__}.extract_skills_from_text", new_callable=AsyncMock)
+def test_extract_skills_success(mock_extract_skills):
+    """Asserts this route surfaces the extractor's skills verbatim.
+
+    This previously issued a real network call to the LLM provider, which
+    made a "unit" test cost money per run, depend on a live API key, and
+    hinge on non-deterministic model output - it failed in any environment
+    without real credentials. The extractor is mocked here; the quality of
+    the extraction itself is a provider concern, not this route's.
+    """
+    mock_extract_skills.return_value = (["Python", "React", "SQL"], None)
+
     payload = {"jobDescription": "Looking for a Software Engineer experienced in Python, React, and SQL."}
     response = client.post("/api/v2/job-profiles/extract-skills", json=payload)
-    
+
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data["skills"], list)
-    # Verify that it extracts correctly (e.g. Python, React, SQL)
     extracted = {s.lower() for s in data["skills"]}
-    assert "python" in extracted or "react" in extracted or "sql" in extracted
+    assert {"python", "react", "sql"} <= extracted
+    mock_extract_skills.assert_awaited_once_with(payload["jobDescription"])
+
+
+@patch(f"{__name__}.extract_skills_from_text", new_callable=AsyncMock)
+def test_extract_skills_propagates_empty_result(mock_extract_skills):
+    """A provider failure must surface as an empty list, not a 500."""
+    mock_extract_skills.return_value = ([], "provider unavailable")
+
+    response = client.post(
+        "/api/v2/job-profiles/extract-skills",
+        json={"jobDescription": "Looking for a Software Engineer."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["skills"] == []
 
 
 def test_extract_skills_empty_payload():
