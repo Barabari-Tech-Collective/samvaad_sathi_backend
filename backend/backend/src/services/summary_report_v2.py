@@ -85,6 +85,18 @@ def _unique(items: List[str]) -> List[str]:
     return out
 
 
+def _extract_transcript_text(attempt: Any) -> str | None:
+    """Plain-text transcript for a QuestionAttempt, i.e. the same text the
+    scoring/feedback pipeline reads via (text|transcript) - see analysis.py,
+    speech_pacing.py, follow_up.py. Surfaced on the report so the feedback
+    page can show the user's actual answer next to the strengths/areas of
+    improvement generated from it."""
+    if attempt is None or not getattr(attempt, "transcription", None):
+        return None
+    text = attempt.transcription.get("text") or attempt.transcription.get("transcript")
+    return text or None
+
+
 def _question_type_label(category: str | None) -> str:
     key = (category or "tech").lower()
     category_map = {
@@ -611,17 +623,19 @@ class SummaryReportServiceV2:
             if qa is None or not (bool(qa.transcription) or bool(qa.analysis_json)):
                 question_analysis.append(QuestionAnalysisItem(
                     id=idx + 1, totalQuestions=total_questions, type=q_type, question=interview_question.text,
+                    transcript=_extract_transcript_text(qa),
                     feedback=QuestionFeedback(knowledgeRelated=QuestionFeedbackSubsection(strengths=[], areasOfImprovement=["Not attempted"], actionableInsights=[])),
                 ))
                 continue
-            
+
             analysis = getattr(qa, "analysis_json", None) or {}
             d = analysis.get("domain") or {}
             strengths = _as_list_str(d.get("strengths"))[:3]
             improvements = _as_list_str(d.get("improvements"))[:3]
-            
+
             question_analysis.append(QuestionAnalysisItem(
                 id=idx + 1, totalQuestions=total_questions, type=q_type, question=interview_question.text,
+                transcript=_extract_transcript_text(qa),
                 feedback=QuestionFeedback(knowledgeRelated=QuestionFeedbackSubsection(strengths=strengths, areasOfImprovement=improvements, actionableInsights=[ActionableStep(title="Deepen Understanding", description="Review core concepts.")])),
             ))
         
@@ -823,6 +837,7 @@ class SummaryReportServiceV2:
                     totalQuestions=total_questions,
                     type=_question_type_label(iq.category),
                     question=iq.text,
+                    transcript=_extract_transcript_text(qa),
                     feedback=QuestionFeedbackLite(
                         strengths=strengths_text,
                         areasOfImprovement=improvements_text
@@ -889,6 +904,7 @@ class SummaryReportServiceV2:
                     totalQuestions=total_questions,
                     type=_question_type_label(iq.category),
                     question=iq.text,
+                    transcript=_extract_transcript_text(qa),
                     feedback=QuestionFeedbackLite(
                         strengths=strengths_text,
                         areasOfImprovement=improvements_text
@@ -1053,6 +1069,7 @@ class SummaryReportServiceV2:
                 "totalQuestions": total_questions,
                 "type": question_type,
                 "question": iq.text,
+                "transcript": _extract_transcript_text(attempt),
                 "feedback": feedback_item,
             })
 

@@ -153,31 +153,40 @@ async def _background_generate_and_upload_tts(questions_to_process: list[dict]):
 def _prepare_audio_for_questions(questions: list[dict]) -> list[dict]:
     """
     Calculates the predictable S3 URL and returns a list of questions that need TTS generation.
+
+    The S3 key is scoped to the currently configured ELEVENLABS_VOICE_ID. A
+    question whose stored audio_url was generated under a previous voice_id
+    won't match the current voice-scoped URL, so it's treated as needing
+    regeneration instead of being skipped forever - otherwise, once
+    ELEVENLABS_VOICE_ID changes, old and newly generated questions would
+    permanently play back in different voices within the same interview.
     """
     import hashlib
     from decouple import config
-    
+
+    from src.services.s3_service import tts_audio_s3_key
+
     bucket = config("AWS_S3_BUCKET_NAME", default="barabari-edtech-service-staging")
     region = config("AWS_REGION", default="ap-south-1")
-    
+
     questions_to_process = []
-    
+
     for q_data in questions:
-        if q_data.get("audio_url"):
-            continue
-            
         text = q_data.get("text", "")
         if not text:
             continue
-            
+
         h_id = int(hashlib.md5(text.encode()).hexdigest()[:12], 16)
-        s3_file_path = f"Samvaad-Saathi/tts-audio/question_{h_id}.mp3"
+        s3_file_path = tts_audio_s3_key(h_id)
         public_url = f"https://{bucket}.s3.{region}.amazonaws.com/{s3_file_path}"
-        
+
+        if q_data.get("audio_url") == public_url:
+            continue
+
         q_data["audio_url"] = public_url
         q_data["h_id"] = h_id
         questions_to_process.append(q_data)
-        
+
     return questions_to_process
 
 
