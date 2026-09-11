@@ -1224,9 +1224,9 @@ async def structured_output(
             model,
             model_class.__name__,
             openai_latency_ms,
-            len(resp.choices) if resp.choices else 0,
+            len(resp.choices) if getattr(resp, "choices", None) else 0,  # type: ignore
         )
-        raw = resp.choices[0].message.content or "{}"
+        raw = resp.choices[0].message.content or "{}"  # type: ignore
         logger.debug(
             "[LLM] RAW RESPONSE | schema=%s | response_length=%s | response_preview=%s",
             model_class.__name__,

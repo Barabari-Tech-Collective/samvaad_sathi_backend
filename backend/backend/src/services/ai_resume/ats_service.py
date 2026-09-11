@@ -48,7 +48,7 @@ async def generate_ats_analysis(
         # 1. Async network validation & platform classification
         link_validator = SmartLinkValidator()
         # Ingest pre-extracted spatial links or fallback text buffer
-        extracted_targets = embedded_links if embedded_links else resume_text
+        extracted_targets = embedded_links if embedded_links else []
         verified_links_context = await link_validator.validate_all_links_async(extracted_targets)
 
         print("\n--- [STEP 1: SmartLinkValidator Output Links] ---")

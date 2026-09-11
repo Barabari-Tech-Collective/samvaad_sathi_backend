@@ -324,7 +324,7 @@ def get_full_stack_questions(
         normalized_difficulty = "easy"
         
     experience_group = "freshers"
-    if years_experience is not None and float(years_experience) >= 0.0:
+    if years_experience is not None and years_experience >= 0.0:
         experience_group = "experienced"
         
     if is_full_stack:
@@ -398,7 +398,7 @@ async def generate_full_stack_questions_with_llm(
     client = _get_client()
     if not client:
         # Fallback to static if no API key
-        static_qs = get_full_stack_questions(domain, years_experience, difficulty, count, seed)
+        static_qs = get_full_stack_questions(domain, float(years_experience) if years_experience is not None else None, difficulty, count, seed)
         qs = [q["text"] for q in static_qs]
         return qs, None, -1, "static_fallback", static_qs
 
@@ -406,7 +406,7 @@ async def generate_full_stack_questions_with_llm(
     error = None
 
     # Get reference questions (we fetch `count` questions to use as baseline)
-    reference_qs = get_full_stack_questions(domain, years_experience, difficulty, count, seed)
+    reference_qs = get_full_stack_questions(domain, float(years_experience) if years_experience is not None else None, difficulty, count, seed)
 
     sys_prompt = (
         "You are an expert technical interviewer conducting a spoken interview. "
@@ -459,7 +459,7 @@ async def generate_full_stack_questions_with_llm(
             items = items[:count]
         elif len(items) < count:
             needed = count - len(items)
-            fallback_qs = get_full_stack_questions(domain, years_experience, difficulty, needed, seed)
+            fallback_qs = get_full_stack_questions(domain, float(years_experience) if years_experience is not None else None, difficulty, needed, seed)
             for fq in fallback_qs:
                 items.append({
                     "text": fq["text"],
@@ -474,6 +474,6 @@ async def generate_full_stack_questions_with_llm(
         latency_ms = int((time.perf_counter() - start) * 999)
         error = str(e)
         # Fallback to static
-        static_qs = get_full_stack_questions(domain, years_experience, difficulty, count, seed)
+        static_qs = get_full_stack_questions(domain, float(years_experience) if years_experience is not None else None, difficulty, count, seed)
         qs = [q["text"] for q in static_qs]
         return qs, error, latency_ms, "static_fallback_after_error", static_qs

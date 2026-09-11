@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import math
 from collections import defaultdict
-from typing import Any
+from typing import Any, Sequence
 
 import sqlalchemy
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
@@ -99,6 +99,7 @@ class AnalyticsService:
             )
             energy = _normalize_score(_to_float(communication.get("energy") or communication.get("energy_score")))
             consistency = _normalize_score(_to_float(communication.get("consistency") or communication.get("consistency_score")))
+
             technical_accuracy = _normalize_score(
                 _criteria_score(domain.get("criteria"), "correctness")
                 or _to_float(domain.get("domain_score"))
@@ -159,7 +160,10 @@ class AnalyticsService:
 
         follow_up_delta = None
         if follow_up_scores and non_follow_up_scores:
-            follow_up_delta = round(_avg_non_null(follow_up_scores) - _avg_non_null(non_follow_up_scores), 2)
+            f_avg = _avg_non_null(follow_up_scores)
+            n_avg = _avg_non_null(non_follow_up_scores)
+            if f_avg is not None and n_avg is not None:
+                follow_up_delta = round(f_avg - n_avg, 2)
 
         return {
             "performance": {
@@ -206,8 +210,8 @@ class AnalyticsService:
                 "average_time_between_attempts_hours": round(avg_gap_hours, 2) if avg_gap_hours is not None else None,
             },
             "follow_up_analytics": {
-                "average_follow_up_score": round(_avg_non_null(follow_up_scores), 2) if follow_up_scores else None,
-                "average_non_follow_up_score": round(_avg_non_null(non_follow_up_scores), 2) if non_follow_up_scores else None,
+                "average_follow_up_score": _round_opt(_avg_non_null(follow_up_scores), 2) if follow_up_scores else None,
+                "average_non_follow_up_score": _round_opt(_avg_non_null(non_follow_up_scores), 2) if non_follow_up_scores else None,
                 "delta_follow_up_vs_non_follow_up": follow_up_delta,
             },
         }
@@ -306,15 +310,19 @@ class AnalyticsService:
 
         follow_up_delta = None
         if follow_up_scores and parent_scores_for_followups:
-            follow_up_delta = round(_avg_non_null(follow_up_scores) - _avg_non_null(parent_scores_for_followups), 2)
+            f_avg = _avg_non_null(follow_up_scores)
+            p_avg = _avg_non_null(parent_scores_for_followups)
+            follow_up_delta = _round_opt(f_avg - p_avg, 2) if f_avg is not None and p_avg is not None else None
 
         question_dropoff: list[dict[str, Any]] = []
         for idx in range(1, len(question_items)):
             current = question_items[idx]
             previous = question_items[idx - 1]
-            if current.get("knowledge_score") is None or previous.get("knowledge_score") is None:
+            c_score = current.get("knowledge_score")
+            p_score = previous.get("knowledge_score")
+            if c_score is None or p_score is None:
                 continue
-            delta = float(current["knowledge_score"]) - float(previous["knowledge_score"])
+            delta = float(c_score) - float(p_score)
             question_dropoff.append(
                 {
                     "from_question_id": previous["question_id"],
@@ -384,7 +392,7 @@ class AnalyticsService:
                 {
                     "role": role_name,
                     "interviews": len(role_interviews),
-                    "avg_score": round(_avg_non_null(scores_clean), 2) if scores_clean else None,
+                    "avg_score": _round_opt(_avg_non_null(scores_clean), 2) if scores_clean else None,
                     "drop_off_rate": round((1 - (completed / len(role_interviews))) * 100.0, 2) if role_interviews else 0.0,
                     "common_weaknesses": weak_tags,
                     "avg_time_spent_seconds": avg_duration,
@@ -419,7 +427,7 @@ class AnalyticsService:
                 {
                     "difficulty": level,
                     "interviews": len(level_interviews),
-                    "avg_score": round(_avg_non_null(clean_scores), 2) if clean_scores else None,
+                    "avg_score": _round_opt(_avg_non_null(clean_scores), 2) if clean_scores else None,
                     "completion_rate": round((completed / len(level_interviews)) * 100.0, 2) if level_interviews else 0.0,
                     "retry_rate": retry_rate,
                 }
@@ -466,8 +474,8 @@ class AnalyticsService:
                 {
                     "college": college_name,
                     "interviews": len(college_interviews),
-                    "avg_score": round(_avg_non_null(clean_scores), 2) if clean_scores else None,
-                    "improvement_rate": round((latest - first), 2) if latest is not None and first is not None else None,
+                    "avg_score": _round_opt(_avg_non_null(clean_scores), 2) if clean_scores else None,
+                    "improvement_rate": round(latest - first, 2) if latest is not None and first is not None else None,
                     "usage_frequency": len({i.user_id for i in college_interviews}),
                     "completion_rate": round((completed / len(college_interviews)) * 100.0, 2) if college_interviews else 0.0,
                 }
@@ -568,7 +576,7 @@ class AnalyticsService:
             "overview": {
                 "total_users": len(users),
                 "active_users_30d": len(active_user_ids),
-                "avg_score": round(_avg_non_null(avg_scores_clean), 2) if avg_scores_clean else None,
+                "avg_score": _round_opt(_avg_non_null(avg_scores_clean), 2) if avg_scores_clean else None,
                 "improvement_percent": round(_improvement_percent_from_interviews(interviews, reports, summaries), 2),
             },
             "funnel": funnel,
@@ -846,7 +854,7 @@ class AnalyticsService:
     async def _count_rows(self, model: Any, user_id: int) -> int:
         stmt = sqlalchemy.select(sqlalchemy.func.count()).select_from(model).where(model.user_id == user_id)
         result = await self._db.execute(stmt)
-        return int(result.scalar() or 0)
+        return result.scalar() or 0
 
     async def _count_structure_answers(self, user_id: int) -> int:
         stmt = (
@@ -855,7 +863,7 @@ class AnalyticsService:
             .where(StructurePractice.user_id == user_id)
         )
         result = await self._db.execute(stmt)
-        return int(result.scalar() or 0)
+        return result.scalar() or 0
 
     async def _improvement_after_practice(self, user_id: int) -> dict[str, Any]:
         earliest_practice = await self._earliest_practice_timestamp(user_id)
@@ -882,12 +890,14 @@ class AnalyticsService:
         if not pre_scores or not post_scores:
             return {"available": False, "delta": None}
 
-        delta = _avg_non_null(post_scores) - _avg_non_null(pre_scores)
+        pre_avg = _avg_non_null(pre_scores)
+        post_avg = _avg_non_null(post_scores)
+        delta = post_avg - pre_avg if post_avg is not None and pre_avg is not None else None
         return {
             "available": True,
-            "pre_practice_avg": round(_avg_non_null(pre_scores), 2),
-            "post_practice_avg": round(_avg_non_null(post_scores), 2),
-            "delta": round(delta, 2),
+            "pre_practice_avg": _round_opt(pre_avg, 2),
+            "post_practice_avg": _round_opt(post_avg, 2),
+            "delta": _round_opt(delta, 2),
         }
 
     async def _earliest_practice_timestamp(self, user_id: int) -> datetime.datetime | None:
@@ -961,7 +971,7 @@ class AnalyticsService:
 
     async def _practice_effectiveness(self, *, user_ids: set[int] | None = None) -> dict[str, Any]:
         if user_ids is not None:
-            candidate_user_ids = [int(uid) for uid in user_ids if uid is not None]
+            candidate_user_ids = [uid for uid in user_ids if uid is not None]
         else:
             users = list((await self._db.execute(sqlalchemy.select(User.id))).all())
             candidate_user_ids = [int(r[0]) for r in users if r and r[0] is not None]
@@ -1007,13 +1017,15 @@ class AnalyticsService:
             post_scores = post_scores_by_user.get(uid, [])
             if not pre_scores or not post_scores:
                 continue
-            delta = _avg_non_null(post_scores) - _avg_non_null(pre_scores)
-            deltas.append(float(delta))
+            pre_avg = _avg_non_null(pre_scores)
+            post_avg = _avg_non_null(post_scores)
+            if pre_avg is not None and post_avg is not None:
+                deltas.append(post_avg - pre_avg)
             contributing_users += 1
 
         return {
             "users_with_measurable_practice_effect": contributing_users,
-            "avg_score_delta_after_practice": round(_avg_non_null(deltas), 2) if deltas else None,
+            "avg_score_delta_after_practice": _round_opt(_avg_non_null(deltas), 2) if deltas else None,
             "positive_improvement_rate": round((len([d for d in deltas if d > 0]) / len(deltas)) * 100.0, 2) if deltas else None,
         }
 
@@ -1032,7 +1044,7 @@ class AnalyticsService:
         rows = list((await self._db.execute(stmt)).all())
         retries = [int(r.attempt_count) - 1 for r in rows if int(r.attempt_count) > 1]
         return {
-            "avg_retries_before_completion": round(_avg_non_null(retries), 2) if retries else 0.0,
+            "avg_retries_before_completion": _round_opt(_avg_non_null(retries), 2) if retries else 0.0,
             "high_retry_questions": len([x for x in retries if x >= 2]),
         }
 
@@ -1159,7 +1171,7 @@ class AnalyticsService:
         student_alerts: list[dict[str, Any]] = []
         for uid in user_ids:
             improvement = improvement_by_user.get(uid)
-            score_history_len = int(scored_count_by_user.get(uid, 0))
+            score_history_len = scored_count_by_user.get(uid, 0)
             if score_history_len >= 3 and (improvement is None or improvement <= 0):
                 student_alerts.append(
                     {
@@ -1180,7 +1192,7 @@ class AnalyticsService:
                     }
                 )
 
-            total_questions = int(total_questions_by_user.get(uid, 0))
+            total_questions = total_questions_by_user.get(uid, 0)
             retry_ratio = (reattempted_by_user.get(uid, 0) / total_questions) if total_questions else 0.0
             if retry_ratio >= 0.4 and (improvement is None or improvement <= 0):
                 student_alerts.append(
@@ -1259,7 +1271,7 @@ class AnalyticsService:
         users = list((await self._db.execute(sqlalchemy.select(User.id))).all())
         improvements: list[float] = []
         for row in users:
-            user_id = int(row[0])
+            user_id = row[0]
             interviews = await self._list_interviews(user_id=user_id)
             if len(interviews) < 2:
                 continue
@@ -1277,7 +1289,10 @@ class AnalyticsService:
             latest = scored[-1][0]
             if first is not None and latest is not None:
                 improvements.append(latest - first)
-        return _avg_non_null(improvements) if improvements else 0.0
+        if not improvements:
+            return 0.0
+        avg = _avg_non_null(improvements)
+        return avg if avg is not None else 0.0
 
     async def _candidate_users(self, *, user_id: int | None) -> list[User]:
         stmt = sqlalchemy.select(User)
@@ -1337,6 +1352,20 @@ def _extract_overall_score(report: Report | None, summary_report: SummaryReport 
     return None
 
 
+def _extract_sub_scores(report: Report | None, summary_report: SummaryReport | None) -> tuple[float | None, float | None]:
+    if summary_report and isinstance(summary_report.report_json, dict):
+        score_summary = summary_report.report_json.get("overallScoreSummary") or summary_report.report_json.get("scoreSummary") or {}
+        
+        knowledge_comp = score_summary.get("knowledgeCompetence") or {}
+        knowledge_pct = _to_float(knowledge_comp.get("averagePct") or knowledge_comp.get("percentage"))
+        
+        speech_struct = score_summary.get("speechStructure") or score_summary.get("speechAndStructure") or {}
+        speech_pct = _to_float(speech_struct.get("averagePct") or speech_struct.get("percentage"))
+        
+        return _normalize_score(speech_pct), _normalize_score(knowledge_pct)
+    return None, None
+
+
 def _improvement_percent_from_interviews(
     interviews: list[Interview],
     reports: dict[int, Report],
@@ -1360,7 +1389,10 @@ def _improvement_percent_from_interviews(
         latest_score = items[-1][1]
         improvements.append(latest_score - first_score)
 
-    return _avg_non_null(improvements) if improvements else 0.0
+    if not improvements:
+        return 0.0
+    avg = _avg_non_null(improvements)
+    return avg if avg is not None else 0.0
 
 
 def _extract_speech_score(report: Report | None, summary_report: SummaryReport | None) -> float | None:
@@ -1435,7 +1467,12 @@ def _normalize_score(value: float | None) -> float | None:
     return max(0.0, min(100.0, value))
 
 
-def _avg_non_null(values: list[float | int | None]) -> float | None:
+def _round_opt(value: float | None, digits: int = 2) -> float | None:
+    if value is None:
+        return None
+    return round(value, digits)
+
+def _avg_non_null(values: Sequence[float | int | None]) -> float | None:
     clean = [float(v) for v in values if v is not None]
     if not clean:
         return None
@@ -1470,19 +1507,23 @@ def _compute_weak_area_tags(metric_history: dict[str, list[dict[str, Any]]]) -> 
     tags: list[str] = []
 
     filler_vals = [entry["value"] for entry in metric_history.get("filler_density", []) if isinstance(entry.get("value"), (int, float))]
-    if filler_vals and _avg_non_null(filler_vals) is not None and _avg_non_null(filler_vals) > 0.08:
+    f_avg = _avg_non_null(filler_vals) if filler_vals else None
+    if f_avg is not None and f_avg > 0.08:
         tags.append("high_filler_usage")
 
     energy_vals = [entry["value"] for entry in metric_history.get("energy", []) if isinstance(entry.get("value"), (int, float))]
-    if energy_vals and _avg_non_null(energy_vals) is not None and _avg_non_null(energy_vals) < 45:
+    e_avg = _avg_non_null(energy_vals) if energy_vals else None
+    if e_avg is not None and e_avg < 45:
         tags.append("low_energy")
 
     structure_vals = [entry["value"] for entry in metric_history.get("structure_quality", []) if isinstance(entry.get("value"), (int, float))]
-    if structure_vals and _avg_non_null(structure_vals) is not None and _avg_non_null(structure_vals) < 50:
+    s_avg = _avg_non_null(structure_vals) if structure_vals else None
+    if s_avg is not None and s_avg < 50:
         tags.append("poor_structure")
 
     relevance_vals = [entry["value"] for entry in metric_history.get("relevance", []) if isinstance(entry.get("value"), (int, float))]
-    if relevance_vals and _avg_non_null(relevance_vals) is not None and _avg_non_null(relevance_vals) < 45:
+    r_avg = _avg_non_null(relevance_vals) if relevance_vals else None
+    if r_avg is not None and r_avg < 45:
         tags.append("too_short_answers")
 
     return tags
