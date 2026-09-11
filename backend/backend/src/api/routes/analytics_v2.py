@@ -531,6 +531,7 @@ async def get_students_table(
 
     interview_ids = [interview.id for interview in interviews]
     reports_map: dict[int, float | None] = {}
+    sub_scores_map: dict[int, tuple[float | None, float | None]] = {}
     if interview_ids:
         report_rows = list((await session.execute(sqlalchemy.select(Report).where(Report.interview_id.in_(interview_ids)))).scalars().all())
         summary_rows = list((await session.execute(sqlalchemy.select(SummaryReport).where(SummaryReport.interview_id.in_(interview_ids)))).scalars().all())
@@ -538,9 +539,13 @@ async def get_students_table(
         report_dict = {r.interview_id: r for r in report_rows}
         summary_dict = {sr.interview_id: sr for sr in summary_rows}
         
-        from src.services.analytics import _extract_overall_score
+        from src.services.analytics import _extract_overall_score, _extract_sub_scores
         reports_map = {
             interview_id: _extract_overall_score(report_dict.get(interview_id), summary_dict.get(interview_id))
+            for interview_id in interview_ids
+        }
+        sub_scores_map = {
+            interview_id: _extract_sub_scores(report_dict.get(interview_id), summary_dict.get(interview_id))
             for interview_id in interview_ids
         }
 
@@ -553,6 +558,20 @@ async def get_students_table(
         user_interviews = interviews_by_user.get(user.id, [])
         scores = [(reports_map.get(interview.id) or 0.0) for interview in user_interviews if reports_map.get(interview.id) is not None]
         avg_score = round(sum(scores) / len(scores), 2) if scores else 0
+        
+        k_scores = []
+        s_scores = []
+        for interview in user_interviews:
+            sub = sub_scores_map.get(interview.id)
+            if sub:
+                speech_val, knowledge_val = sub
+                if knowledge_val is not None:
+                    k_scores.append(knowledge_val)
+                if speech_val is not None:
+                    s_scores.append(speech_val)
+
+        avg_knowledge_score = round(sum(k_scores) / len(k_scores), 2) if k_scores else 0
+        avg_speech_score = round(sum(s_scores) / len(s_scores), 2) if s_scores else 0
 
         latest_score = 0
         if user_interviews:
@@ -574,6 +593,8 @@ async def get_students_table(
                 "name": user.name,
                 "college": user.university,
                 "average_score": avg_score,
+                "knowledge_score": avg_knowledge_score,
+                "speech_score": avg_speech_score,
                 "latest_score": latest_score,
                 "improvement_percent": improvement_percent,
                 "interviews_count": len(user_interviews),
@@ -856,15 +877,16 @@ async def get_colleges_summary(
     total_colleges = len(college_items)
     total_students = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(User.id)))).scalar() or 0
     total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0
-    avg_scores = [item.get("avg_score") for item in college_items if isinstance(item.get("avg_score"), (int, float))]
+    valid_colleges = [
+        item for item in college_items 
+        if isinstance(item.get("avg_score"), (int, float))
+    ]
+    
+    avg_scores = [float(item["avg_score"]) for item in valid_colleges]
     average_score = round(sum(avg_scores) / len(avg_scores), 2) if avg_scores else 0
 
-    highest = max(college_items, key=lambda item: item.get("avg_score") if isinstance(item.get("avg_score"), (int, float)) else -1, default=None)
-    lowest = min(
-        [item for item in college_items if isinstance(item.get("avg_score"), (int, float))],
-        key=lambda item: item.get("avg_score"),
-        default=None,
-    )
+    highest = max(valid_colleges, key=lambda item: float(item["avg_score"]), default=None)
+    lowest = min(valid_colleges, key=lambda item: float(item["avg_score"]), default=None)
 
     kpis = [
         KpiCard(key="total_colleges", label="Total Colleges", value=total_colleges),
@@ -1501,8 +1523,13 @@ async def get_roles_summary(
     all_interviews = sum(int(item.get("interviews", 0)) for item in items)
     completion_rates = [100.0 - float(item.get("drop_off_rate", 0.0)) for item in items]
     most_popular = max(items, key=lambda item: int(item.get("interviews", 0)), default=None)
-    highest_avg = max(items, key=lambda item: item.get("avg_score") if isinstance(item.get("avg_score"), (int, float)) else -1, default=None)
-    lowest_avg = min([item for item in items if isinstance(item.get("avg_score"), (int, float))], key=lambda item: item.get("avg_score"), default=None)
+    valid_items = [
+        item for item in items 
+        if isinstance(item.get("avg_score"), (int, float))
+    ]
+    
+    highest_avg = max(valid_items, key=lambda item: float(item["avg_score"]), default=None)
+    lowest_avg = min(valid_items, key=lambda item: float(item["avg_score"]), default=None)
     kpis = [
         KpiCard(key="total_roles", label="Total Roles", value=total_roles),
         KpiCard(key="most_popular_role", label="Most Popular Role", value=(most_popular or {}).get("role")),
