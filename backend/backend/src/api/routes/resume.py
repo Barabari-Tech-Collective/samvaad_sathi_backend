@@ -1,4 +1,5 @@
 import io
+import logging
 import re
 import os
 import time
@@ -7,6 +8,8 @@ from typing import Any, Dict, Tuple
 
 import fastapi
 import PyPDF2
+
+logger = logging.getLogger(__name__)
 
 def _verify_pdf_magic_bytes(raw_bytes: bytes) -> None:
     if not raw_bytes.startswith(b"%PDF"):
@@ -27,7 +30,7 @@ def _extract_text_from_pdf(raw_bytes: bytes) -> str:
                     if page_text.strip():
                         texts.append(page_text)
                 except Exception as page_error:
-                    print(f"Warning: Failed to extract text from page {page_num + 1}: {page_error}")
+                    logger.warning("Failed to extract text from page %d: %s", page_num + 1, page_error)
                     continue
             extracted_text = "\n".join(texts)
             if not extracted_text.strip():
@@ -41,11 +44,11 @@ def _extract_text_from_pdf(raw_bytes: bytes) -> str:
                                 fallback_texts.append(page_text)
                         extracted_text = "\n".join(fallback_texts)
                 except ImportError:
-                    print("Warning: pdfplumber not available for fallback PDF extraction")
+                    logger.warning("pdfplumber not available for fallback PDF extraction")
                 except Exception as fallback_error:
-                    print(f"Warning: pdfplumber fallback failed: {fallback_error}")
+                    logger.warning("pdfplumber fallback failed: %s", fallback_error)
     except Exception as pdf_error:
-        print(f"PDF extraction error: {pdf_error}")
+        logger.error("PDF extraction error: %s", pdf_error)
         try:
             import pdfplumber
             with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:

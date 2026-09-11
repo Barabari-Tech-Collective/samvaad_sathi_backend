@@ -82,7 +82,13 @@ class RoleManager:
             normalized_track = track.strip().lower()
             if not normalized_track:
                 raise ValueError("Track cannot be empty or whitespace only")
-            
+
+            if normalized_track.startswith("non-tech:"):
+                raise ValueError(
+                    f"Track '{track}' is a non-tech track and has no tech role mapping. "
+                    "Non-tech interviews must use the non-tech question generation path."
+                )
+
             # Check for exact matches first
             if normalized_track in self._aliases:
                 role = self._aliases[normalized_track]

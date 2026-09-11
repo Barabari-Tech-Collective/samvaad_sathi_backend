@@ -4,11 +4,14 @@ import datetime
 import math
 
 import fastapi
+import sqlalchemy
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
+from src.api.dependencies.admin import get_current_admin_user
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.session import get_async_session
+from src.models.db.interview import Interview
 from src.models.db.user import User
 from src.models.schemas.analytics import (
     AlertsAnalyticsResponse,
@@ -96,6 +99,16 @@ async def get_student_analytics(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    # user_id comes straight off the path and was previously never compared
+    # against the caller - any student could read any other student's full
+    # performance analytics by incrementing the id. Students keep access to
+    # their own analytics; anything else requires admin.
+    if user_id != current_user.id and not getattr(current_user, "is_admin", False):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="You may only view your own analytics.",
+        )
+
     service = AnalyticsService(session)
     metrics = await service.get_student_level_analytics(user_id=user_id, start_date=start_date, end_date=end_date)
     return StudentAnalyticsResponse(
@@ -117,6 +130,22 @@ async def get_interview_analytics(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    # Same gap as /student/{user_id}: interview_id was taken from the path
+    # with no ownership check. Students keep access to their own interviews.
+    if not getattr(current_user, "is_admin", False):
+        owner_id = (
+            await session.execute(
+                sqlalchemy.select(Interview.user_id).where(Interview.id == interview_id)
+            )
+        ).scalar_one_or_none()
+        if owner_id is None:
+            raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+        if owner_id != current_user.id:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                detail="You may only view analytics for your own interviews.",
+            )
+
     service = AnalyticsService(session)
     metrics = await service.get_interview_level_analytics(interview_id=interview_id)
     if metrics is None:
@@ -136,7 +165,7 @@ async def get_role_segment_analytics(
     role: str | None = None,
     difficulty: str | None = None,
     college: str | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     service = AnalyticsService(session)
@@ -166,7 +195,7 @@ async def get_difficulty_segment_analytics(
     role: str | None = None,
     difficulty: str | None = None,
     college: str | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     service = AnalyticsService(session)
@@ -197,7 +226,7 @@ async def get_college_segment_analytics(
     role: str | None = None,
     difficulty: str | None = None,
     college: str | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     service = AnalyticsService(session)
@@ -227,7 +256,7 @@ async def get_system_analytics(
     role: str | None = None,
     difficulty: str | None = None,
     college: str | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     service = AnalyticsService(session)
@@ -256,7 +285,7 @@ async def get_scoring_analytics(
     role: str | None = None,
     difficulty: str | None = None,
     college: str | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     service = AnalyticsService(session)
@@ -283,7 +312,7 @@ async def get_analytics_alerts(
     user_id: int | None = None,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     service = AnalyticsService(session)

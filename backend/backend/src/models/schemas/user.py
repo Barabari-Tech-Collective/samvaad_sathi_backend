@@ -7,13 +7,19 @@ from src.models.schemas.base import BaseSchemaModel
 
 class UserCreate(BaseSchemaModel):
     email: pydantic.EmailStr
-    password: str
-    name: str
+    # Previously an unconstrained str, so a single-character password was
+    # accepted at registration. max_length guards against DoS via very long
+    # inputs to the (deliberately slow) password hasher.
+    password: str = pydantic.Field(min_length=8, max_length=128)
+    name: str = pydantic.Field(min_length=1, max_length=128)
 
 
 class UserLogin(BaseSchemaModel):
     email: pydantic.EmailStr
-    password: str
+    # No min_length here on purpose: login must still accept the short
+    # passwords of accounts created before the policy existed, so those users
+    # can sign in (and be prompted to change it) rather than being locked out.
+    password: str = pydantic.Field(max_length=128)
 
 
 # ------------------------------

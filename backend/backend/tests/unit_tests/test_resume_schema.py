@@ -20,7 +20,7 @@ def test_resume_extraction_response_includes_details_schema():
     assert details_schema is not None
     d_props = details_schema.get("properties", {})
     # Spot-check a few fields
-    assert "full_name" in d_props
+    assert "fullName" in d_props
     assert "education" in d_props
     assert "experience" in d_props
 

@@ -8,10 +8,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install minimal OS deps (curl for healthchecks)
+# Install OS deps: curl for healthchecks; build-essential/pkg-config/libcairo2-dev
+# are required to compile pycairo (a transitive dependency) from source on this
+# slim base image — without them, `pip install` fails before the app ever builds.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl \
+        build-essential \
+        pkg-config \
+        libcairo2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first (better layer caching)
@@ -30,4 +35,7 @@ EXPOSE 8000
 #     && chown -R appuser:appuser /app
 # USER appuser
 
-CMD ["uvicorn", "src.main:backend_app", "--host", "0.0.0.0", "--port", "8000"]
+# Shell form (not the ["exec", "form"] array) so ${BACKEND_SERVER_WORKERS} is
+# substituted at container start. Defaults to 2 workers if unset — matches this
+# service's t3.small (2GB RAM) sizing; see backend/.env.example for reasoning.
+CMD uvicorn src.main:backend_app --host 0.0.0.0 --port 8000 --workers ${BACKEND_SERVER_WORKERS:-2}

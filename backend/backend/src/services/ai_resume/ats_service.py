@@ -3,20 +3,13 @@ import uuid
 import traceback
 from typing import Any
 from fastapi import HTTPException
-from openai import AsyncOpenAI
 
-from src.config.manager import settings
+from src.services.llm import get_llm_client, get_active_llm_model_and_key, get_provider_completion_kwargs
 from src.utilities.link_validator import SmartLinkValidator
 from src.services.ai_resume.scoring.ats_engine import ATSEngine
 from src.services.ai_resume.scoring.project_mapper import ProjectLinkMapper
 from src.services.ai_resume.prompt_builder import (
     build_ats_analysis_prompt,
-)
-
-# Initialize OpenAI client
-client = AsyncOpenAI(
-    api_key=settings.LLM_API_KEY,
-    base_url=settings.LLM_API_BASE,
 )
 
 ats_engine = ATSEngine()
@@ -106,7 +99,7 @@ async def generate_ats_analysis(
         print(f"Master score computed: {deterministic_report['atsScore']}")
         print(f"Hygiene check snapshot: {json.dumps(deterministic_report['hygieneCheck'], indent=2)}")
 
-        # 5. Build structured prompt and call OpenAI LLM
+        # 5. Build structured prompt and call the configured LLM provider
         prompt = build_ats_analysis_prompt(
             resume_text=resume_text,
             deterministic_report=deterministic_report,
@@ -115,8 +108,16 @@ async def generate_ats_analysis(
             job_description=job_description,
         )
 
+        client = get_llm_client()
+        model, _ = get_active_llm_model_and_key()
+        if client is None:
+            raise HTTPException(
+                status_code=503,
+                detail="LLM provider is not configured",
+            )
+
         response = await client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=model,
             # temperature=0.3,
             temperature=1,
             response_format={"type": "json_object"},
@@ -133,6 +134,7 @@ async def generate_ats_analysis(
                     "content": prompt,
                 },
             ],
+            **get_provider_completion_kwargs(),
         )
 
         ai_response = response.choices[0].message.content

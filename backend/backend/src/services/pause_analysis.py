@@ -4,7 +4,6 @@ import sys
 from typing import Dict, List
 import re
 import statistics
-import asyncio
 
 from src.services.llm import structured_output, PausesSuggestionLLM, PauseCoachLLM
 
@@ -662,20 +661,3 @@ async def analyze_pauses_async(asr_output: dict):
     feedback["score"] = score
 
     return feedback
-
-
-# Backward-compatible sync wrappers (not used in async paths)
-def analyze_pauses(asr_output: dict):
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Create a task for the already-running loop
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, analyze_pauses_async(asr_output))
-                return future.result()
-        else:
-            return loop.run_until_complete(analyze_pauses_async(asr_output))
-    except Exception:
-        # As last resort, drop LLM parts and call deterministic path
-        return asyncio.new_event_loop().run_until_complete(analyze_pauses_async(asr_output))

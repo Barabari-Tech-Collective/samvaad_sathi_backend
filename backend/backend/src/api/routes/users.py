@@ -4,6 +4,7 @@ import sqlalchemy
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.session import get_async_session
+from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
 from src.models.db.user_resume import UserResume
 from src.models.schemas.user import (
@@ -39,6 +40,13 @@ async def register_user(
     payload: UserCreate,
     user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
     session_repo: SessionCRUDRepository = fastapi.Depends(get_repository(repo_type=SessionCRUDRepository)),
+    _rate_limit: None = fastapi.Depends(
+        anonymous_rate_limiter(
+            key_prefix="signup",
+            limit=settings.RATE_LIMIT_SIGNUP_PER_HOUR,
+            window_seconds=3600,
+        )
+    ),
 ) -> UserInResponse:
     try:
         user = await user_repo.create_user(email=payload.email, password=payload.password, name=payload.name)
@@ -89,6 +97,13 @@ async def login_user(
     payload: UserLogin,
     user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
     session_repo: SessionCRUDRepository = fastapi.Depends(get_repository(repo_type=SessionCRUDRepository)),
+    _rate_limit: None = fastapi.Depends(
+        anonymous_rate_limiter(
+            key_prefix="login",
+            limit=settings.RATE_LIMIT_LOGIN_PER_MINUTE,
+            window_seconds=60,
+        )
+    ),
 ) -> UserInResponse:
     try:
         user = await user_repo.verify_password(email=payload.email, password=payload.password)

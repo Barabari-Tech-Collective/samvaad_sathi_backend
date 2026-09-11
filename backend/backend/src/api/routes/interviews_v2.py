@@ -359,6 +359,12 @@ async def generate_questions_v2(
         if interview is None:
             raise fastapi.HTTPException(status_code=fastapi.status.HTTP_400_BAD_REQUEST, detail="No active interview to generate questions for")
 
+    if interview.track and interview.track.startswith("Non-Tech:"):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="This endpoint does not support non-tech interview tracks. Use /v2/interviews/non-tech/generate-questions instead.",
+        )
+
     import sqlalchemy
     # Acquire advisory lock on interview ID to prevent concurrent generation
     # Using bound parameters for production-level SQL injection prevention
@@ -1323,8 +1329,16 @@ async def create_structure_practice_session(
         
         track = interview.track
     else:
-        # Create a new interview with questions for structure practice
-        track = request.track or "JavaScript Developer"
+        # Create a new interview with questions for structure practice.
+        # Never silently default to a hardcoded tech role — that would generate
+        # tech questions for a non-tech candidate. Fall back to the user's own
+        # declared target role, and fail loudly if neither is available.
+        track = request.track or getattr(current_user, "target_position", None)
+        if not track:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="No track specified and no target role set on your profile. Please select a role first.",
+            )
         difficulty = (request.difficulty or "easy").lower()
         if difficulty not in ("easy", "medium", "hard", "expert"):
             difficulty = "easy"
@@ -1337,7 +1351,13 @@ async def create_structure_practice_session(
         )
         
         # Generate questions based on difficulty
-        role = syllabus_service._role_manager.derive_role(track)
+        try:
+            role = syllabus_service._role_manager.derive_role(track)
+        except ValueError as exc:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            )
         topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
         topics = {
             "tech": topic_bank.tech,
@@ -1540,10 +1560,10 @@ async def submit_structure_practice_section(
     
     # Extract transcription text
     transcription_text = transcription.get("text", "")
-    if not transcription_text or len(transcription_text.strip()) < 5:
+    if not transcription_text or len(transcription_text.strip().split()) < 3:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-            detail="Transcribed answer is too short. Please provide a more detailed answer."
+            detail="Your answer was too short to evaluate. Please provide a more complete response."
         )
     
     # Save audio file (optional, for record keeping)

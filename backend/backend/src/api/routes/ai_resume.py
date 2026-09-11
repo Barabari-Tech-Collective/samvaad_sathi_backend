@@ -1,3 +1,4 @@
+import logging
 import uuid
 import fastapi
 from fastapi import (
@@ -11,8 +12,12 @@ from fastapi import (
 import sqlalchemy
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
+logger = logging.getLogger(__name__)
+
 from src.api.dependencies.auth import get_current_user
+from src.api.dependencies.rate_limit import rate_limiter
 from src.api.dependencies.session import get_async_session
+from src.config.manager import settings
 
 from src.models.db.user import User
 from src.models.db.ai_resume_analysis import AIResumeAnalysis
@@ -33,6 +38,7 @@ from src.services.ai_resume.ats_service import (
     generate_ats_analysis,
 )
 from src.services.barabari_integration import submit_resume_score_to_barabari
+from src.worker.queue import enqueue_job
 
 router = fastapi.APIRouter(
     prefix="/ai-resume",
@@ -54,6 +60,13 @@ async def analyze_resume(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
     user_repo: UserCRUDRepository = Depends(get_repository(repo_type=UserCRUDRepository)),
+    _rate_limit=Depends(
+        rate_limiter(
+            key_prefix="resume_analysis",
+            limit=settings.RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR,
+            window_seconds=3600,
+        )
+    ),
 ):
     """
     Upload and analyze resume against job description.
@@ -131,12 +144,24 @@ async def analyze_resume(
         await session.refresh(db_analysis)
 
         if current_user.student_id:
-            await submit_resume_score_to_barabari(
+            queued = await enqueue_job(
+                "submit_resume_score_task",
                 student_id=current_user.student_id,
                 resume_score=analysis_result["atsScore"],
                 request_id=analysis_id,
                 target_role=targetRole,
             )
+            if not queued:
+                # Redis/arq unreachable - fall back to an in-process best-effort
+                # task rather than dropping the callback entirely. No retry or
+                # durability in this path, same as before this change.
+                background_tasks.add_task(
+                    submit_resume_score_to_barabari,
+                    student_id=current_user.student_id,
+                    resume_score=analysis_result["atsScore"],
+                    request_id=analysis_id,
+                    target_role=targetRole,
+                )
 
         # Removed: We no longer upload ATS resumes to overwrite the original_resume_s3_key
 
@@ -148,13 +173,11 @@ async def analyze_resume(
     except Exception as e:
         await session.rollback()
 
-        import traceback
-        with open("backend_error.log", "w") as f:
-            f.write(traceback.format_exc())
+        logger.exception("Resume analysis failed for user_id=%s", current_user.id)
 
         raise fastapi.HTTPException(
             status_code=500,
-            detail=f"Resume analysis failed: {str(e)}",
+            detail="Resume analysis failed. Please try again.",
         )
 
 

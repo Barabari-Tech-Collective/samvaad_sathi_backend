@@ -55,6 +55,9 @@ async def test_system_analytics_uses_event_backed_funnel_and_report_engagement(m
     async def fake_reports_by_interview(_interview_ids):
         return {}
 
+    async def fake_summary_reports_by_interview(_interview_ids):
+        return {}
+
     async def fake_list_events(**_kwargs):
         return events
 
@@ -75,6 +78,7 @@ async def test_system_analytics_uses_event_backed_funnel_and_report_engagement(m
 
     monkeypatch.setattr(service, "_list_interviews_all", fake_list_interviews_all)
     monkeypatch.setattr(service, "_reports_by_interview", fake_reports_by_interview)
+    monkeypatch.setattr(service, "_summary_reports_by_interview", fake_summary_reports_by_interview)
     monkeypatch.setattr(service, "_list_analytics_events", fake_list_events)
     monkeypatch.setattr(service, "_users_with_practice", fake_users_with_practice)
     monkeypatch.setattr(service, "_practice_effectiveness", fake_practice_effectiveness)
@@ -119,6 +123,9 @@ async def test_system_analytics_falls_back_to_legacy_when_events_missing(monkeyp
     async def fake_reports_by_interview(_interview_ids):
         return reports
 
+    async def fake_summary_reports_by_interview(_interview_ids):
+        return {}
+
     async def fake_list_events(**_kwargs):
         return []
 
@@ -139,6 +146,7 @@ async def test_system_analytics_falls_back_to_legacy_when_events_missing(monkeyp
 
     monkeypatch.setattr(service, "_list_interviews_all", fake_list_interviews_all)
     monkeypatch.setattr(service, "_reports_by_interview", fake_reports_by_interview)
+    monkeypatch.setattr(service, "_summary_reports_by_interview", fake_summary_reports_by_interview)
     monkeypatch.setattr(service, "_list_analytics_events", fake_list_events)
     monkeypatch.setattr(service, "_users_with_practice", fake_users_with_practice)
     monkeypatch.setattr(service, "_practice_effectiveness", fake_practice_effectiveness)

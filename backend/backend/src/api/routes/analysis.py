@@ -29,7 +29,7 @@ from src.models.db.user import User
 from src.services.analysis import analysis_service
 from src.services.pace_analysis import provide_pace_feedback
 from src.services.pause_analysis import analyze_pauses_async
-from src.services.llm import analyze_domain_with_llm, analyze_communication_with_llm
+from src.services.llm import analyze_domain_with_llm, analyze_communication_with_llm, MIN_ANSWER_WORD_COUNT
 from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
@@ -454,8 +454,10 @@ async def communication_based_analysis(
         structure = base
         crit = analysis.get("criteria")
         if isinstance(crit, dict):
-            clarity = _num(crit.get("clarity", {}).get("score"), base)
-            structure = _num(crit.get("structure", {}).get("score"), base)
+            clarity_score = crit.get("clarity", {}).get("score") if isinstance(crit.get("clarity"), dict) else None
+            clarity = _num(clarity_score, base)
+            structure_score = crit.get("structure", {}).get("score") if isinstance(crit.get("structure"), dict) else None
+            structure = _num(structure_score, base)
             vocab_score = crit.get("vocabulary", {}).get("score") if isinstance(crit.get("vocabulary"), dict) else None
             jargon_score = crit.get("jargon_use", {}).get("score") if isinstance(crit.get("jargon_use"), dict) else None
             vocab = _num(vocab_score if isinstance(vocab_score, (int, float)) else jargon_score, base)
@@ -558,33 +560,49 @@ async def analyze_pace(
             detail="Transcription missing word-level timestamps"
         )
 
-    word_level_timestemps = {"words": words}
-    res = provide_pace_feedback(word_level_timestemps)
-
-    if not isinstance(res, dict):
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Insufficient data for pace analysis"
-        )
-
-    feedback = str(res.get("feedback", ""))
-    raw_score = res.get("score")
-    wpm = float(res.get("wpm") or 0.0)
-    try:
-        raw_score_f = float(raw_score) if raw_score is not None else 0.0
-    except Exception:
-        raw_score_f = 0.0
-    # Normalize 0-5 -> 0-100 if needed
-    pace_score = raw_score_f * 20.0 if raw_score_f <= 5.0 else raw_score_f
-    
-    # Determine pace category
-    if wpm < 120:
-        pace_category = "too_slow"
-    elif wpm > 200:
-        pace_category = "too_fast"  
+    # Word-level timestamps existing doesn't mean there was a real answer —
+    # a single stray/hallucinated word still has "timestamps." Don't compute
+    # a plausible-looking WPM off negligible speech.
+    if len(words) < MIN_ANSWER_WORD_COUNT:
+        feedback = "Not enough speech to analyze pacing — no substantial answer was given."
+        pace_score = 0.0
+        wpm = 0.0
+        pace_category = "insufficient_speech"
     else:
-        pace_category = "optimal"
+        word_level_timestemps = {"words": words}
+        res = provide_pace_feedback(word_level_timestemps)
+
+        if not isinstance(res, dict):
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Insufficient data for pace analysis"
+            )
+
+        feedback = str(res.get("feedback", ""))
+        raw_score = res.get("score")
+        wpm = float(res.get("wpm") or 0.0)
+        try:
+            raw_score_f = float(raw_score) if raw_score is not None else 0.0
+        except Exception:
+            raw_score_f = 0.0
+        # Normalize 0-5 -> 0-100 if needed
+        pace_score = raw_score_f * 20.0 if raw_score_f <= 5.0 else raw_score_f
+
+        # Determine pace category
+        if wpm < 120:
+            pace_category = "too_slow"
+        elif wpm > 200:
+            pace_category = "too_fast"
+        else:
+            pace_category = "optimal"
     
+    if pace_category == "insufficient_speech":
+        recommendations = ["Give a substantial spoken answer before pacing can be assessed."]
+    elif pace_category == "optimal":
+        recommendations = ["Maintain current pace", "Consider slight variation for emphasis"]
+    else:
+        recommendations = ["Adjust speaking speed", "Practice with metronome"]
+
     # Persist into analysis_json.pace (merge)
     merged = dict(qa.analysis_json or {})
     merged["pace"] = {
@@ -592,13 +610,7 @@ async def analyze_pace(
         "words_per_minute": wpm,
         "pace_feedback": feedback,
         "pace_category": pace_category,
-        "recommendations": [
-            "Maintain current pace",
-            "Consider slight variation for emphasis",
-        ] if pace_category == "optimal" else [
-            "Adjust speaking speed",
-            "Practice with metronome",
-        ],
+        "recommendations": recommendations,
     }
     await question_repo.update_analysis_json(
         question_attempt_id=question_attempt_id,
@@ -611,7 +623,7 @@ async def analyze_pace(
         words_per_minute=wpm,
         pace_feedback=feedback,
         pace_category=pace_category,
-        recommendations=["Maintain current pace", "Consider slight variation for emphasis"] if pace_category == "optimal" else ["Adjust speaking speed", "Practice with metronome"]
+        recommendations=recommendations,
     )
 
 
@@ -653,14 +665,26 @@ async def analyze_pause(
             detail="Transcription missing word-level timestamps"
         )
 
-    word_level_timestemps = {"words": words}
-    res = await analyze_pauses_async(word_level_timestemps)
+    # Word-level timestamps existing doesn't mean there was a real answer —
+    # a single stray/hallucinated word still has "timestamps." Don't compute
+    # a plausible-looking pause pattern off negligible speech.
+    if len(words) < MIN_ANSWER_WORD_COUNT:
+        res = {
+            "overview": "Not enough speech to analyze pause patterns — no substantial answer was given.",
+            "details": [],
+            "distribution": {"long": "0%", "rushed": "0%", "strategic": "0%", "normal": "0%"},
+            "actionable_feedback": "Give a substantial spoken answer before pause patterns can be assessed.",
+            "score": 0,
+        }
+    else:
+        word_level_timestemps = {"words": words}
+        res = await analyze_pauses_async(word_level_timestemps)
 
-    if not isinstance(res, dict):
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Insufficient data for pause analysis"
-        )
+        if not isinstance(res, dict):
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Insufficient data for pause analysis"
+            )
 
     # Normalize score 1-5 -> 0-100 if needed
     raw_pause_score = res.get('score')

@@ -13,29 +13,69 @@ logger = logging.getLogger(__name__)
 # Lazy client holder; create only when needed and when API key is present
 _client: AsyncOpenAI | None = None
 
-def _get_client() -> AsyncOpenAI | None:
+
+def get_active_llm_provider() -> str:
+    provider = (settings.LLM_PROVIDER or "openai").strip().lower()
+    return provider if provider in ("openai", "deepseek") else "openai"
+
+
+def get_active_llm_model_and_key() -> tuple[str, str]:
+    """Model string and API key for whichever provider LLM_PROVIDER selects.
+    DeepSeek's API is OpenAI-ChatCompletions-compatible, so the same
+    AsyncOpenAI client class works for both - only base_url/api_key/model
+    differ (see get_llm_client())."""
+    if get_active_llm_provider() == "deepseek":
+        return settings.DEEPSEEK_MODEL, settings.DEEPSEEK_API_KEY
+    return settings.OPENAI_MODEL, settings.OPENAI_API_KEY
+
+
+def get_llm_client() -> AsyncOpenAI | None:
     global _client
     if _client is not None:
         return _client
-    api_key = settings.LLM_API_KEY
+
+    provider = get_active_llm_provider()
+    _, api_key = get_active_llm_model_and_key()
     if not api_key:
-        logger.error("OPENAI_API_KEY is missing; LLM client cannot be initialized")
+        logger.error(
+            "%s_API_KEY is missing; LLM client cannot be initialized",
+            provider.upper(),
+        )
         return None
-    
+
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": float(getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0)),
+        "max_retries": 3,
+    }
+    if provider == "deepseek":
+        client_kwargs["base_url"] = settings.DEEPSEEK_BASE_URL
+
     logger.info(
-        "Initializing OpenAI AsyncClient model=%s timeout=%s max_retries=3",
-        getattr(settings, "OPENAI_MODEL", None),
-        getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0),
+        "Initializing %s AsyncClient model=%s timeout=%s max_retries=3",
+        provider,
+        settings.DEEPSEEK_MODEL if provider == "deepseek" else settings.OPENAI_MODEL,
+        client_kwargs["timeout"],
     )
-    _client = AsyncOpenAI(
-        api_key=api_key,
-        base_url=settings.LLM_API_BASE,
-        timeout=float(getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0)),
-        max_retries=3,
-    )
-    logger.info("OpenAI AsyncClient initialized successfully")
+    _client = AsyncOpenAI(**client_kwargs)
+    logger.info("%s AsyncClient initialized successfully", provider)
 
     return _client
+
+
+def get_provider_completion_kwargs() -> dict[str, Any]:
+    """Extra chat.completions.create() kwargs required for the active
+    provider, beyond model/messages/response_format. DeepSeek V4 defaults to
+    an extended "Thinking" mode whose reasoning tokens consume the SAME
+    max_tokens budget as the final answer - verified live: a plain
+    extraction call spent its entire 2048-token budget on internal
+    reasoning and returned empty content (finish_reason=length) in 16s;
+    disabling it dropped that to 1.1s with a correct answer in 55 tokens.
+    Must be applied to every DeepSeek call, not just ones that seem slow -
+    thinking mode also silently rejects temperature/top_p/penalty params."""
+    if get_active_llm_provider() == "deepseek":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {}
 
 
 class ResumeEntitiesLLM(pydantic.BaseModel):
@@ -326,18 +366,17 @@ async def synthesize_summary_sections(
     Drive the LLM to create the restructured summary report from per-question analyses.
     Returns: (summary_json, error, latency_ms, model)
     """
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "LLM summary synthesis START total_questions=%s input_count=%s max_questions=%s model=%s",
         total_questions,
         len(per_question_inputs),
         max_questions,
-        settings.OPENAI_MODEL,
+        model,
     )
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
     if not api_key:
         logger.error(
-            "LLM summary synthesis ABORTED: OPENAI_API_KEY missing"
+            "LLM summary synthesis ABORTED: %s_API_KEY missing", get_active_llm_provider().upper()
         )
         # No key: return empty structures; caller can fallback to heuristic
         return {}, None, None, model
@@ -390,17 +429,30 @@ async def synthesize_summary_sections(
         "   - DO NOT hallucinate feedback about content that wasn't provided\n"
         "   - DO NOT give positive feedback if there was no real attempt at answering\n"
         "\n"
+        "CRITICAL - ACTIONABLE GUIDANCE FOR WRONG OR WEAK ANSWERS:\n"
+        "⚠️  Whenever an answer is incorrect, incomplete, or off-target, areas of improvement must go beyond\n"
+        "   naming what was wrong — they must also say what the candidate should have said or done instead.\n"
+        "   Do not stop at a diagnosis like 'lacked specific examples' — follow it with the concrete fix, e.g.\n"
+        "   'lacked specific examples — you could have mentioned a project where you used X'. The candidate\n"
+        "   should be able to read the feedback and understand exactly what a stronger answer would have\n"
+        "   included, not just that their answer fell short.\n"
+        "\n"
         "IMPORTANT NOTES:\n"
         "1. perQuestionScores: Include scores for ALL questions provided in per_question data\n"
         "2. perQuestionFeedback: Array corresponding to perQuestionScores order (same length)\n"
         "   - Each entry must have SPECIFIC, NON-EMPTY feedback based on the candidate's actual response\n"
         "   - Include 2-3 specific strengths (what they did well) - ONLY if they actually attempted the question\n"
-        "   - Include 2-3 specific areas of improvement (what was missing or weak)\n"
+        "   - Include 2-3 specific areas of improvement: what was missing or weak, AND what the candidate\n"
+        "     should have said/done instead (see 'ACTIONABLE GUIDANCE' above)\n"
         "   - Include 3-4 actionable insights with clear titles and detailed descriptions\n"
         "3. Base scores on the computed_metrics and analysis data provided for each question\n"
         "4. Each criterion is scored independently on 0-5 scale\n"
         "5. DO NOT calculate totals, averages, or percentages - code will do this\n"
         "6. overallFeedback.speechFluency: Focus ONLY on speech aspects across all attempts (3-4 actionable steps)\n"
+        "   CRITICAL: if most attempts had zero/near-zero pace or pause scores in the provided data (meaning most\n"
+        "   answers were empty or near-empty), do NOT write confident, specific-sounding pacing/fluency commentary\n"
+        "   like 'good strategic pauses' — those numbers reflect negligible speech, not real delivery. Say plainly\n"
+        "   there wasn't enough spoken content across the interview to assess fluency instead.\n"
         "7. DO NOT return empty arrays - every question MUST have meaningful, specific feedback\n"
         "8. Keep language simple and actionable - avoid jargon like 'WPM'\n"
         "9. These were all oral interviews so your recommendations should not be about things like writing code\n"
@@ -558,15 +610,14 @@ async def synthesize_summary_sections_lite(
     Drive the LLM to create the restructured summary report (Lite) from per-question analyses.
     Returns: (summary_json, error, latency_ms, model)
     """
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "LLM LITE summary synthesis START total_questions=%s input_count=%s max_questions=%s model=%s",
         total_questions,
         len(per_question_inputs),
         max_questions,
-        settings.OPENAI_MODEL,
+        model,
     )
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
     if not api_key:
         # No key: return empty structures; caller can fallback to heuristic
         return {}, None, None, model
@@ -619,16 +670,47 @@ async def synthesize_summary_sections_lite(
         "   - DO NOT hallucinate feedback about content that wasn't provided\n"
         "   - DO NOT give positive feedback if there was no real attempt at answering\n"
         "\n"
+        "CRITICAL - PROPORTIONAL FEEDBACK FOR BRIEF ANSWERS:\n"
+        "⚠️  If the candidate DID give a real, on-topic answer but it was very brief or unelaborated (roughly 10-20\n"
+        "   words, more than a non-answer but far short of a full response), your feedback must say so explicitly:\n"
+        "   - Do NOT default to generic developmental coaching (e.g. 'develop a structured routine', 'add more\n"
+        "     examples') as if a fuller answer had been given — that reads as templated and ignores what was\n"
+        "     actually said\n"
+        "   - Instead, name the brevity directly, e.g. 'Your answer was very brief and didn't elaborate on X' or\n"
+        "     'You gave a one-line response — try expanding with specific detail next time'\n"
+        "   - Only give the standard full-length coaching feedback (structure, depth, examples) when the answer\n"
+        "     was actually long/substantial enough to have those qualities assessed\n"
+        "\n"
+        "CRITICAL - ACTIONABLE GUIDANCE FOR WRONG OR WEAK ANSWERS:\n"
+        "⚠️  Whenever an answer is incorrect, incomplete, or off-target (this includes answers scored low on\n"
+        "   accuracy/depth/relevance, not just brief ones), areasOfImprovement must go beyond naming what was\n"
+        "   wrong — it must also say what the candidate should have said or done instead:\n"
+        "   - Do not stop at a diagnosis like 'lacked specific examples' or 'was factually incorrect' — follow it\n"
+        "     with the concrete fix, e.g. 'lacked specific examples — you could have mentioned a project where you\n"
+        "     used X' or 'was factually incorrect — closures actually retain access to their enclosing scope, not\n"
+        "     the global scope'\n"
+        "   - The candidate should be able to read areasOfImprovement and understand exactly what a stronger\n"
+        "     answer would have included, not just that their answer fell short\n"
+        "   - Keep it to one or two concise sentences — this is still meant to be scannable, not an essay\n"
+        "\n"
         "IMPORTANT NOTES:\n"
         "1. perQuestionScores: Include scores for ALL questions provided in per_question data\n"
         "2. perQuestionFeedback: Array corresponding to perQuestionScores order (same length)\n"
         "   - Each entry must have SPECIFIC, NON-EMPTY feedback based on the candidate's actual response\n"
         "   - strengths: A SINGLE concise sentence summarizing what they did well (or 'None identified' if no answer).\n"
-        "   - areasOfImprovement: A SINGLE concise sentence summarizing what was missing or weak.\n"
+        "   - areasOfImprovement: What was missing or weak, AND what the candidate should have said/done instead\n"
+        "     (see 'ACTIONABLE GUIDANCE' above) — a diagnosis alone is not sufficient.\n"
         "3. Base scores on the computed_metrics and analysis data provided for each question\n"
         "4. Each criterion is scored independently on 0-5 scale\n"
         "5. DO NOT calculate totals, averages, or percentages - code will do this\n"
         "6. speechFluencyFeedback: Focus ONLY on speech aspects across all attempts. ratingEmoji must be EXACTLY one of: 'Excellent', 'Good', 'Average', 'Needs-Improvement', 'Poor'\n"
+        "   CRITICAL: speechFluencyFeedback is about the OVERALL interview, not one lucky question — if most\n"
+        "   attempts had zero/near-zero pace or pause scores in the provided data (meaning most answers were\n"
+        "   empty or near-empty), do NOT write confident, specific-sounding pacing/fluency commentary like\n"
+        "   'good strategic pauses' or 'pacing is often too slow' — those numbers reflect negligible speech, not\n"
+        "   real delivery, so instead say plainly that there wasn't enough spoken content across the interview to\n"
+        "   assess fluency, and ratingEmoji/ratingTitle should reflect that (e.g. 'Needs-Improvement'), not a\n"
+        "   plausible-sounding average rating.\n"
         "7. DO NOT return empty arrays - every question MUST have meaningful, specific feedback\n"
         "8. Keep language simple and actionable - avoid jargon like 'WPM'\n"
         "9. These were all oral interviews so your recommendations should not be about things like writing code\n"
@@ -636,21 +718,334 @@ async def synthesize_summary_sections_lite(
         "11. finalTip: A concluding tip for the candidate\n"
         "12. NEVER provide positive feedback if the candidate said 'I don't know' or gave a non-answer"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    )
+    "You are an expert technical interview evaluator and coach for a {track} interview.\n"
+    "Your job is NOT merely to score the candidate. Your primary goal is to turn the candidate's "
+    "actual spoken response into accurate, specific, evidence-based, and educational feedback that "
+    "helps the candidate understand exactly what they need to improve.\n\n"
 
+    "============================================================\n"
+    "CORE EVALUATION PRINCIPLE\n"
+    "============================================================\n"
+    "Evaluate what the candidate ACTUALLY said. Do not invent technical knowledge, examples, "
+    "strengths, mistakes, or explanations that are not supported by the candidate's response.\n\n"
+
+    "For every question, mentally follow this evaluation process:\n"
+    "1. Understand what the question is testing.\n"
+    "2. Identify the key technical concepts a strong answer should contain.\n"
+    "3. Identify the technical claims and concepts actually present in the candidate's response.\n"
+    "4. Compare the candidate's response with the concepts required by the question.\n"
+    "5. Identify what was correct, partially correct, incorrect, missing, or insufficiently explained.\n"
+    "6. Convert those findings into specific and actionable coaching feedback.\n\n"
+
+    "Do NOT simply summarize the candidate's response. The feedback must explain what the candidate "
+    "should understand, explain, or practice to give a stronger answer next time.\n\n"
+
+    "============================================================\n"
+    "RESPONSE CLASSIFICATION\n"
+    "============================================================\n"
+    "Do NOT treat every short or uncertain response as 'unattempted'.\n\n"
+
+    "A. SUBSTANTIVE ANSWER:\n"
+    "The candidate provides meaningful technical content that can be evaluated. "
+    "Evaluate the technical accuracy, depth, relevance, examples, terminology, and speech normally.\n\n"
+
+    "B. PARTIAL OR UNCERTAIN ANSWER:\n"
+    "The candidate provides some technical information but is incomplete, uncertain, or says things "
+    "such as 'I think', 'I'm not sure', or 'I don't know much about this'. "
+    "Evaluate the knowledge that is actually demonstrated. Clearly identify what is correct and what "
+    "technical concepts or depth are missing.\n\n"
+
+    "C. KNOWLEDGE-GAP RESPONSE:\n"
+    "If the candidate says things such as 'I don't know', 'I am not sure', or indicates that they "
+    "do not know the topic, DO NOT label the response as 'Unattempted' or simply say 'Question not answered'. "
+    "Treat this as evidence of a knowledge gap.\n"
+    "Do not invent strengths or technical content that was not provided. Instead, explain what important "
+    "concepts the candidate should learn in order to answer this question in a future interview.\n"
+    "Knowledge scores may be low because the candidate did not demonstrate the required knowledge, "
+    "but the feedback must still be educational and useful.\n\n"
+
+    "D. NO USABLE RESPONSE:\n"
+    "Only treat a response as not evaluable when there is genuinely no usable candidate response, "
+    "such as an empty transcription, silence, unintelligible transcription, or an explicit 'pass'/'skip'.\n"
+    "Do not fabricate technical feedback when there is no content to evaluate.\n\n"
+
+    "IMPORTANT:\n"
+    "The existence of a transcription alone does not prove technical knowledge. "
+    "However, a transcription containing 'I don't know' is still a meaningful response and should be "
+    "handled as a knowledge gap rather than incorrectly described as an unattempted interview question.\n\n"
+
+    "============================================================\n"
+    "TECHNICAL FEEDBACK REQUIREMENTS\n"
+    "============================================================\n"
+    "For every question, feedback must be grounded in the actual candidate response.\n\n"
+
+    "STRENGTHS:\n"
+    "- Mention specific technical concepts, facts, reasoning, examples, or terminology that the candidate "
+    "actually demonstrated correctly.\n"
+    "- Do not write generic praise such as 'Good answer', 'Good understanding', or 'You explained it well'.\n"
+    "- If the candidate did not demonstrate any meaningful technical strength, do NOT invent one. "
+    "You may state that no specific technical strength could be established from the response.\n"
+    "- For a knowledge-gap response such as 'I don't know', do not manufacture technical strengths.\n\n"
+
+    "AREAS OF IMPROVEMENT:\n"
+    "- Identify the exact technical gap, incorrect assumption, missing concept, weak explanation, or "
+    "lack of depth found in the response.\n"
+    "- Explain what the candidate should have explained or understood.\n"
+    "- Where appropriate, explain the correct technical concept briefly so the feedback teaches the candidate.\n"
+    "- Connect the weakness to a concrete learning or practice action.\n"
+    "- Avoid vague statements such as 'improve your technical knowledge', 'add more detail', "
+    "'practice more', or 'work on your concepts' unless the feedback immediately specifies WHICH concepts "
+    "and HOW to improve them.\n\n"
+
+    "A strong improvement statement should answer:\n"
+    "WHAT was missing or incorrect?\n"
+    "WHY is it important?\n"
+    "WHAT should the candidate learn or practice?\n\n"
+
+    "Example of BAD feedback:\n"
+    "'You need to improve your knowledge of JavaScript.'\n\n"
+
+    "Example of GOOD feedback:\n"
+    "'Your response did not explain how the JavaScript event loop coordinates the call stack, "
+    "task queue, and microtask queue. You should revise how synchronous code, Promises, and callbacks "
+    "are scheduled, and practice explaining the execution order with a simple example.'\n\n"
+
+    "============================================================\n"
+    "ANTI-HALLUCINATION RULES\n"
+    "============================================================\n"
+    "1. Never invent something the candidate said.\n"
+    "2. Never claim that the candidate mentioned a concept unless it appears in the provided response.\n"
+    "3. Never invent examples supposedly given by the candidate.\n"
+    "4. Never assume that the candidate understands a concept merely because the question belongs to "
+    "their technical track.\n"
+    "5. Never infer technical knowledge from speech metrics such as fluency, pacing, pauses, grammar, "
+    "or communication scores.\n"
+    "6. Never use metadata, domain labels, or precomputed speech scores as evidence that the candidate "
+    "knows a technical concept.\n"
+    "7. If the response does not provide enough evidence to evaluate a criterion, score conservatively "
+    "rather than inventing evidence.\n\n"
+
+    "============================================================\n"
+    "SCORING RULES\n"
+    "============================================================\n"
+    "Score each criterion independently from 0 to 5.\n\n"
+
+    "KNOWLEDGE:\n"
+    "- accuracy: How factually correct are the technical claims made by the candidate?\n"
+    "- depth: How thoroughly does the candidate explain the concept?\n"
+    "- relevance: How directly does the response answer the question?\n"
+    "- examples: How useful and technically appropriate are the examples provided by the candidate?\n"
+    "- terminology: How correctly does the candidate use relevant technical terms?\n\n"
+
+    "SPEECH:\n"
+    "- fluency: Smoothness of spoken delivery and unnecessary hesitation/filler usage.\n"
+    "- structure: Logical organization and clarity of the spoken answer.\n"
+    "- pacing: Whether the speaking speed is appropriate and understandable.\n"
+    "- grammar: Sentence construction and language clarity.\n\n"
+
+    "IMPORTANT SCORING PRIORITY:\n"
+    "For KNOWLEDGE scores, prioritize the candidate's actual technical response and the requirements "
+    "of the question. Do not let unrelated precomputed scores override clear evidence in the response.\n"
+    "For SPEECH scores, use the provided speech/communication analysis and the observable characteristics "
+    "of the candidate's spoken response.\n\n"
+
+    "A candidate saying 'I don't know' should not receive fabricated technical credit. "
+    "However, their feedback must explain what they should learn rather than simply saying "
+    "'Question not answered'.\n\n"
+
+    "============================================================\n"
+    "SPEECH FEEDBACK\n"
+    "============================================================\n"
+    "speechFluencyFeedback must focus ONLY on spoken communication.\n"
+    "Do not discuss technical knowledge inside speechFluencyFeedback.\n"
+    "Discuss patterns such as hesitation, sentence structure, clarity, pacing, fillers, or organization "
+    "only when supported by the provided speech analysis.\n\n"
+
+    "============================================================\n"
+    "OUTPUT QUALITY REQUIREMENTS\n"
+    "============================================================\n"
+    "Do not produce generic one-sentence feedback.\n"
+    "For each question, provide useful and specific feedback in 2-3 sentences where enough evidence exists.\n"
+    "The number of sentences is less important than the quality and specificity of the information.\n\n"
+
+    "Each per-question 'strengths' response should explain concrete evidence of what the candidate did well, "
+    "not generic praise.\n\n"
+
+    "Each per-question 'areasOfImprovement' response should identify concrete technical gaps and explain "
+    "what the candidate should learn or practice.\n\n"
+
+    "If the candidate gave a knowledge-gap response such as 'I don't know', the improvement feedback should "
+    "teach the candidate the key concepts required to answer the question rather than merely stating that "
+    "they did not answer it.\n\n"
+
+    "Do not use jargon that is unnecessary for the candidate. Keep explanations technically accurate but "
+    "easy to understand.\n\n"
+
+    "These are oral technical interviews. Recommendations should focus on verbal explanation, technical "
+    "understanding, interview communication, and spoken reasoning rather than writing code unless the "
+    "question itself specifically requires code or syntax knowledge.\n\n"
+
+    "============================================================\n"
+    "STRICT JSON SCHEMA\n"
+    "============================================================\n"
+    "{\n"
+    "  \"perQuestionScores\": [\n"
+    "    {\n"
+    "      \"questionId\": int,\n"
+    "      \"knowledgeScores\": {\n"
+    "        \"accuracy\": int(0..5),\n"
+    "        \"depth\": int(0..5),\n"
+    "        \"relevance\": int(0..5),\n"
+    "        \"examples\": int(0..5),\n"
+    "        \"terminology\": int(0..5)\n"
+    "      },\n"
+    "      \"speechScores\": {\n"
+    "        \"fluency\": int(0..5),\n"
+    "        \"structure\": int(0..5),\n"
+    "        \"pacing\": int(0..5),\n"
+    "        \"grammar\": int(0..5)\n"
+    "      }\n"
+    "    }\n"
+    "  ],\n"
+    "  \"perQuestionFeedback\": [\n"
+    "    {\n"
+    "      \"strengths\": string,\n"
+    "      \"areasOfImprovement\": string\n"
+    "    }\n"
+    "  ],\n"
+    "  \"recommendedPractice\": {\n"
+    "    \"title\": string,\n"
+    "    \"description\": string\n"
+    "  },\n"
+    "  \"speechFluencyFeedback\": {\n"
+    "    \"strengths\": string,\n"
+    "    \"areasOfImprovement\": string,\n"
+    "    \"ratingEmoji\": string,\n"
+    "    \"ratingTitle\": string,\n"
+    "    \"ratingDescription\": string\n"
+    "  },\n"
+    "  \"nextSteps\": [\n"
+    "    { \"title\": string }\n"
+    "  ],\n"
+    "  \"finalTip\": {\n"
+    "    \"title\": string,\n"
+    "    \"description\": string\n"
+    "  }\n"
+    "}\n\n"
+
+    "Additional requirements:\n"
+    "1. Include one perQuestionScores entry for every question provided in per_question.\n"
+    "2. Keep perQuestionFeedback in exactly the same question order as perQuestionScores.\n"
+    "3. Do not calculate totals, averages, or percentages; the backend handles those calculations.\n"
+    "4. Do not return empty arrays when the corresponding questions or feedback are available.\n"
+    "5. nextSteps should contain 2-3 practical immediate actions for the candidate.\n"
+    "6. recommendedPractice should describe a concrete interview-oriented practice activity based on "
+    "the weaknesses observed.\n"
+    "7. finalTip should be concise but genuinely useful.\n"
+    "8. ratingEmoji must be EXACTLY one of: 'Excellent', 'Good', 'Average', 'Needs-Improvement', 'Poor'.\n"
+    "9. Never fabricate technical strengths or weaknesses.\n"
+    "10. Never replace specific technical feedback with generic statements.\n"
+    "============================================================"
+    )
+    sys_prompt = sys_prompt.replace("{track}", interview_track or "Technical Role")
     user_content = {
-        "per_question": per_question_inputs,
-        "computed_metrics": computed_metrics,
-        "total_questions": total_questions,
-        "guidelines": [
-            "Base all numeric scores on provided computed_metrics and per-question analyses",
-            "Focus speechFluencyFeedback ONLY on speech aspects, not knowledge",
-            "Provide specific, actionable feedback grounded in observed patterns",
-            "Use simple language; avoid jargon like 'WPM' or overly technical terms",
-            "Connect improvement suggestions to specific weaknesses observed in analyses",
-            "For per-question feedback, provide ONLY single-sentence summaries for strengths and improvements"
-        ],
+    "per_question": per_question_inputs,
+    "computed_metrics": computed_metrics,
+    "total_questions": total_questions,
+    "guidelines": [
+        "Use the candidate's actual transcription as the primary evidence for knowledge evaluation.",
+        "Evaluate the question by comparing the candidate's demonstrated concepts against the concepts required by the question.",
+        "Do not treat 'I don't know' or 'I'm not sure' as an unattempted response; treat it as a knowledge gap.",
+        "Only treat empty, silent, unintelligible, pass, or skip responses as having no usable answer.",
+        "Never invent technical knowledge, strengths, examples, or mistakes.",
+        "For each question, identify specific technical concepts the candidate got right, missed, misunderstood, or failed to explain.",
+        "Make areasOfImprovement educational: explain what was missing or incorrect, why it matters, and what the candidate should learn or practice.",
+        "Do not give generic feedback such as 'improve your technical knowledge', 'add more detail', or 'practice more' without naming the exact concept or skill.",
+        "Do not force positive feedback when the candidate did not demonstrate a technical strength.",
+        "Keep knowledge feedback separate from speech feedback.",
+        "Use computed metrics and speech analysis primarily for speech-related evaluation, while using the candidate response as the primary evidence for knowledge.",
+        "Provide 2-3 useful sentences for strengths and areasOfImprovement when sufficient evidence exists.",
+        "Ensure speechFluencyFeedback.ratingEmoji is exactly one of: 'Excellent', 'Good', 'Average', 'Needs-Improvement', 'Poor'.",
+        "Ensure all feedback is specific to the candidate's actual response and the interview question."
+    ],
     }
+    # sys_prompt = (
+    #     "You are an expert technical interview coach. Given per-question analyses (domain, communication, pace, "
+    #     "pause) for interview questions, analyze each question independently and provide scores and feedback.\n\n"
+    #     "Your task: \n"
+    #     "1. Score each attempted question on knowledge and speech criteria (0-5 scale per criterion)\n"
+    #     "2. Provide overall speech fluency feedback across all attempts\n"
+    #     "3. Provide per-question simplified feedback for each attempted question\n"
+    #     "4. Provide a recommended practice exercise\n"
+    #     "5. Provide immediate next steps\n"
+    #     "6. Provide a final tip\n\n"
+    #     "The code will handle: reportId, candidateInfo, question metadata, totals, averages, and percentages.\n\n"
+    #     "Strict JSON schema: {\n"
+    #     "  perQuestionScores: [{ questionId: int, knowledgeScores: { accuracy: int(0..5), depth: int(0..5), relevance: int(0..5), examples: int(0..5), terminology: int(0..5) }, speechScores: { fluency: int(0..5), structure: int(0..5), pacing: int(0..5), grammar: int(0..5) } }],\n"
+    #     "  perQuestionFeedback: [{ strengths: string, areasOfImprovement: string }],\n"
+    #     "  recommendedPractice: { title: string, description: string },\n"
+    #     "  speechFluencyFeedback: { strengths: string, areasOfImprovement: string, ratingEmoji: string, ratingTitle: string, ratingDescription: string },\n"
+    #     "  nextSteps: [{ title: string }],\n"
+    #     "  finalTip: { title: string, description: string }\n"
+    #     "}\n\n"
+    #     "SCORING GUIDELINES:\n"
+    #     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    #     "PER-QUESTION SCORING (0-5 scale for each criterion):\n"
+    #     "\n"
+    #     "Knowledge Criteria:\n"
+    #     "  - accuracy: How correct and factually accurate was the answer?\n"
+    #     "  - depth: How detailed and comprehensive was the explanation?\n"
+    #     "  - relevance: How well did the answer address the question?\n"
+    #     "  - examples: Quality and appropriateness of examples provided\n"
+    #     "  - terminology: Proper use of technical terms and concepts\n"
+    #     "\n"
+    #     "Speech Criteria:\n"
+    #     "  - fluency: Smoothness of speech, minimal hesitations/filler words\n"
+    #     "  - structure: Logical organization and clarity of response\n"
+    #     "  - pacing: Appropriate speech speed (not too fast/slow)\n"
+    #     "  - grammar: Correct sentence structure and language use\n"
+    #     "\n"
+    #     "CRITICAL - DETECTING NON-ANSWERS:\n"
+    #     "⚠️  If the candidate's transcription shows they did NOT provide a real answer, treat it as unattempted:\n"
+    #     "   - Responses like 'I don't know', 'I'm not sure', 'pass', 'skip', or very short non-answers (< 10 words)\n"
+    #     "   - In these cases: Give ALL knowledge scores as 0, keep speech scores reasonable if they spoke\n"
+    #     "   - In feedback strengths: Leave empty or say 'None identified'\n"
+    #     "   - In feedback areasOfImprovement: State 'No substantial answer provided' or 'Question not answered'\n"
+    #     "   - DO NOT hallucinate feedback about content that wasn't provided\n"
+    #     "   - DO NOT give positive feedback if there was no real attempt at answering\n"
+    #     "\n"
+    #     "IMPORTANT NOTES:\n"
+    #     "1. perQuestionScores: Include scores for ALL questions provided in per_question data\n"
+    #     "2. perQuestionFeedback: Array corresponding to perQuestionScores order (same length)\n"
+    #     "   - Each entry must have SPECIFIC, NON-EMPTY feedback based on the candidate's actual response\n"
+    #     "   - strengths: A SINGLE concise sentence summarizing what they did well (or 'None identified' if no answer).\n"
+    #     "   - areasOfImprovement: A SINGLE concise sentence summarizing what was missing or weak.\n"
+    #     "3. Base scores on the computed_metrics and analysis data provided for each question\n"
+    #     "4. Each criterion is scored independently on 0-5 scale\n"
+    #     "5. DO NOT calculate totals, averages, or percentages - code will do this\n"
+    #     "6. speechFluencyFeedback: Focus ONLY on speech aspects across all attempts. ratingEmoji must be EXACTLY one of: 'Excellent', 'Good', 'Average', 'Needs-Improvement', 'Poor'\n"
+    #     "7. DO NOT return empty arrays - every question MUST have meaningful, specific feedback\n"
+    #     "8. Keep language simple and actionable - avoid jargon like 'WPM'\n"
+    #     "9. These were all oral interviews so your recommendations should not be about things like writing code\n"
+    #     "10. nextSteps: Provide 2-3 immediate next steps (titles only)\n"
+    #     "11. finalTip: A concluding tip for the candidate\n"
+    #     "12. NEVER provide positive feedback if the candidate said 'I don't know' or gave a non-answer"
+    #     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    # )
+
+    # user_content = {
+    #     "per_question": per_question_inputs,
+    #     "computed_metrics": computed_metrics,
+    #     "total_questions": total_questions,
+    #     "guidelines": [
+    #         "Base all numeric scores on provided computed_metrics and per-question analyses",
+    #         "Focus speechFluencyFeedback ONLY on speech aspects, not knowledge",
+    #         "Provide specific, actionable feedback grounded in observed patterns",
+    #         "Use simple language; avoid jargon like 'WPM' or overly technical terms",
+    #         "Connect improvement suggestions to specific weaknesses observed in analyses",
+    #         "For per-question feedback, provide ONLY single-sentence summaries for strengths and improvements"
+    #     ],
+    # }
     logger.info(
         "Calling structured_output for LITE summary synthesis "
         "schema=%s input_count=%s computed_metrics_keys=%s",
@@ -761,18 +1156,21 @@ async def structured_output(
     temperature: float = 0,
     max_tokens: int = 2048,
 ) -> tuple[T | None, str | None, int | None, str]:
-    """Call OpenAI asynchronously with JSON response_format and validate against Pydantic model."""
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    """Call the configured LLM provider (OpenAI or DeepSeek, see LLM_PROVIDER)
+    asynchronously with JSON response_format and validate against a Pydantic model."""
+    provider = get_active_llm_provider()
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
-        "[LLM] structured_output START | model=%s | schema=%s | temperature=%s",
+        "[LLM] structured_output START | provider=%s | model=%s | schema=%s | temperature=%s",
+        provider,
         model,
         model_class.__name__,
         temperature,
     )
     if not api_key:
         logger.warning(
-            "[LLM] structured_output SKIPPED | reason=missing_openai_api_key | model=%s | schema=%s",
+            "[LLM] structured_output SKIPPED | reason=missing_%s_api_key | model=%s | schema=%s",
+            provider,
             model,
             model_class.__name__,
         )
@@ -780,25 +1178,28 @@ async def structured_output(
 
     start = time.perf_counter()
     try:
-        client = _get_client()
+        client = get_llm_client()
         if client is None:
             return None, None, None, model
-        # Use Chat Completions for all models; switch token param for newer families
+        # gpt-5/o3/o4/gpt-4.1 require max_completion_tokens instead of max_tokens -
+        # an OpenAI-specific quirk for their newer/reasoning model families. DeepSeek
+        # doesn't have this distinction, so only check it when provider is openai.
         raw = "{}"
-        is_new_family = any(model.lower().startswith(p) for p in ("gpt-5","gpt-4o" "gpt-4.1", "o4", "o3"))
+        is_new_family = provider == "openai" and any(
+            model.lower().startswith(p) for p in ("gpt-5", "gpt-4o", "gpt-4.1", "o4", "o3")
+        )
         token_param_key = "max_completion_tokens" if is_new_family else "max_tokens"
         formatted_system_prompt = system_prompt
         if "json" not in formatted_system_prompt.lower():
             formatted_system_prompt += "\n\nIMPORTANT: Respond strictly in valid JSON format."
         logger.info(
-            "[LLM] OpenAI REQUEST | model=%s | schema=%s | family=%s | token_param=%s",
+            "[LLM] %s REQUEST | model=%s | schema=%s | family=%s | token_param=%s",
+            provider,
             model,
             model_class.__name__,
             "new" if is_new_family else "legacy",
             token_param_key,
         )
-        is_new_family = any(model.lower().startswith(p) for p in ("gpt-5", "gpt-4.1", "o4", "o3"))
-        token_param_key = "max_completion_tokens" if is_new_family else "max_tokens"
         kwargs: dict[str, Any] = {
             "model": model,
             "response_format": {"type": "json_object"},
@@ -811,13 +1212,15 @@ async def structured_output(
         # Only include temperature for older models; new families accept only the default
         if not is_new_family:
             kwargs["temperature"] = temperature
+        kwargs.update(get_provider_completion_kwargs())
         request_start = time.perf_counter()
         resp = await client.chat.completions.create(**kwargs)
         openai_latency_ms = int(
             (time.perf_counter() - request_start) * 1000
         )
         logger.info(
-            "[LLM] OpenAI RESPONSE | model=%s | schema=%s | latency_ms=%s | choices=%s",
+            "[LLM] %s RESPONSE | model=%s | schema=%s | latency_ms=%s | choices=%s",
+            provider,
             model,
             model_class.__name__,
             openai_latency_ms,
@@ -911,7 +1314,8 @@ async def structured_output(
         )
 
         logger.exception(
-            "[LLM] OPENAI/STRUCTURED OUTPUT FAILED | model=%s | schema=%s | latency_ms=%s | exception_type=%s | error=%s",
+            "[LLM] STRUCTURED OUTPUT FAILED | provider=%s | model=%s | schema=%s | latency_ms=%s | exception_type=%s | error=%s",
+            provider,
             model,
             model_class.__name__,
             latency_ms,
@@ -930,8 +1334,7 @@ async def structured_output(
 
 
 async def extract_resume_entities_with_llm(text: str) -> tuple[list[str], float | None, str | None, int | None, str]:
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not text:
         return [], None, None, None, model
 
@@ -974,8 +1377,7 @@ async def extract_resume_entities_v2_with_llm(text: str) -> tuple[dict[str, Any]
 
     Returns (data_dict, error, latency_ms, model). On missing API key or empty text, returns empty dict and no error.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not text:
         return {}, None, None, model
 
@@ -1014,8 +1416,7 @@ async def extract_jd_skills_with_llm(text: str) -> tuple[list[str], str | None]:
     Extract skills (technical, tools, soft skills, domain-specific) from a Job Description.
     Returns (skills_list, error).
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not text:
         return [], "OpenAI API key not configured or empty text provided."
 
@@ -1061,8 +1462,7 @@ async def generate_interview_questions_with_llm(
     Generate interview questions using an LLM given a track and optional context (e.g., resume_text).
     Returns (questions, error, latency_ms, model). On missing API key, returns empty questions and no error.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key:
         return [], None, None, model, None
 
@@ -1070,13 +1470,25 @@ async def generate_interview_questions_with_llm(
     error: str | None = None
     questions: list[str] = []
     structured_items: list[dict[str, Any]] | None = None
+    total = max(1, min(50, count or 3))
 
     sys_prompt = (
-        "You are an expert interviewer. Generate concise, specific interview questions for a candidate. "
-        "Avoid open-ended prompts; ask targeted questions that require concrete answers, but keep in mind to ask deep questions that will take time to answer NOT one sentence or one word answers"
-        "Return ONLY valid JSON with key: 'items' (array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output)."
-        "Understand that this is a verbal interview setting, so questions should STRICTLY be suitable for strictly spoken responses."
-    )
+        "You are an expert technical interviewer generating a set of exactly {count} interview questions for a candidate in the {track} role.\n\n"
+        "STRICT CATEGORY DISTRIBUTION MANDATE:\n"
+        "You MUST generate the questions following this EXACT category mix:\n"
+        "- Tech (core domain technical questions): 2 questions\n"
+        "- Tech Allied (related tools, architecture, databases, or workflow): 2 questions\n"
+        "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n\n"
+        "RULES FOR QUESTION GENERATION:\n"
+        "1. The 'category' field for each item MUST strictly be set to one of: 'tech', 'tech_allied', or 'behavioral'.\n"
+        "2. Ensure questions are suitable for spoken verbal answers (no coding or writing code).\n"
+        "3. Ask deep, targeted technical and situational questions that require thoughtful answers.\n"
+        "4. Return ONLY valid JSON with key 'items' containing array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output."
+    ).format(count=total, track=track)
+        # "You are an expert interviewer. Generate concise, specific interview questions for a candidate. "
+        # "Avoid open-ended prompts; ask targeted questions that require concrete answers, but keep in mind to ask deep questions that will take time to answer NOT one sentence or one word answers"
+        # "Return ONLY valid JSON with key: 'items' (array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output)."
+        # "Understand that this is a verbal interview setting, so questions should STRICTLY be suitable for strictly spoken responses."
     knowledge_reference_context = (influence or {}).get("knowledge_reference_context")
     if knowledge_reference_context:
         sys_prompt += (
@@ -1093,7 +1505,6 @@ async def generate_interview_questions_with_llm(
     # Prepare a sampled syllabus so we don't send the entire topic bank to the LLM
     topics = syllabus_topics or {}
     r = ratio or {"tech": 2, "tech_allied": 2, "behavioral": 1}
-    total = max(1, min(50, count or 3))
     # Normalize ratio to total questions (we use it only as guidance for sampling size)
     r_tech = max(0, r.get("tech", 0))
     r_allied = max(0, r.get("tech_allied", 0))
@@ -1204,8 +1615,7 @@ async def generate_follow_up_question(
     """
     Generate a concise follow-up question using the candidate's recent answer excerpt.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not answer_excerpt:
         return None, "Follow-up generation skipped (missing API key or answer excerpt)", None, model
 
@@ -1244,8 +1654,7 @@ async def generate_question_supplements_with_llm(
     Generate supplemental snippets (diagram or code) for interview questions.
     Returns list of LLMSupplementItem entries and metadata about the call.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not question_payload:
         return [], None, None, model
 
@@ -1341,6 +1750,40 @@ async def generate_question_supplements_with_llm(
     return sanitized, error, latency_ms, model
 
 
+MIN_ANSWER_WORD_COUNT = 3  # below this, treat as no real answer rather than scoring it
+
+
+def _is_near_empty_answer(transcription: str | None) -> bool:
+    """True if the transcription has too few words to be a real attempt."""
+    word_count = len((transcription or "").strip().split())
+    return word_count < MIN_ANSWER_WORD_COUNT
+
+
+def _build_non_answer_analysis(kind: str) -> dict[str, Any]:
+    """
+    Deterministic, zero-cost result for a near-empty answer — skips the LLM
+    entirely so scoring never depends on the model correctly guessing that
+    an (almost) blank transcription deserves a zero, rather than a
+    plausible-looking partial-credit score.
+    """
+    base = {
+        "overall_score": 0,
+        "criteria": {},
+        "summary": "No substantial answer was provided for this question.",
+        "strengths": [],
+        "improvements": ["No substantial answer provided — question not answered."],
+        "suggestions": [],
+        "confidence": 1.0,
+    }
+    if kind == "domain":
+        base["misconceptions"] = {"present": False, "notes": []}
+        base["examples"] = {"present": False, "notes": []}
+    else:
+        base["jargon_use"] = {"score": 0, "notes": []}
+        base["tone_empathy"] = {"score": 0, "notes": []}
+    return base
+
+
 async def analyze_domain_with_llm(
     *,
     user_profile: dict[str, Any],
@@ -1351,14 +1794,16 @@ async def analyze_domain_with_llm(
     Perform domain knowledge analysis using LLM. Returns (analysis_json, error, latency_ms, model).
     Never raises; on missing API key returns empty analysis and no error.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "[LLM DOMAIN] START | model=%s | question_length=%s | transcription_length=%s",
         model,
         len(question_text or ""),
         len(transcription or ""),
     )
+    if _is_near_empty_answer(transcription):
+        logger.info("[LLM DOMAIN] SHORT-CIRCUIT | reason=near_empty_answer")
+        return _build_non_answer_analysis("domain"), None, 0, model
     if not api_key:
         logger.warning(
             "[LLM DOMAIN] SKIPPED | reason=missing_openai_api_key"
@@ -1377,7 +1822,11 @@ async def analyze_domain_with_llm(
         "improvements (string[] of areas to improve), confidence (0-1). "
         "IMPORTANT: Always include both strengths and improvements arrays, even if scores are low. "
         "Strengths should highlight what the candidate did well, even if partial. "
-        "Improvements should provide actionable feedback for growth."
+        "Improvements should provide actionable feedback for growth. "
+        "CRITICAL: If the transcript is a refusal or non-answer (e.g. 'I don't know', 'I'm not sure', 'pass'), or "
+        "doesn't actually attempt to address the question at all, give overall_score 0 and every criteria score 0, "
+        "leave strengths empty, and set improvements to state clearly that no substantial answer was given — do not "
+        "invent partial credit or plausible-sounding feedback for content that wasn't actually said."
     )
     user_content = {
         "user_profile": {k: v for k, v in user_profile.items() if v is not None},
@@ -1454,8 +1903,7 @@ async def analyze_communication_with_llm(
     Perform communication analysis using LLM. Returns (analysis_json, error, latency_ms, model).
     Never raises; on missing API key returns empty analysis and no error.
     """
-    model = settings.OPENAI_MODEL
-    api_key = settings.OPENAI_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "[LLM COMM] START | model=%s | question_length=%s | transcription_length=%s | aux_metrics_keys=%s",
         model,
@@ -1463,6 +1911,9 @@ async def analyze_communication_with_llm(
         len(transcription or ""),
         len(aux_metrics or ""),
     )
+    if _is_near_empty_answer(transcription):
+        logger.info("[LLM COMM] SHORT-CIRCUIT | reason=near_empty_answer")
+        return _build_non_answer_analysis("communication"), None, 0, model
     if not api_key:
         logger.warning(
             "[LLM COMM] SKIPPED | reason=missing_openai_api_key"
@@ -1481,7 +1932,11 @@ async def analyze_communication_with_llm(
         "improvements (string[] of areas to improve), suggestions (string[] for backward compatibility), confidence (0-1). "
         "Always include both strengths and improvements arrays, even if scores are low. "
         "Strengths should highlight what the candidate did well. Improvements should identify specific areas to work on. "
-        "Heavily penalize short answers that dont have enough nuance and detail"
+        "Heavily penalize short answers that dont have enough nuance and detail. "
+        "CRITICAL: If the transcript is a refusal or non-answer (e.g. 'I don't know', 'I'm not sure', 'pass'), or "
+        "doesn't actually attempt to address the question at all, give overall_score 0 and every criteria score 0, "
+        "leave strengths empty, and set improvements to state clearly that no substantial answer was given — do not "
+        "invent partial credit or plausible-sounding feedback for content that wasn't actually said."
     )
     payload = {
         "user_profile": {k: v for k, v in user_profile.items() if v is not None},

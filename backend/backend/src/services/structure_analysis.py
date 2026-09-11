@@ -50,7 +50,9 @@ async def analyze_structure_answer(
     # Determine framework from parameter or hint
     if not framework:
         framework = "C-T-E-T-D"  # Default
-        if "STAR" in structure_hint.upper():
+        if "DIRECT" in structure_hint.upper():
+            framework = "DIRECT"
+        elif "STAR" in structure_hint.upper():
             framework = "STAR"
         elif "C-T-E-T-D" in structure_hint.upper():
             framework = "C-T-E-T-D"
@@ -92,12 +94,17 @@ For GCDIO:
 - Implementation: How it was executed
 - Outcome: Results and impact
 
+For DIRECT (purely factual/definitional questions with no structured framework):
+- Answer: A single section — the candidate's direct explanation of the concept
+
 The user submitted answers section-by-section. Each section is marked with [Section Name].{sections_info}
 
 Analyze each section that was submitted:
 - "good": Well-developed, clear, specific, addresses the section requirements
 - "partial": Present but underdeveloped, rushed, or incomplete
 - "missing": Not submitted or not addressed
+
+If the framework is DIRECT, grade the single "Answer" section only for correctness and clarity of the explanation — do NOT penalize it for lacking structural elements (context, trade-offs, results, etc.) that a factual/definitional question was never expected to have.
 
 For submitted sections, use their actual recorded time. For missing sections, estimate 0.
 Provide a key insight about what the candidate did well and what could be improved.
