@@ -1,5 +1,6 @@
 """TTS (Text-to-Speech) routes – powered by the ElevenLabs API."""
 
+import hashlib
 import logging
 
 import fastapi
@@ -7,10 +8,36 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from src.api.dependencies.auth import get_current_user
+from src.api.dependencies.rate_limit import rate_limiter
+from src.config.manager import settings
+from src.repository.redis_client import async_redis
 from src.services.elevenlabs_tts import generate_tts_audio
 
 router = fastapi.APIRouter(prefix="/tts", tags=["tts"])
 logger = logging.getLogger(__name__)
+
+
+def _tts_cache_key(text: str, voice_id: str | None) -> str:
+    digest = hashlib.sha256(f"{voice_id or settings.ELEVENLABS_VOICE_ID}:{text}".encode()).hexdigest()
+    return f"tts_cache:{digest}"
+
+
+async def _get_cached_audio(cache_key: str) -> bytes | None:
+    """Interview questions repeat heavily across users, so caching by
+    (text, voice_id) cuts both ElevenLabs cost and latency on hits. Best
+    effort - any Redis error is treated as a cache miss, never an error."""
+    try:
+        return await async_redis.client.get(cache_key)
+    except Exception as exc:
+        logger.warning("TTS cache read failed, treating as miss: %s", exc)
+        return None
+
+
+async def _set_cached_audio(cache_key: str, audio_bytes: bytes) -> None:
+    try:
+        await async_redis.client.set(cache_key, audio_bytes, ex=settings.TTS_CACHE_TTL_SECONDS)
+    except Exception as exc:
+        logger.warning("TTS cache write failed (non-fatal): %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -65,11 +92,32 @@ class TTSRequest(BaseModel):
 async def convert_text_to_speech(
     payload: TTSRequest,
     current_user=fastapi.Depends(get_current_user),
+    _rate_limit=fastapi.Depends(
+        rate_limiter(key_prefix="tts", limit=settings.RATE_LIMIT_TTS_PER_MINUTE, window_seconds=60)
+    ),
 ) -> Response:
     """
     Converts ``payload.text`` to speech using ElevenLabs and streams back an
-    MP3 file directly.
+    MP3 file directly. Serves from a Redis cache when the same (text, voice_id)
+    pair has been synthesised before.
     """
+    cache_key = _tts_cache_key(payload.text, payload.voice_id)
+    cached_audio = await _get_cached_audio(cache_key)
+    if cached_audio:
+        logger.info(
+            "TTS cache hit | User=%s | Chars=%d",
+            getattr(current_user, "id", None),
+            len(payload.text),
+        )
+        return Response(
+            content=cached_audio,
+            media_type="audio/mpeg",
+            headers={
+                "X-TTS-Status": "cached",
+                "Content-Disposition": 'attachment; filename="tts_output.mp3"',
+            },
+        )
+
     try:
         audio_bytes, error, latency_ms = await generate_tts_audio(
            text=payload.text,
@@ -103,6 +151,8 @@ async def convert_text_to_speech(
             len(payload.text),
             latency_ms or 0,
         )
+
+        await _set_cached_audio(cache_key, audio_bytes)
 
         return Response(
             content=audio_bytes,

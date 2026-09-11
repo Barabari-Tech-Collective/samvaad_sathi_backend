@@ -13,29 +13,69 @@ logger = logging.getLogger(__name__)
 # Lazy client holder; create only when needed and when API key is present
 _client: AsyncOpenAI | None = None
 
-def _get_client() -> AsyncOpenAI | None:
+
+def get_active_llm_provider() -> str:
+    provider = (settings.LLM_PROVIDER or "openai").strip().lower()
+    return provider if provider in ("openai", "deepseek") else "openai"
+
+
+def get_active_llm_model_and_key() -> tuple[str, str]:
+    """Model string and API key for whichever provider LLM_PROVIDER selects.
+    DeepSeek's API is OpenAI-ChatCompletions-compatible, so the same
+    AsyncOpenAI client class works for both - only base_url/api_key/model
+    differ (see get_llm_client())."""
+    if get_active_llm_provider() == "deepseek":
+        return settings.DEEPSEEK_MODEL, settings.DEEPSEEK_API_KEY
+    return settings.OPENAI_MODEL, settings.OPENAI_API_KEY
+
+
+def get_llm_client() -> AsyncOpenAI | None:
     global _client
     if _client is not None:
         return _client
-    api_key = settings.LLM_API_KEY
+
+    provider = get_active_llm_provider()
+    _, api_key = get_active_llm_model_and_key()
     if not api_key:
-        logger.error("Neither DEEPSEEK_API_KEY nor OPENAI_API_KEY is set; LLM client cannot be initialized")
+        logger.error(
+            "%s_API_KEY is missing; LLM client cannot be initialized",
+            provider.upper(),
+        )
         return None
-    
+
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": float(getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0)),
+        "max_retries": 3,
+    }
+    if provider == "deepseek":
+        client_kwargs["base_url"] = settings.DEEPSEEK_BASE_URL
+
     logger.info(
-        "Initializing OpenAI AsyncClient model=%s timeout=%s max_retries=3",
-        getattr(settings, "LLM_MODEL", None),
-        getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0),
+        "Initializing %s AsyncClient model=%s timeout=%s max_retries=3",
+        provider,
+        settings.DEEPSEEK_MODEL if provider == "deepseek" else settings.OPENAI_MODEL,
+        client_kwargs["timeout"],
     )
-    _client = AsyncOpenAI(
-        api_key=api_key,
-        base_url=settings.LLM_API_BASE,
-        timeout=float(getattr(settings, "OPENAI_TIMEOUT_SECONDS", 60.0)),
-        max_retries=3,
-    )
-    logger.info("OpenAI AsyncClient initialized successfully")
+    _client = AsyncOpenAI(**client_kwargs)
+    logger.info("%s AsyncClient initialized successfully", provider)
 
     return _client
+
+
+def get_provider_completion_kwargs() -> dict[str, Any]:
+    """Extra chat.completions.create() kwargs required for the active
+    provider, beyond model/messages/response_format. DeepSeek V4 defaults to
+    an extended "Thinking" mode whose reasoning tokens consume the SAME
+    max_tokens budget as the final answer - verified live: a plain
+    extraction call spent its entire 2048-token budget on internal
+    reasoning and returned empty content (finish_reason=length) in 16s;
+    disabling it dropped that to 1.1s with a correct answer in 55 tokens.
+    Must be applied to every DeepSeek call, not just ones that seem slow -
+    thinking mode also silently rejects temperature/top_p/penalty params."""
+    if get_active_llm_provider() == "deepseek":
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {}
 
 
 class ResumeEntitiesLLM(pydantic.BaseModel):
@@ -326,18 +366,17 @@ async def synthesize_summary_sections(
     Drive the LLM to create the restructured summary report from per-question analyses.
     Returns: (summary_json, error, latency_ms, model)
     """
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "LLM summary synthesis START total_questions=%s input_count=%s max_questions=%s model=%s",
         total_questions,
         len(per_question_inputs),
         max_questions,
-        settings.LLM_MODEL,
+        model,
     )
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
     if not api_key:
         logger.error(
-            "LLM summary synthesis ABORTED: no LLM API key configured"
+            "LLM summary synthesis ABORTED: %s_API_KEY missing", get_active_llm_provider().upper()
         )
         # No key: return empty structures; caller can fallback to heuristic
         return {}, None, None, model
@@ -571,15 +610,14 @@ async def synthesize_summary_sections_lite(
     Drive the LLM to create the restructured summary report (Lite) from per-question analyses.
     Returns: (summary_json, error, latency_ms, model)
     """
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "LLM LITE summary synthesis START total_questions=%s input_count=%s max_questions=%s model=%s",
         total_questions,
         len(per_question_inputs),
         max_questions,
-        settings.LLM_MODEL,
+        model,
     )
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
     if not api_key:
         # No key: return empty structures; caller can fallback to heuristic
         return {}, None, None, model
@@ -1118,18 +1156,21 @@ async def structured_output(
     temperature: float = 0,
     max_tokens: int = 2048,
 ) -> tuple[T | None, str | None, int | None, str]:
-    """Call OpenAI asynchronously with JSON response_format and validate against Pydantic model."""
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
+    """Call the configured LLM provider (OpenAI or DeepSeek, see LLM_PROVIDER)
+    asynchronously with JSON response_format and validate against a Pydantic model."""
+    provider = get_active_llm_provider()
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
-        "[LLM] structured_output START | model=%s | schema=%s | temperature=%s",
+        "[LLM] structured_output START | provider=%s | model=%s | schema=%s | temperature=%s",
+        provider,
         model,
         model_class.__name__,
         temperature,
     )
     if not api_key:
         logger.warning(
-            "[LLM] structured_output SKIPPED | reason=missing_openai_api_key | model=%s | schema=%s",
+            "[LLM] structured_output SKIPPED | reason=missing_%s_api_key | model=%s | schema=%s",
+            provider,
             model,
             model_class.__name__,
         )
@@ -1137,25 +1178,28 @@ async def structured_output(
 
     start = time.perf_counter()
     try:
-        client = _get_client()
+        client = get_llm_client()
         if client is None:
             return None, None, None, model
-        # Use Chat Completions for all models; switch token param for newer families
+        # gpt-5/o3/o4/gpt-4.1 require max_completion_tokens instead of max_tokens -
+        # an OpenAI-specific quirk for their newer/reasoning model families. DeepSeek
+        # doesn't have this distinction, so only check it when provider is openai.
         raw = "{}"
-        is_new_family = any(model.lower().startswith(p) for p in ("gpt-5","gpt-4o" "gpt-4.1", "o4", "o3"))
+        is_new_family = provider == "openai" and any(
+            model.lower().startswith(p) for p in ("gpt-5", "gpt-4o", "gpt-4.1", "o4", "o3")
+        )
         token_param_key = "max_completion_tokens" if is_new_family else "max_tokens"
         formatted_system_prompt = system_prompt
         if "json" not in formatted_system_prompt.lower():
             formatted_system_prompt += "\n\nIMPORTANT: Respond strictly in valid JSON format."
         logger.info(
-            "[LLM] OpenAI REQUEST | model=%s | schema=%s | family=%s | token_param=%s",
+            "[LLM] %s REQUEST | model=%s | schema=%s | family=%s | token_param=%s",
+            provider,
             model,
             model_class.__name__,
             "new" if is_new_family else "legacy",
             token_param_key,
         )
-        is_new_family = any(model.lower().startswith(p) for p in ("gpt-5", "gpt-4.1", "o4", "o3"))
-        token_param_key = "max_completion_tokens" if is_new_family else "max_tokens"
         kwargs: dict[str, Any] = {
             "model": model,
             "response_format": {"type": "json_object"},
@@ -1168,13 +1212,15 @@ async def structured_output(
         # Only include temperature for older models; new families accept only the default
         if not is_new_family:
             kwargs["temperature"] = temperature
+        kwargs.update(get_provider_completion_kwargs())
         request_start = time.perf_counter()
         resp = await client.chat.completions.create(**kwargs)
         openai_latency_ms = int(
             (time.perf_counter() - request_start) * 1000
         )
         logger.info(
-            "[LLM] OpenAI RESPONSE | model=%s | schema=%s | latency_ms=%s | choices=%s",
+            "[LLM] %s RESPONSE | model=%s | schema=%s | latency_ms=%s | choices=%s",
+            provider,
             model,
             model_class.__name__,
             openai_latency_ms,
@@ -1268,7 +1314,8 @@ async def structured_output(
         )
 
         logger.exception(
-            "[LLM] OPENAI/STRUCTURED OUTPUT FAILED | model=%s | schema=%s | latency_ms=%s | exception_type=%s | error=%s",
+            "[LLM] STRUCTURED OUTPUT FAILED | provider=%s | model=%s | schema=%s | latency_ms=%s | exception_type=%s | error=%s",
+            provider,
             model,
             model_class.__name__,
             latency_ms,
@@ -1287,8 +1334,7 @@ async def structured_output(
 
 
 async def extract_resume_entities_with_llm(text: str) -> tuple[list[str], float | None, str | None, int | None, str]:
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not text:
         return [], None, None, None, model
 
@@ -1331,8 +1377,7 @@ async def extract_resume_entities_v2_with_llm(text: str) -> tuple[dict[str, Any]
 
     Returns (data_dict, error, latency_ms, model). On missing API key or empty text, returns empty dict and no error.
     """
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not text:
         return {}, None, None, model
 
@@ -1371,8 +1416,7 @@ async def extract_jd_skills_with_llm(text: str) -> tuple[list[str], str | None]:
     Extract skills (technical, tools, soft skills, domain-specific) from a Job Description.
     Returns (skills_list, error).
     """
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not text:
         return [], "OpenAI API key not configured or empty text provided."
 
@@ -1418,8 +1462,7 @@ async def generate_interview_questions_with_llm(
     Generate interview questions using an LLM given a track and optional context (e.g., resume_text).
     Returns (questions, error, latency_ms, model). On missing API key, returns empty questions and no error.
     """
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key:
         return [], None, None, model, None
 
@@ -1572,8 +1615,7 @@ async def generate_follow_up_question(
     """
     Generate a concise follow-up question using the candidate's recent answer excerpt.
     """
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not answer_excerpt:
         return None, "Follow-up generation skipped (missing API key or answer excerpt)", None, model
 
@@ -1612,8 +1654,7 @@ async def generate_question_supplements_with_llm(
     Generate supplemental snippets (diagram or code) for interview questions.
     Returns list of LLMSupplementItem entries and metadata about the call.
     """
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     if not api_key or not question_payload:
         return [], None, None, model
 
@@ -1753,8 +1794,7 @@ async def analyze_domain_with_llm(
     Perform domain knowledge analysis using LLM. Returns (analysis_json, error, latency_ms, model).
     Never raises; on missing API key returns empty analysis and no error.
     """
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "[LLM DOMAIN] START | model=%s | question_length=%s | transcription_length=%s",
         model,
@@ -1863,8 +1903,7 @@ async def analyze_communication_with_llm(
     Perform communication analysis using LLM. Returns (analysis_json, error, latency_ms, model).
     Never raises; on missing API key returns empty analysis and no error.
     """
-    model = settings.LLM_MODEL
-    api_key = settings.LLM_API_KEY
+    model, api_key = get_active_llm_model_and_key()
     logger.info(
         "[LLM COMM] START | model=%s | question_length=%s | transcription_length=%s | aux_metrics_keys=%s",
         model,

@@ -30,7 +30,7 @@ async def generate_tts_audio(
         return b"", "ElevenLabs API key not configured", 0
 
     try:
-        from elevenlabs.client import ElevenLabs  # lazy import
+        from elevenlabs.client import AsyncElevenLabs  # lazy import
     except ImportError:
         logger.error("elevenlabs package is not installed – run: pip install elevenlabs")
         return b"", "elevenlabs package not installed", 0
@@ -38,17 +38,20 @@ async def generate_tts_audio(
     resolved_voice_id = voice_id or settings.ELEVENLABS_VOICE_ID
 
     try:
-        client = ElevenLabs(api_key=api_key)
+        client = AsyncElevenLabs(api_key=api_key)
 
         start = time.time()
-        # convert() returns a generator of audio chunks
+        # convert() returns an async generator of audio chunks. Using the sync
+        # ElevenLabs client here would block the whole event loop for the
+        # duration of the API call on every single TTS request.
         audio_generator = client.text_to_speech.convert(
             text=text,
             voice_id=resolved_voice_id,
             model_id="eleven_multilingual_v2",
             output_format="mp3_44100_128",
         )
-        audio_bytes = b"".join(audio_generator)
+        chunks = [chunk async for chunk in audio_generator]
+        audio_bytes = b"".join(chunks)
         latency_ms = int((time.time() - start) * 1000)
 
         logger.info(

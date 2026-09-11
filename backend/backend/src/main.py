@@ -118,7 +118,7 @@ backend_app: fastapi.FastAPI = initialize_backend_application()
 
 if __name__ == "__main__":
     uvicorn.run(
-        app="main:backend_app",
+        app="src.main:backend_app",
         host=settings.SERVER_HOST,
         port=settings.SERVER_PORT,
         reload=settings.DEBUG,

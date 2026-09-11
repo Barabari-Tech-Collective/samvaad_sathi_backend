@@ -95,7 +95,7 @@ class BackendBaseSettings(BaseSettings):
     # ------------------------------
     # Sessions / OAuth (Cognito)
     # ------------------------------
-    SESSION_SECRET_KEY: str = decouple.config("SESSION_SECRET_KEY", cast=str, default="change-me-session-secret")  # type: ignore
+    SESSION_SECRET_KEY: str = decouple.config("SESSION_SECRET_KEY", cast=str)  # type: ignore
     COGNITO_REGION: str = decouple.config("COGNITO_REGION", cast=str, default="ap-south-1")  # type: ignore
     COGNITO_USERPOOL_ID: str = decouple.config("COGNITO_USERPOOL_ID", cast=str, default="")  # type: ignore
     COGNITO_CLIENT_ID: str = decouple.config("COGNITO_CLIENT_ID", cast=str, default="")  # type: ignore
@@ -114,11 +114,17 @@ class BackendBaseSettings(BaseSettings):
     MAX_AUDIO_SIZE_MB: int = decouple.config("MAX_AUDIO_SIZE_MB", cast=int, default=25)  # type: ignore
     OPENAI_MODEL: str = decouple.config("OPENAI_MODEL", cast=str, default="gpt-4o-mini")  # type: ignore
     OPENAI_API_KEY: str = decouple.config("OPENAI_API_KEY", cast=str, default="")  # type: ignore
-    OPENAI_API_BASE: str | None = decouple.config("OPENAI_API_BASE", cast=str, default=None)  # type: ignore
-    DEEPSEEK_API_KEY: str | None = decouple.config("DEEPSEEK_API_KEY", cast=str, default=None)  # type: ignore
-    DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-chat")  # type: ignore
     # LLM/ OpenAI client timeout in seconds (request-level). Increase for longer prompts/outputs.
     OPENAI_TIMEOUT_SECONDS: float = decouple.config("OPENAI_TIMEOUT_SECONDS", cast=float, default=150.0)  # type: ignore
+
+    # Which provider src/services/llm.py's structured_output() calls actually use.
+    # "openai" (default, unchanged behavior) or "deepseek". Whisper (whisper.py) and
+    # TTS (pronunciation_tts.py, elevenlabs_tts.py) are NOT affected by this - neither
+    # DeepSeek nor this setting apply to those; see the scaling plan's Phase 7/8 split.
+    LLM_PROVIDER: str = decouple.config("LLM_PROVIDER", cast=str, default="openai")  # type: ignore
+    DEEPSEEK_API_KEY: str = decouple.config("DEEPSEEK_API_KEY", cast=str, default="")  # type: ignore
+    DEEPSEEK_BASE_URL: str = decouple.config("DEEPSEEK_BASE_URL", cast=str, default="https://api.deepseek.com")  # type: ignore
+    DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-v4-flash")  # type: ignore
 
     # ElevenLabs TTS
     ELEVENLABS_API_KEY: str = decouple.config("ELEVENLABS_API_KEY", cast=str, default="")  # type: ignore
@@ -128,29 +134,31 @@ class BackendBaseSettings(BaseSettings):
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
 
+    # ------------------------------
+    # Redis (self-hosted on the same EC2 instance, no managed service)
+    # ------------------------------
+    REDIS_HOST: str = decouple.config("REDIS_HOST", cast=str, default="localhost")  # type: ignore
+    REDIS_PORT: int = decouple.config("REDIS_PORT", cast=int, default=6379)  # type: ignore
+    REDIS_DB: int = decouple.config("REDIS_DB", cast=int, default=0)  # type: ignore
+    REDIS_PASSWORD: str = decouple.config("REDIS_PASSWORD", cast=str, default="")  # type: ignore
+
+    # Per-user rate limits on endpoints calling metered third-party APIs
+    # (OpenAI/ElevenLabs) - protects the API bill from runaway usage by a
+    # single user or a client-side bug, not primarily a security control.
+    RATE_LIMIT_TTS_PER_MINUTE: int = decouple.config("RATE_LIMIT_TTS_PER_MINUTE", cast=int, default=20)  # type: ignore
+    RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR: int = decouple.config("RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR", cast=int, default=10)  # type: ignore
+
+    # How long cached TTS audio for identical (text, voice_id) pairs is kept.
+    # Interview questions repeat heavily across users, so caching cuts both
+    # ElevenLabs cost and per-request latency on cache hits.
+    TTS_CACHE_TTL_SECONDS: int = decouple.config("TTS_CACHE_TTL_SECONDS", cast=int, default=60 * 60 * 24 * 30)  # type: ignore
+
     model_config = SettingsConfigDict(
         case_sensitive=True,
         env_file=f"{str(ROOT_DIR)}/.env",
         validate_assignment=True,
         extra='allow'
     )
-
-    @property
-    def LLM_API_KEY(self) -> str | None:
-        """Returns DEEPSEEK_API_KEY if present, otherwise OPENAI_API_KEY for standard LLM traffic."""
-        return self.DEEPSEEK_API_KEY or self.OPENAI_API_KEY
-
-    @property
-    def LLM_API_BASE(self) -> str | None:
-        """Only use the custom base URL if the DEEPSEEK_API_KEY is actually present."""
-        return self.OPENAI_API_BASE if self.DEEPSEEK_API_KEY else None
-
-    @property
-    def LLM_MODEL(self) -> str:
-        """Returns DEEPSEEK_MODEL when DeepSeek routing is active, otherwise OPENAI_MODEL.
-        Must be kept in lockstep with LLM_API_KEY/LLM_API_BASE so the model name always
-        matches whichever provider the client is actually pointed at."""
-        return self.DEEPSEEK_MODEL if self.DEEPSEEK_API_KEY else self.OPENAI_MODEL
 
     @property
     def set_backend_app_attributes(self) -> dict[str, str | bool | None]:

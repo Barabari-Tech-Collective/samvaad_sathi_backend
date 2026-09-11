@@ -1,4 +1,5 @@
 from fileinput import filename
+import asyncio
 import os
 import time
 import logging
@@ -69,10 +70,15 @@ async def transcribe_audio_with_whisper(
         if client is None:
             return None, "OpenAI API key not configured", None, model_name
 
-        # Create temporary file for Whisper API (it requires a file, not bytes)
-        with tempfile.NamedTemporaryFile(suffix=_get_file_extension(filename), delete=False) as temp_file:
-            temp_file.write(audio_bytes)
-            temp_file_path = temp_file.name
+        # Create temporary file for Whisper API (it requires a file, not bytes).
+        # Writing can be several MB, so it's offloaded to a thread to avoid
+        # blocking the event loop for the duration of the disk write.
+        def _write_temp_file() -> str:
+            with tempfile.NamedTemporaryFile(suffix=_get_file_extension(filename), delete=False) as temp_file:
+                temp_file.write(audio_bytes)
+                return temp_file.name
+
+        temp_file_path = await asyncio.get_running_loop().run_in_executor(None, _write_temp_file)
 
         try:
             # Call Whisper API with word-level timestamps
@@ -129,7 +135,7 @@ async def transcribe_audio_with_whisper(
         finally:
             # Ensure temp file is cleaned up
             try:
-                os.unlink(temp_file_path)
+                await asyncio.get_running_loop().run_in_executor(None, os.unlink, temp_file_path)
                 logger.debug(
                 "Temporary audio file cleaned up | File=%s",
                 filename,

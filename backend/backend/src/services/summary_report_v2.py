@@ -220,9 +220,9 @@ class SummaryReportServiceV2:
             
             c = analysis.get("communication") or {}
             ccrit = c.get("criteria") or {}
-            structure_val = _as_float(c.get("structure_score") or (ccrit.get("structure", {}) or {}).get("score"))
+            structure_val = _as_float(c.get("structure_score")) or _extract_score(ccrit.get("structure"))
             if structure_val is not None: ssf_structure.append(max(0.0, min(100.0, structure_val)))
-            grammar_val = _as_float(c.get("grammar_score") or (ccrit.get("grammar", {}) or {}).get("score"))
+            grammar_val = _as_float(c.get("grammar_score")) or _extract_score(ccrit.get("grammar"))
             if grammar_val is not None: ssf_grammar.append(max(0.0, min(100.0, grammar_val)))
             
             p = analysis.get("pace") or {}
@@ -730,9 +730,9 @@ class SummaryReportServiceV2:
             
             c = analysis.get("communication") or {}
             ccrit = c.get("criteria") or {}
-            structure_val = _as_float(c.get("structure_score") or (ccrit.get("structure", {}) or {}).get("score"))
+            structure_val = _as_float(c.get("structure_score")) or _extract_score(ccrit.get("structure"))
             if structure_val is not None: ssf_structure.append(max(0.0, min(100.0, structure_val)))
-            grammar_val = _as_float(c.get("grammar_score") or (ccrit.get("grammar", {}) or {}).get("score"))
+            grammar_val = _as_float(c.get("grammar_score")) or _extract_score(ccrit.get("grammar"))
             if grammar_val is not None: ssf_grammar.append(max(0.0, min(100.0, grammar_val)))
             
             p = analysis.get("pace") or {}
