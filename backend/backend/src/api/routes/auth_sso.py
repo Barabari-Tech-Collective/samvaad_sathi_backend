@@ -28,7 +28,12 @@ async def sso_login(request: Request):
     # owns the OAuth `state` there; here we own it ourselves since we're not using authlib).
     request.session["sso_state"] = state
 
-    redirect_uri = str(request.url_for("auth_sso_callback"))
+    # auth-service matches redirect_uri by exact string against its registered
+    # allow-list, so prefer the explicitly-configured value. Deriving it from the
+    # request is unsafe behind a TLS-terminating proxy: url_for() reads the request
+    # scheme, which is http unless uvicorn trusts X-Forwarded-Proto, and the resulting
+    # http:// URL silently fails to match the registered https:// entry.
+    redirect_uri = settings.SSO_REDIRECT_URI or str(request.url_for("auth_sso_callback"))
     authorize_url = f"{settings.AUTH_SERVICE_BASE_URL}/barabari-auth/api/auth/public/v1/authorize?" + urlencode(
         {
             "product": settings.SAMPARK_PRODUCT_UNIQUE_ID,

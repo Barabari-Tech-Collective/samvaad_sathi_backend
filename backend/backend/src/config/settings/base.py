@@ -132,6 +132,25 @@ class BackendBaseSettings(BaseSettings):
     SAMPARK_PRODUCT_UNIQUE_ID: str = decouple.config(
         "SAMPARK_PRODUCT_UNIQUE_ID", cast=str, default="81c53f68-35f4-4133-9e35-06f5c30354b785"
     )  # type: ignore
+    # The exact callback URL registered in auth-service's SSO_ALLOWED_REDIRECT_URIS.
+    # auth-service compares this by exact string, so it must NOT be derived from the
+    # incoming request: behind a TLS-terminating proxy (Render, nginx) request.url_for()
+    # yields http:// unless uvicorn is told to trust X-Forwarded-Proto, which silently
+    # produces a value that will never match the registered https:// entry. Set this
+    # explicitly per environment; it falls back to url_for() only for local dev.
+    SSO_REDIRECT_URI: str = decouple.config("SSO_REDIRECT_URI", cast=str, default="")  # type: ignore
+    # auth-service issues one token type across every Barabari product using a shared
+    # JWT secret, and the token carries no audience/product claim - so a token minted
+    # for another product, or for an ADMIN/OWNER of the admin panel, verifies here just
+    # as well as a student's. Samvaad Saathi is a student-facing product, so it accepts
+    # only this role. Empty disables the check.
+    SSO_REQUIRED_ROLE: str = decouple.config("SSO_REQUIRED_ROLE", cast=str, default="STUDENT")  # type: ignore
+
+    # Trust X-Forwarded-Proto/-For from the reverse proxy in front of this app. Correct
+    # for Render and for nginx on EC2, where the proxy is the only way in. Set False
+    # only if this process is ever exposed directly to the internet, where a client
+    # could forge those headers.
+    TRUST_PROXY_HEADERS: bool = decouple.config("TRUST_PROXY_HEADERS", cast=bool, default=True)  # type: ignore
 
     # Audio processing settings (stateless - no upload directory needed)
     MAX_AUDIO_SIZE_MB: int = decouple.config("MAX_AUDIO_SIZE_MB", cast=int, default=25)  # type: ignore

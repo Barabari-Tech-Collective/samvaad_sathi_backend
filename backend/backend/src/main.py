@@ -4,6 +4,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from src.api.endpoints import router as api_endpoint_router
 from src.config.events import (
@@ -89,6 +90,19 @@ def initialize_backend_application() -> fastapi.FastAPI:
     # Enable server-side sessions for OAuth state and userinfo storage
     # Uses cookie-based signed session via Starlette's SessionMiddleware
     app.add_middleware(SessionMiddleware, secret_key=settings.SESSION_SECRET_KEY)
+
+    # Honour X-Forwarded-Proto/-For from the TLS-terminating proxy in front of this app
+    # (Render, or nginx on EC2). Without it request.url/request.url_for() report http://
+    # even on an https request, which breaks any absolute URL this service generates.
+    # uvicorn can do this itself, but only when launched with --forwarded-allow-ips;
+    # its default is "127.0.0.1" and neither Render's proxy nor nginx is on loopback,
+    # so the headers are silently dropped. Applying it here makes correctness
+    # independent of how the process happens to be started (Docker CMD, systemd unit,
+    # or a start command typed into a hosting dashboard).
+    # trusted_hosts="*" is appropriate because the only route to this app is through
+    # that proxy; it is not directly reachable from the internet.
+    if settings.TRUST_PROXY_HEADERS:
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
     startup_handler = execute_backend_server_event_handler(backend_app=app)
     shutdown_handler = terminate_backend_server_event_handler(backend_app=app)
