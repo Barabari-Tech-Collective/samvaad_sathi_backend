@@ -10,6 +10,7 @@ import sqlalchemy
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
+from src.api.dependencies.admin import get_current_admin_user
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.session import get_async_session
 from src.models.db.interview import Interview
@@ -55,7 +56,19 @@ COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 
-router = fastapi.APIRouter(prefix="/v2/analytics", tags=["analytics-v2"], responses=COMMON_ERROR_RESPONSES)
+# Every endpoint on this router reads across ALL students (rosters, rankings,
+# per-college breakdowns, score comparisons) - there is no student-facing
+# endpoint here. The admin gate is applied at the router level rather than
+# per-endpoint so that it cannot be forgotten on a future addition; the
+# previous per-endpoint `Depends(get_current_user)` merely required *a*
+# login and was then discarded via `del current_user`, which let any
+# authenticated student enumerate every other student.
+router = fastapi.APIRouter(
+    prefix="/v2/analytics",
+    tags=["analytics-v2"],
+    responses=COMMON_ERROR_RESPONSES,
+    dependencies=[Depends(get_current_admin_user)],
+)
 
 
 _DIFFICULTY_ORDER = {"easy": 0, "medium": 1, "hard": 2, "expert": 3}
