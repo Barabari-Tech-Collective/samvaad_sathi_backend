@@ -150,12 +150,12 @@ async def get_me(
     ats_resume_id: int | None = None
     ats_resume_filename: str | None = None
 
-    for resume_id, filename, source in resumes:
-        if source == "onboarding" and onboarding_resume_filename is None:
-            onboarding_resume_filename = filename
-        elif source == "ats_final" and ats_resume_filename is None:
-            ats_resume_id = resume_id
-            ats_resume_filename = filename
+    for resume in resumes:
+        if resume.source == "onboarding" and onboarding_resume_filename is None:
+            onboarding_resume_filename = resume.filename
+        elif resume.source == "ats_final" and ats_resume_filename is None:
+            ats_resume_id = resume.id
+            ats_resume_filename = resume.filename
             
         if onboarding_resume_filename and ats_resume_filename:
             break
