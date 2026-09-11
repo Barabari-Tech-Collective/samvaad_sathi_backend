@@ -25,6 +25,14 @@ class BackendBaseSettings(BaseSettings):
     # local/dev convenience; set EXPOSE_API_DOCS=False in any internet-facing
     # environment (see set_backend_app_attributes, which nulls these out).
     EXPOSE_API_DOCS: bool = decouple.config("EXPOSE_API_DOCS", cast=bool, default=True)  # type: ignore
+
+    # Comma-separated emails granted access to the cross-student analytics /
+    # dashboard endpoints, in addition to anyone with user.is_admin set in the
+    # database. Exists because the DB flag defaults to false for every existing
+    # row and flipping it needs SQL access, which whoever configures this
+    # service may not have. Empty by default: no student is ever included
+    # implicitly. See api/dependencies/admin.py.
+    ADMIN_EMAILS: str = decouple.config("ADMIN_EMAILS", cast=str, default="")  # type: ignore
     DOCS_URL: str = "/docs"
     OPENAPI_URL: str = "/openapi.json"
     REDOC_URL: str = "/redoc"
