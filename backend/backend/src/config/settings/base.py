@@ -20,6 +20,11 @@ class BackendBaseSettings(BaseSettings):
     SERVER_PORT: int = decouple.config("BACKEND_SERVER_PORT", cast=int)  # type: ignore
     SERVER_WORKERS: int = decouple.config("BACKEND_SERVER_WORKERS", cast=int)  # type: ignore
     API_PREFIX: str = "/api"
+    # Interactive docs are served unauthenticated, so they hand anyone who
+    # finds the host a complete map of the API surface. Kept on by default for
+    # local/dev convenience; set EXPOSE_API_DOCS=False in any internet-facing
+    # environment (see set_backend_app_attributes, which nulls these out).
+    EXPOSE_API_DOCS: bool = decouple.config("EXPOSE_API_DOCS", cast=bool, default=True)  # type: ignore
     DOCS_URL: str = "/docs"
     OPENAPI_URL: str = "/openapi.json"
     REDOC_URL: str = "/redoc"
@@ -179,6 +184,15 @@ class BackendBaseSettings(BaseSettings):
     RATE_LIMIT_TTS_PER_MINUTE: int = decouple.config("RATE_LIMIT_TTS_PER_MINUTE", cast=int, default=20)  # type: ignore
     RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR: int = decouple.config("RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR", cast=int, default=10)  # type: ignore
 
+    # Per-IP throttles on unauthenticated auth endpoints. These previously had
+    # no rate limiting at all, which combined with an unbounded password field
+    # left credential stuffing completely unthrottled.
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = decouple.config("RATE_LIMIT_LOGIN_PER_MINUTE", cast=int, default=10)  # type: ignore
+    RATE_LIMIT_SIGNUP_PER_HOUR: int = decouple.config("RATE_LIMIT_SIGNUP_PER_HOUR", cast=int, default=20)  # type: ignore
+
+    # Minimum password length enforced at registration.
+    MIN_PASSWORD_LENGTH: int = decouple.config("MIN_PASSWORD_LENGTH", cast=int, default=8)  # type: ignore
+
     # How long cached TTS audio for identical (text, voice_id) pairs is kept.
     # Interview questions repeat heavily across users, so caching cuts both
     # ElevenLabs cost and per-request latency on cache hits.
@@ -196,14 +210,17 @@ class BackendBaseSettings(BaseSettings):
         """
         Set all `FastAPI` class' attributes with the custom values defined in `BackendBaseSettings`.
         """
+        # Passing None disables the route entirely in FastAPI, which is what we
+        # want when docs are not meant to be public - serving a 404 rather than
+        # the full endpoint inventory.
         return {
             "title": self.TITLE,
             "version": self.VERSION,
             "debug": self.DEBUG,
             "description": self.DESCRIPTION,
-            "docs_url": self.DOCS_URL,
-            "openapi_url": self.OPENAPI_URL,
-            "redoc_url": self.REDOC_URL,
+            "docs_url": self.DOCS_URL if self.EXPOSE_API_DOCS else None,
+            "openapi_url": self.OPENAPI_URL if self.EXPOSE_API_DOCS else None,
+            "redoc_url": self.REDOC_URL if self.EXPOSE_API_DOCS else None,
             "openapi_prefix": self.OPENAPI_PREFIX,
             "api_prefix": self.API_PREFIX,
         }
