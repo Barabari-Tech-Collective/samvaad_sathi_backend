@@ -62,6 +62,31 @@ async def initialize_db_tables(connection: AsyncConnection) -> None:
             await connection.execute(text("ALTER TABLE interview ADD COLUMN IF NOT EXISTS duration_seconds INTEGER"))
             await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_interview_completed_at ON interview (completed_at)"))
 
+            # user.is_admin gates the cross-student analytics endpoints. The model
+            # declares it, so if the column is absent EVERY query against `user`
+            # fails - including login - which is exactly what happened on staging
+            # when the code deployed without its Alembic migration being applied.
+            # Environments that can run `alembic upgrade head` get the column from
+            # the migration and this is a no-op; environments that cannot (Render's
+            # free tier has no Shell, One-Off Jobs or Pre-Deploy Command) still come
+            # up healthy. Matches the ALTER above in intent and idempotency: the
+            # DEFAULT false means existing rows are non-admin, which is the safe
+            # direction for an authorization flag.
+            await connection.execute(
+                text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false')
+            )
+
+            # Composite indexes backing the two hottest interview queries
+            # (active-interview lookup, history pagination). Same rationale: the
+            # migration is authoritative, this keeps un-migrated environments fast
+            # rather than silently degraded.
+            await connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_interview_user_id_status_id ON interview (user_id, status, id)")
+            )
+            await connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_interview_user_id_id ON interview (user_id, id)")
+            )
+
             await connection.execute(
                 text(
                     """

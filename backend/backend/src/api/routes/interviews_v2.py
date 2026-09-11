@@ -58,6 +58,8 @@ from src.services.progressive_hints import (
     get_framework_sections,
     get_initial_hint,
 )
+from src.services.elevenlabs_tts import generate_tts_audio
+from src.services.s3_service import upload_audio_to_s3
 from src.services.non_tech_blueprint import (
     NON_TECH_BLUEPRINT_VERSION,
     NON_TECH_FIXED_DIFFICULTY,
@@ -69,9 +71,29 @@ from src.services.analytics_events import track_analytics_event
 logger = logging.getLogger(__name__)
 FOLLOW_UP_STRATEGY = "llm_transcription_based"
 FULL_STACK_ROLE = "Full Stack Developer"
+# Only the first N base questions of an interview may spawn a follow-up.
+# Applies to every track - tech and non-tech alike, per product decision.
+MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS = 2
 
 
 router = fastapi.APIRouter(prefix="/v2", tags=["interviews-v2"])
+
+
+def _apply_follow_up_eligibility(questions_data: list[dict[str, object]]) -> None:
+    """Cap follow-up eligibility to the first MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS
+    entries, mutating questions_data in place.
+
+    Enforced here rather than left to whatever a question source (an LLM
+    prompt, an admin-authored job-profile question, a client-supplied item)
+    happens to set, so the product rule holds regardless of where the
+    questions came from - see generate_full_stack_questions_with_llm's
+    prompt, which asks the model to tag every question "default" and would
+    silently defeat the cap if trusted on its own.
+    """
+    for idx, question_data in enumerate(questions_data):
+        question_data["follow_up_strategy"] = (
+            FOLLOW_UP_STRATEGY if idx < MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS else None
+        )
 
 
 def _supplements_enabled_for_track(track: str | None) -> bool:
@@ -85,6 +107,87 @@ def _normalize_non_tech_job_name(job_name: str | None) -> str:
         return "General Role"
     collapsed = re.sub(r"\s+", " ", raw)
     return collapsed.title()
+
+
+async def _background_generate_and_upload_tts(questions_to_process: list[dict]):
+    """Background task to generate TTS audio and update the master question bank."""
+    import asyncio
+    import logging
+    from src.repository.database import async_db
+    from src.repository.crud.job_profile import JobProfileCRUDRepository
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        loop = asyncio.get_event_loop()
+        needs_db = any(q.get("job_profile_question_id") for q in questions_to_process)
+        
+        async def process_questions(session=None):
+            repo = JobProfileCRUDRepository(session) if session else None
+            for q_data in questions_to_process:
+                text = q_data.get("text", "")
+                if not text:
+                    continue
+                    
+                h_id = int(q_data.get("h_id", 0))
+                audio_bytes, error, _ = await generate_tts_audio(text=text)
+                if audio_bytes and not error:
+                    public_url = await loop.run_in_executor(None, upload_audio_to_s3, audio_bytes, h_id)
+                    if public_url and repo and q_data.get("job_profile_question_id"):
+                        q_obj = await repo.get_question_by_id(q_data["job_profile_question_id"])
+                        if q_obj:
+                            await repo.update_job_profile_question(q_obj, {"audio_url": public_url})
+                            logger.info(f"Updated job_profile_question {q_obj.id} with audio URL {public_url}")
+                            
+        if needs_db:
+            async with async_db.get_session() as session:
+                await process_questions(session)
+        else:
+            await process_questions(None)
+            
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed background TTS generation: {e}")
+
+
+def _prepare_audio_for_questions(questions: list[dict]) -> list[dict]:
+    """
+    Calculates the predictable S3 URL and returns a list of questions that need TTS generation.
+
+    The S3 key is scoped to the currently configured ELEVENLABS_VOICE_ID. A
+    question whose stored audio_url was generated under a previous voice_id
+    won't match the current voice-scoped URL, so it's treated as needing
+    regeneration instead of being skipped forever - otherwise, once
+    ELEVENLABS_VOICE_ID changes, old and newly generated questions would
+    permanently play back in different voices within the same interview.
+    """
+    import hashlib
+    from decouple import config
+
+    from src.services.s3_service import tts_audio_s3_key
+
+    bucket = config("AWS_S3_BUCKET_NAME", default="barabari-edtech-service-staging")
+    region = config("AWS_REGION", default="ap-south-1")
+
+    questions_to_process = []
+
+    for q_data in questions:
+        text = q_data.get("text", "")
+        if not text:
+            continue
+
+        h_id = int(hashlib.md5(text.encode()).hexdigest()[:12], 16)
+        s3_file_path = tts_audio_s3_key(h_id)
+        public_url = f"https://{bucket}.s3.{region}.amazonaws.com/{s3_file_path}"
+
+        if q_data.get("audio_url") == public_url:
+            continue
+
+        q_data["audio_url"] = public_url
+        q_data["h_id"] = h_id
+        questions_to_process.append(q_data)
+
+    return questions_to_process
 
 
 def _get_cached_structure_practice_response() -> StructurePracticeQuestionsResponse:
@@ -180,9 +283,10 @@ async def create_or_resume_interview_v2(
     payload: InterviewCreate,
     current_user=fastapi.Depends(get_current_user),
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> InterviewInResponse:
     active = await interview_repo.get_active_by_user(user_id=current_user.id)
-    if active is not None and active.track == payload.track:
+    if active is not None and active.track == payload.track and active.job_profile_id == payload.job_profile_id:
         res = InterviewInResponse(
             interview_id=active.id,
             track=active.track,
@@ -213,7 +317,12 @@ async def create_or_resume_interview_v2(
                 detail="Cannot use resume for interview: No resume is saved to your profile."
             )
 
-    interview = await interview_repo.create_interview(user_id=current_user.id, track=payload.track, difficulty=difficulty)
+    if payload.job_profile_id is not None:
+        job_profile = await job_profile_repo.get_by_id(job_profile_id=payload.job_profile_id)
+        if job_profile is None:
+            raise fastapi.HTTPException(status_code=404, detail="Job profile not found")
+
+    interview = await interview_repo.create_interview(user_id=current_user.id, track=payload.track, difficulty=difficulty, job_profile_id=payload.job_profile_id)
     await track_analytics_event(
         interview_repo.async_session,
         event_type="interview_started",
@@ -259,10 +368,12 @@ async def create_or_resume_interview_v2(
 )
 async def generate_questions_v2(
     payload: GenerateQuestionsRequest,
+    background_tasks: fastapi.BackgroundTasks,
     current_user=fastapi.Depends(get_current_user),
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
     question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewQuestionCRUDRepository)),
     question_attempt_repo: QuestionAttemptCRUDRepository = fastapi.Depends(get_repository(repo_type=QuestionAttemptCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> GeneratedQuestionsInResponse:
     supplement_service = QuestionSupplementService(async_session=question_repo.async_session)
     interview = None
@@ -276,6 +387,12 @@ async def generate_questions_v2(
         interview = await interview_repo.get_active_by_user(user_id=current_user.id)
         if interview is None:
             raise fastapi.HTTPException(status_code=fastapi.status.HTTP_400_BAD_REQUEST, detail="No active interview to generate questions for")
+
+    if interview.track and interview.track.startswith("Non-Tech:"):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="This endpoint does not support non-tech interview tracks. Use /v2/interviews/non-tech/generate-questions instead.",
+        )
 
     import sqlalchemy
     # Acquire advisory lock on interview ID to prevent concurrent generation
@@ -312,15 +429,15 @@ async def generate_questions_v2(
                 question_ids=[0],
                 items=[
                     QuestionItem(
-                        interview_question_id=item.get("interviewQuestionId"),
-                        text=item.get("text", ""),
-                        topic=item.get("topic"),
-                        difficulty=item.get("difficulty"),
-                        category=item.get("category"),
-                        is_follow_up=item.get("isFollowUp", False),
-                        parent_question_id=item.get("parentQuestionId"),
-                        follow_up_strategy=item.get("followUpStrategy"),
-                        supplement=item.get("supplement"),
+                        interview_question_id=item.get("interviewQuestionId"),  # type: ignore
+                        text=item.get("text", ""),  # type: ignore
+                        topic=item.get("topic"),  # type: ignore
+                        difficulty=item.get("difficulty"),  # type: ignore
+                        category=item.get("category"),  # type: ignore
+                        is_follow_up=item.get("isFollowUp", False),  # type: ignore
+                        parent_question_id=item.get("parentQuestionId"),  # type: ignore
+                        follow_up_strategy=item.get("followUpStrategy"),  # type: ignore
+                        supplement=item.get("supplement"),  # type: ignore
                     )
                     for item in qs.get("items", [])
                 ],
@@ -341,13 +458,53 @@ async def generate_questions_v2(
 
         question_count = 7 if interview.track == FULL_STACK_ROLE else 5  # Base questions, leaves room for dynamic follow-ups
 
-        questions, llm_error, latency_ms, llm_model, items = await generate_full_stack_questions_with_llm(
-            domain=interview.track,
-            years_experience=years,
-            difficulty=interview.difficulty,
-            count=question_count,
-            seed=f"{current_user.id}:{interview.id}"
-        )
+        questions = None
+        llm_error = None
+        latency_ms = 0
+        llm_model = "static"
+        items = None
+        
+        if getattr(interview, "job_profile_id", None):
+            difficulty_map = {"easy": 1, "medium": 2, "hard": 3, "expert": 4}
+            mapped_level = difficulty_map.get(interview.difficulty, 2)
+            admin_questions = await job_profile_repo.get_job_profile_questions(interview.job_profile_id)
+            level_questions = [q for q in admin_questions if q.level == mapped_level]
+            if level_questions:
+                # Get the number of previous interviews the user took for this specific profile and difficulty
+                past_interview_count = await interview_repo.count_user_interviews_by_profile_and_difficulty(
+                    user_id=current_user.id,
+                    job_profile_id=interview.job_profile_id,
+                    difficulty=interview.difficulty,
+                    current_interview_id=interview.id
+                )
+                
+                # Pick 5 questions sequentially
+                start_idx = (past_interview_count * 5) % len(level_questions)
+                selected = []
+                for i in range(min(5, len(level_questions))):
+                    idx = (start_idx + i) % len(level_questions)
+                    selected.append(level_questions[idx])
+                
+                questions = [q.question_text for q in selected]
+                items = []
+                for q in selected:
+                    items.append({
+                        "text": q.question_text,
+                        "topic": "General",
+                        "category": "tech",
+                        "followUpStrategy": FOLLOW_UP_STRATEGY,
+                        "audioUrl": getattr(q, "audio_url", None),
+                        "job_profile_question_id": q.id,
+                    })
+
+        if not questions:
+            questions, llm_error, latency_ms, llm_model, items = await generate_full_stack_questions_with_llm(
+                domain=interview.track,
+                years_experience=years,
+                difficulty=interview.difficulty,
+                count=question_count,
+                seed=f"{current_user.id}:{interview.id}"
+            )
 
         if not questions:
             questions = [
@@ -367,16 +524,25 @@ async def generate_questions_v2(
                         "topic": item.get("topic"),
                         "category": item.get("category"),
                         "follow_up_strategy": item.get("followUpStrategy") or FOLLOW_UP_STRATEGY,
+                        "audio_url": item.get("audioUrl"),
+                        "job_profile_question_id": item.get("job_profile_question_id"),
                     }
                 )
         else:
             for question in questions:
                 questions_data.append({
-                    "text": question, 
-                    "topic": None, 
-                    "category": None, 
+                    "text": question,
+                    "topic": None,
+                    "category": None,
                     "follow_up_strategy": FOLLOW_UP_STRATEGY
                 })
+
+        _apply_follow_up_eligibility(questions_data)
+
+        # Pre-calculate predictable S3 URLs and enqueue background generation
+        tasks_to_run = _prepare_audio_for_questions(questions_data)
+        if tasks_to_run:
+            background_tasks.add_task(_background_generate_and_upload_tts, tasks_to_run)
 
         # Double check to prevent race condition double-insertion
         existing_again = await question_repo.list_by_interview(interview_id=interview.id)
@@ -411,6 +577,7 @@ async def generate_questions_v2(
                     "parentQuestionId": question_obj.parent_question_id,
                     "followUpStrategy": question_obj.follow_up_strategy,
                     "supplement": supplements_map.get(question_obj.id),
+                    "audioUrl": question_obj.audio_url,
                 }
             )
         qs = {
@@ -445,6 +612,7 @@ async def generate_questions_v2(
                 "parentQuestionId": q.parent_question_id,
                 "followUpStrategy": q.follow_up_strategy,
                 "supplement": supplements_map.get(q.id),
+                "audioUrl": q.audio_url,
             }
             for q in existing
         ]
@@ -456,27 +624,36 @@ async def generate_questions_v2(
             "items": response_items,
         }
 
+    raw_items = qs.get("items")
+    items_list = raw_items if isinstance(raw_items, list) else []
+    raw_latency = qs.get("latency_ms")
+    latency_val = int(raw_latency) if isinstance(raw_latency, (int, float, str)) and raw_latency is not None else None
+    
     response_payload = GeneratedQuestionsInResponse(
         interview_id=interview.id,
         track=interview.track,
         count=len(persisted),
         questions=[q.text for q in persisted],
         question_ids=[q.id for q in persisted],
-        items=[QuestionItem(
-            interview_question_id=item.get("interviewQuestionId"),
-            text=item.get("text", ""),
-            topic=item.get("topic"),
-            difficulty=item.get("difficulty"),
-            category=item.get("category"),
-            is_follow_up=item.get("isFollowUp", False),
-            parent_question_id=item.get("parentQuestionId"),
-            follow_up_strategy=item.get("followUpStrategy"),
-            supplement=item.get("supplement"),
-        ) for item in qs.get("items", [])],
+        items=[
+            QuestionItem(
+                interview_question_id=item.get("interviewQuestionId"),  # type: ignore
+                text=str(item.get("text", "")),  # type: ignore
+                topic=item.get("topic"),  # type: ignore
+                difficulty=item.get("difficulty"),  # type: ignore
+                category=item.get("category"),  # type: ignore
+                is_follow_up=bool(item.get("isFollowUp", False)),  # type: ignore
+                parent_question_id=item.get("parentQuestionId"),  # type: ignore
+                follow_up_strategy=item.get("followUpStrategy"),  # type: ignore
+                supplement=item.get("supplement"),  # type: ignore
+                audio_url=item.get("audioUrl"),  # type: ignore
+            )
+            for item in items_list if isinstance(item, dict)
+        ],
         cached=cached,
-        llm_model=qs.get("llm_model"),
-        llm_latency_ms=qs.get("latency_ms"),
-        llm_error=qs.get("llm_error"),
+        llm_model=str(qs.get("llm_model")) if qs.get("llm_model") else None,
+        llm_latency_ms=latency_val,
+        llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
     )
 
     # =========================================================================
@@ -501,6 +678,7 @@ async def generate_questions_v2(
 )
 async def generate_non_tech_questions_v2(
     payload: GenerateNonTechQuestionsRequest,
+    background_tasks: fastapi.BackgroundTasks,
     current_user=fastapi.Depends(get_current_user),
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
     question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewQuestionCRUDRepository)),
@@ -532,6 +710,7 @@ async def generate_non_tech_questions_v2(
             user_id=current_user.id,
             track=track,
             difficulty=difficulty,
+            job_profile_id=job_profile.id,
         )
         await track_analytics_event(
             interview_repo.async_session,
@@ -554,24 +733,56 @@ async def generate_non_tech_questions_v2(
     cached = bool(existing)
 
     if not existing:
-        questions_data = select_non_tech_interview_questions(
-            role_name=normalized_job_name,
-            company_name=job_profile.company_name,
-            seed=f"{current_user.id}:{job_profile.id}:{interview.id}",
+        past_interview_count = await interview_repo.count_user_interviews_by_profile_and_difficulty(
+            user_id=current_user.id,
+            job_profile_id=job_profile.id,
+            difficulty=difficulty,
+            current_interview_id=interview.id
         )
+
+        questions_data = None
+        if getattr(interview, "job_profile_id", None):
+            difficulty_map = {"easy": 1, "medium": 2, "hard": 3, "expert": 4}
+            mapped_level = difficulty_map.get(interview.difficulty, 2)
+            admin_questions = await job_profile_repo.get_job_profile_questions(interview.job_profile_id)
+            level_questions = [q for q in admin_questions if q.level == mapped_level]
+            if level_questions:
+                # Pick 5 questions sequentially
+                start_idx = (past_interview_count * 5) % len(level_questions)
+                selected = []
+                for i in range(min(5, len(level_questions))):
+                    idx = (start_idx + i) % len(level_questions)
+                    selected.append(level_questions[idx])
+                
+                questions_data = []
+                for q in selected:
+                    questions_data.append({
+                        "text": q.question_text,
+                        "topic": "General",
+                        "category": "general",
+                        "audio_url": getattr(q, "audio_url", None),
+                        "job_profile_question_id": q.id,
+                    })
+
+        if not questions_data:
+            questions_data = select_non_tech_interview_questions(
+                role_name=normalized_job_name,
+                company_name=job_profile.company_name,
+                seed=f"{current_user.id}:{job_profile.id}:{interview.id}",
+                past_interview_count=past_interview_count,
+            )
 
         if payload.use_resume and isinstance(getattr(current_user, "resume_text", None), str):
             resume_context = (getattr(current_user, "resume_text", None) or "").strip()
             if resume_context:
                 questions_data[0]["text"] = f"Based on your background, {questions_data[0]['text']}"
 
-        if job_profile.additional_context:
-            context_suffix = job_profile.additional_context.strip()
-            if context_suffix:
-                questions_data[0]["text"] = f"{questions_data[0]['text']} ({context_suffix})"
+        _apply_follow_up_eligibility(questions_data)
 
-        for idx in range(min(2, len(questions_data))):
-            questions_data[idx]["follow_up_strategy"] = FOLLOW_UP_STRATEGY
+        # Pre-calculate predictable S3 URLs and enqueue background generation
+        tasks_to_run = _prepare_audio_for_questions(questions_data)
+        if tasks_to_run:
+            background_tasks.add_task(_background_generate_and_upload_tts, tasks_to_run)
 
         persisted = await question_repo.create_batch(
             interview_id=interview.id,
@@ -599,6 +810,7 @@ async def generate_non_tech_questions_v2(
                     "parentQuestionId": question_obj.parent_question_id,
                     "followUpStrategy": question_obj.follow_up_strategy,
                     "supplement": supplements_map.get(question_obj.id),
+                    "audioUrl": question_obj.audio_url,
                 }
             )
         qs = {
@@ -632,6 +844,7 @@ async def generate_non_tech_questions_v2(
                 "parentQuestionId": q.parent_question_id,
                 "followUpStrategy": q.follow_up_strategy,
                 "supplement": supplements_map.get(q.id),
+                "audioUrl": q.audio_url,
             }
             for q in existing
         ]
@@ -643,6 +856,11 @@ async def generate_non_tech_questions_v2(
             "items": response_items,
         }
 
+    raw_items = qs.get("items")
+    items_list = raw_items if isinstance(raw_items, list) else []
+    raw_latency = qs.get("latency_ms")
+    latency_val = int(raw_latency) if isinstance(raw_latency, (int, float, str)) and raw_latency is not None else None
+    
     return GeneratedQuestionsInResponse(
         interview_id=interview.id,
         track=interview.track,
@@ -651,22 +869,22 @@ async def generate_non_tech_questions_v2(
         question_ids=[q.id for q in persisted],
         items=[
             QuestionItem(
-                interview_question_id=item.get("interviewQuestionId"),
-                text=item.get("text", ""),
-                topic=item.get("topic"),
-                difficulty=item.get("difficulty"),
-                category=item.get("category"),
-                is_follow_up=item.get("isFollowUp", False),
-                parent_question_id=item.get("parentQuestionId"),
-                follow_up_strategy=item.get("followUpStrategy"),
-                supplement=item.get("supplement"),
+                interview_question_id=item.get("interviewQuestionId"),  # type: ignore
+                text=str(item.get("text", "")),  # type: ignore
+                topic=item.get("topic"),  # type: ignore
+                difficulty=item.get("difficulty"),  # type: ignore
+                category=item.get("category"),  # type: ignore
+                is_follow_up=bool(item.get("isFollowUp", False)),  # type: ignore
+                parent_question_id=item.get("parentQuestionId"),  # type: ignore
+                follow_up_strategy=item.get("followUpStrategy"),  # type: ignore
+                supplement=item.get("supplement"),  # type: ignore
             )
-            for item in qs.get("items", [])
+            for item in items_list if isinstance(item, dict)
         ],
         cached=cached,
-        llm_model=qs.get("llm_model"),
-        llm_latency_ms=qs.get("latency_ms"),
-        llm_error=qs.get("llm_error"),
+        llm_model=str(qs.get("llm_model")) if qs.get("llm_model") else None,
+        llm_latency_ms=latency_val,
+        llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
     )
 
 
@@ -1123,30 +1341,34 @@ async def create_structure_practice_session(
         )
         
         # Build questions list with framework info
-        questions_list = [
-            {
+        questions_list = []
+        for idx, q in enumerate(questions):
+            framework = detect_framework(hints_map.get(q.text, ""))
+            sections = get_framework_sections(framework)
+            initial_hint = get_initial_hint(framework)
+            questions_list.append({
                 "question_id": q.id,
                 "text": q.text,
                 "structure_hint": hints_map.get(q.text, "Structure your answer clearly with examples."),
-                "framework": detect_framework(hints_map.get(q.text, "")),
+                "framework": framework,
                 "index": idx,
-            }
-            for idx, q in enumerate(questions)
-        ]
-        
-        # Add sections and current_section to each question
-        for q in questions_list:
-            framework = q["framework"]
-            sections = get_framework_sections(framework)
-            initial_hint = get_initial_hint(framework)
-            q["sections"] = sections
-            q["current_section"] = initial_hint["section_name"]
-            q["current_hint"] = initial_hint["hint"]
+                "sections": sections,
+                "current_section": initial_hint["section_name"],
+                "current_hint": initial_hint["hint"],
+            })
         
         track = interview.track
     else:
-        # Create a new interview with questions for structure practice
-        track = request.track or "JavaScript Developer"
+        # Create a new interview with questions for structure practice.
+        # Never silently default to a hardcoded tech role — that would generate
+        # tech questions for a non-tech candidate. Fall back to the user's own
+        # declared target role, and fail loudly if neither is available.
+        track = request.track or getattr(current_user, "target_position", None)
+        if not track:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="No track specified and no target role set on your profile. Please select a role first.",
+            )
         difficulty = (request.difficulty or "easy").lower()
         if difficulty not in ("easy", "medium", "hard", "expert"):
             difficulty = "easy"
@@ -1159,7 +1381,13 @@ async def create_structure_practice_session(
         )
         
         # Generate questions based on difficulty
-        role = syllabus_service._role_manager.derive_role(track)
+        try:
+            role = syllabus_service._role_manager.derive_role(track)
+        except ValueError as exc:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            )
         topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
         topics = {
             "tech": topic_bank.tech,
@@ -1235,25 +1463,21 @@ async def create_structure_practice_session(
         )
         
         # Build questions list with framework info
-        questions_list = [
-            {
+        questions_list = []
+        for idx, q in enumerate(db_questions):
+            framework = detect_framework(hints_map.get(q.text, ""))
+            sections = get_framework_sections(framework)
+            initial_hint = get_initial_hint(framework)
+            questions_list.append({
                 "question_id": q.id,
                 "text": q.text,
                 "structure_hint": hints_map.get(q.text, "Structure your answer clearly with examples."),
-                "framework": detect_framework(hints_map.get(q.text, "")),
+                "framework": framework,
                 "index": idx,
-            }
-            for idx, q in enumerate(db_questions)
-        ]
-        
-        # Add sections and current_section to each question
-        for q in questions_list:
-            framework = q["framework"]
-            sections = get_framework_sections(framework)
-            initial_hint = get_initial_hint(framework)
-            q["sections"] = sections
-            q["current_section"] = initial_hint["section_name"]
-            q["current_hint"] = initial_hint["hint"]
+                "sections": sections,
+                "current_section": initial_hint["section_name"],
+                "current_hint": initial_hint["hint"],
+            })
         
         # Link the interview to the practice session
         request.interview_id = new_interview.id
@@ -1366,10 +1590,10 @@ async def submit_structure_practice_section(
     
     # Extract transcription text
     transcription_text = transcription.get("text", "")
-    if not transcription_text or len(transcription_text.strip()) < 5:
+    if not transcription_text or len(transcription_text.strip().split()) < 3:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-            detail="Transcribed answer is too short. Please provide a more detailed answer."
+            detail="Your answer was too short to evaluate. Please provide a more complete response."
         )
     
     # Save audio file (optional, for record keeping)
@@ -1597,7 +1821,7 @@ async def analyze_structure_practice_answer(
         framework_progress=framework_progress,
         time_per_section=time_per_section,
         key_insight=analysis_result.key_insight,
-        analyzed_at=datetime.datetime.utcnow(),
+        analyzed_at=datetime.datetime.now(datetime.timezone.utc),
         llm_model=llm_model,
         llm_latency_ms=latency_ms,
     )

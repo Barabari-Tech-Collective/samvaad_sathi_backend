@@ -165,3 +165,7 @@ boto3
 
 # Python 3.13+ standard library audioop backport
 audioop-lts; python_version >= '3.13'
+
+# Redis client + async task queue (self-hosted Redis - see project scaling plan)
+redis==5.3.1
+arq==0.28.0

@@ -1,5 +1,6 @@
 """Service for generating progressive section hints for structure practice."""
 
+import re
 from typing import Dict, List, Literal
 
 # Framework definitions
@@ -36,24 +37,38 @@ FRAMEWORKS = {
             "Outcome": "Share results. What was the impact? Did you meet the goal? What were the trade-offs?",
         }
     },
+    "DIRECT": {
+        "name": "Direct Answer",
+        "sections": ["Answer"],
+        "base_hints": {
+            "Answer": "Answer clearly and directly. This is a factual question — no need to follow a multi-part structure, just explain your understanding.",
+        }
+    },
 }
 
 
 def detect_framework(structure_hint: str) -> str:
     """
     Detect which framework to use based on the structure hint.
-    
+
     Args:
         structure_hint: The structure hint from the question
-        
+
     Returns:
-        Framework name: "C-T-E-T-D", "STAR", or "GCDIO"
+        Framework name: "C-T-E-T-D", "STAR", "GCDIO", or "DIRECT"
     """
     hint_lower = structure_hint.lower()
-    
-    if "star" in hint_lower or "situation" in hint_lower:
+
+    def _has_word(word: str) -> bool:
+        # Word-boundary match so e.g. "Start with context" doesn't false-positive
+        # on the substring "star".
+        return re.search(rf"\b{re.escape(word)}\b", hint_lower) is not None
+
+    if _has_word("direct"):
+        return "DIRECT"
+    elif _has_word("star") or _has_word("situation"):
         return "STAR"
-    elif "gcdio" in hint_lower or "g-c-d-i-o" in hint_lower or "goal" in hint_lower and "constraints" in hint_lower:
+    elif _has_word("gcdio") or _has_word("g-c-d-i-o") or (_has_word("goal") and _has_word("constraints")):
         return "GCDIO"
     else:
         # Default to C-T-E-T-D for technical questions

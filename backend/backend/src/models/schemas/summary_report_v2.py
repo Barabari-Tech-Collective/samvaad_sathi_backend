@@ -40,6 +40,10 @@ class QuestionAnalysisItemLite(BaseSchemaModel):
     totalQuestions: int = pydantic.Field(description="Total number of questions in interview")
     type: str = pydantic.Field(description="Question type (e.g., 'Technical question')")
     question: str = pydantic.Field(description="Question text")
+    transcript: str | None = pydantic.Field(
+        default=None,
+        description="The candidate's answer transcript that the feedback below was generated from (null if not attempted).",
+    )
     feedback: QuestionFeedbackLite | None = pydantic.Field(default=None, description="Feedback (null if not attempted)")
 
 class RecommendedPracticeLite(BaseSchemaModel):

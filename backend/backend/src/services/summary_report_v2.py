@@ -85,6 +85,18 @@ def _unique(items: List[str]) -> List[str]:
     return out
 
 
+def _extract_transcript_text(attempt: Any) -> str | None:
+    """Plain-text transcript for a QuestionAttempt, i.e. the same text the
+    scoring/feedback pipeline reads via (text|transcript) - see analysis.py,
+    speech_pacing.py, follow_up.py. Surfaced on the report so the feedback
+    page can show the user's actual answer next to the strengths/areas of
+    improvement generated from it."""
+    if attempt is None or not getattr(attempt, "transcription", None):
+        return None
+    text = attempt.transcription.get("text") or attempt.transcription.get("transcript")
+    return text or None
+
+
 def _question_type_label(category: str | None) -> str:
     key = (category or "tech").lower()
     category_map = {
@@ -220,9 +232,9 @@ class SummaryReportServiceV2:
             
             c = analysis.get("communication") or {}
             ccrit = c.get("criteria") or {}
-            structure_val = _as_float(c.get("structure_score") or (ccrit.get("structure", {}) or {}).get("score"))
+            structure_val = _as_float(c.get("structure_score")) or _extract_score(ccrit.get("structure"))
             if structure_val is not None: ssf_structure.append(max(0.0, min(100.0, structure_val)))
-            grammar_val = _as_float(c.get("grammar_score") or (ccrit.get("grammar", {}) or {}).get("score"))
+            grammar_val = _as_float(c.get("grammar_score")) or _extract_score(ccrit.get("grammar"))
             if grammar_val is not None: ssf_grammar.append(max(0.0, min(100.0, grammar_val)))
             
             p = analysis.get("pace") or {}
@@ -342,15 +354,25 @@ class SummaryReportServiceV2:
             question_analysis = []
             for idx, iq in enumerate(all_questions):
                 question_type = _question_type_label(iq.category)
-                #feedback
-                feedback = {
-                    "knowledgeRelated": {
-                        "strengths": [],
-                        "areasOfImprovement": ["Not attempted"],
-                        "actionableInsights": []
+
+                # Check if attempted
+                if iq.id not in actually_attempted_question_ids:
+                    feedback = {
+                        "knowledgeRelated": {
+                            "strengths": [],
+                            "areasOfImprovement": ["Not attempted"],
+                            "actionableInsights": []
+                        }
                     }
-                } if iq.id not in actually_attempted_question_ids else None
-                
+                else:
+                    feedback = {
+                        "knowledgeRelated": {
+                            "strengths": [],
+                            "areasOfImprovement": [],
+                            "actionableInsights": []
+                        }
+                    }
+
                 question_analysis.append({
                     "id": idx + 1,
                     "totalQuestions": total_questions,
@@ -399,7 +421,7 @@ class SummaryReportServiceV2:
             kc_depth_final = round(kc_score_total * (kc_depth_sum / kc_total_from_attempted))
             kc_relevance_final = round(kc_score_total * (kc_relevance_sum / kc_total_from_attempted))
             kc_examples_final = round(kc_score_total * (kc_examples_sum / kc_total_from_attempted))
-            kc_terminology_final = kc_score_total - (kc_accuracy_final + kc_depth_final + kc_relevance_final + kc_examples_final)
+            kc_terminology_final = max(0, kc_score_total - (kc_accuracy_final + kc_depth_final + kc_relevance_final + kc_examples_final))
         else:
             kc_accuracy_final = kc_depth_final = kc_relevance_final = kc_examples_final = kc_terminology_final = 0
 
@@ -407,7 +429,7 @@ class SummaryReportServiceV2:
             ssf_fluency_final = round(ssf_score_total * (ssf_fluency_sum / ssf_total_from_attempted))
             ssf_structure_final = round(ssf_score_total * (ssf_structure_sum / ssf_total_from_attempted))
             ssf_pacing_final = round(ssf_score_total * (ssf_pacing_sum / ssf_total_from_attempted))
-            ssf_grammar_final = ssf_score_total - (ssf_fluency_final + ssf_structure_final + ssf_pacing_final)
+            ssf_grammar_final = max(0, ssf_score_total - (ssf_fluency_final + ssf_structure_final + ssf_pacing_final))
         else:
             ssf_fluency_final = ssf_structure_final = ssf_pacing_final = ssf_grammar_final = 0
 
@@ -449,6 +471,13 @@ class SummaryReportServiceV2:
 
         question_analysis = []
         for idx, iq in enumerate(all_questions):
+            # Map question category to type string
+            category_map = {
+                "tech": "Technical question",
+                "tech_allied": "Technical Allied question", 
+                "behavioral": "Behavioral question",
+            }
+            question_type = category_map.get(iq.category or "", "Technical question")
             question_type = _question_type_label(iq.category)
             attempt = attempts_by_question_id.get(iq.id)
             has_valid_attempt = attempt is not None and (bool(attempt.transcription) or bool(attempt.analysis_json))
@@ -471,6 +500,8 @@ class SummaryReportServiceV2:
                 "feedback": feedback,
             })
 
+        
+        # Ensure overallFeedback has proper structure with all required fields
         overall_feedback_raw = llm_data.get("overallFeedback", {})
         speech_fluency_raw = overall_feedback_raw.get("speechFluency", {}) if isinstance(overall_feedback_raw, dict) else {}
 
@@ -533,15 +564,15 @@ class SummaryReportServiceV2:
             kc_depth_final = round(kc_score * (kc_depth / kc_total_before_penalty))
             kc_relevance_final = round(kc_score * (kc_relevance / kc_total_before_penalty))
             kc_examples_final = round(kc_score * (kc_examples / kc_total_before_penalty))
-            kc_terminology_final = kc_score - (kc_accuracy_final + kc_depth_final + kc_relevance_final + kc_examples_final)
+            kc_terminology_final = max(0, kc_score - (kc_accuracy_final + kc_depth_final + kc_relevance_final + kc_examples_final))
         else:
             kc_accuracy_final = kc_depth_final = kc_relevance_final = kc_examples_final = kc_terminology_final = 0
-        
+
         if ssf_total_before_penalty > 0:
             ssf_fluency_final = round(ssf_score * (ssf_fluency / ssf_total_before_penalty))
             ssf_structure_final = round(ssf_score * (ssf_structure / ssf_total_before_penalty))
             ssf_pacing_final = round(ssf_score * (ssf_pacing / ssf_total_before_penalty))
-            ssf_grammar_final = ssf_score - (ssf_fluency_final + ssf_structure_final + ssf_pacing_final)
+            ssf_grammar_final = max(0, ssf_score - (ssf_fluency_final + ssf_structure_final + ssf_pacing_final))
         else:
             ssf_fluency_final = ssf_structure_final = ssf_pacing_final = ssf_grammar_final = 0
         
@@ -592,17 +623,19 @@ class SummaryReportServiceV2:
             if qa is None or not (bool(qa.transcription) or bool(qa.analysis_json)):
                 question_analysis.append(QuestionAnalysisItem(
                     id=idx + 1, totalQuestions=total_questions, type=q_type, question=interview_question.text,
+                    transcript=_extract_transcript_text(qa),
                     feedback=QuestionFeedback(knowledgeRelated=QuestionFeedbackSubsection(strengths=[], areasOfImprovement=["Not attempted"], actionableInsights=[])),
                 ))
                 continue
-            
+
             analysis = getattr(qa, "analysis_json", None) or {}
             d = analysis.get("domain") or {}
             strengths = _as_list_str(d.get("strengths"))[:3]
             improvements = _as_list_str(d.get("improvements"))[:3]
-            
+
             question_analysis.append(QuestionAnalysisItem(
                 id=idx + 1, totalQuestions=total_questions, type=q_type, question=interview_question.text,
+                transcript=_extract_transcript_text(qa),
                 feedback=QuestionFeedback(knowledgeRelated=QuestionFeedbackSubsection(strengths=strengths, areasOfImprovement=improvements, actionableInsights=[ActionableStep(title="Deepen Understanding", description="Review core concepts.")])),
             ))
         
@@ -621,6 +654,8 @@ class SummaryReportServiceV2:
         candidate_name: str | None = None,
     ) -> Dict[str, Any]:
         logger.info("Generating lite summary report for interview_id=%s, track=%s", interview_id, track)
+        """Generate the new restructured summary report (Lite)."""
+
         question_attempts = list(question_attempts)
         
         interview_stmt = sqlalchemy.select(Interview).where(Interview.id == interview_id)
@@ -709,9 +744,9 @@ class SummaryReportServiceV2:
             
             c = analysis.get("communication") or {}
             ccrit = c.get("criteria") or {}
-            structure_val = _as_float(c.get("structure_score") or (ccrit.get("structure", {}) or {}).get("score"))
+            structure_val = _as_float(c.get("structure_score")) or _extract_score(ccrit.get("structure"))
             if structure_val is not None: ssf_structure.append(max(0.0, min(100.0, structure_val)))
-            grammar_val = _as_float(c.get("grammar_score") or (ccrit.get("grammar", {}) or {}).get("score"))
+            grammar_val = _as_float(c.get("grammar_score")) or _extract_score(ccrit.get("grammar"))
             if grammar_val is not None: ssf_grammar.append(max(0.0, min(100.0, grammar_val)))
             
             p = analysis.get("pace") or {}
@@ -780,8 +815,8 @@ class SummaryReportServiceV2:
             qa_items = []
             for idx, iq in enumerate(all_interview_questions):
                 qa = attempts_by_question_id.get(iq.id)
-                strengths_text = "Answer provided and recorded."
-                improvements_text = "Review core concepts for deeper coverage."
+                strengths_text = "Feedback unavailable for this answer."
+                improvements_text = "Detailed feedback could not be generated — please review this question manually."
                 
                 if qa and getattr(qa, "analysis_json", None):
                     analysis = qa.analysis_json or {}
@@ -802,6 +837,7 @@ class SummaryReportServiceV2:
                     totalQuestions=total_questions,
                     type=_question_type_label(iq.category),
                     question=iq.text,
+                    transcript=_extract_transcript_text(qa),
                     feedback=QuestionFeedbackLite(
                         strengths=strengths_text,
                         areasOfImprovement=improvements_text
@@ -846,8 +882,8 @@ class SummaryReportServiceV2:
             qa_items = []
             for idx, iq in enumerate(all_interview_questions):
                 qa = attempts_by_question_id.get(iq.id)
-                strengths_text = "Answer provided and recorded."
-                improvements_text = "Review core concepts for deeper coverage."
+                strengths_text = "Feedback unavailable for this answer."
+                improvements_text = "Detailed feedback could not be generated — please review this question manually."
                 
                 if qa and getattr(qa, "analysis_json", None):
                     analysis = qa.analysis_json or {}
@@ -868,6 +904,7 @@ class SummaryReportServiceV2:
                     totalQuestions=total_questions,
                     type=_question_type_label(iq.category),
                     question=iq.text,
+                    transcript=_extract_transcript_text(qa),
                     feedback=QuestionFeedbackLite(
                         strengths=strengths_text,
                         areasOfImprovement=improvements_text
@@ -974,8 +1011,8 @@ class SummaryReportServiceV2:
 
         kc_avg = kc_score_total / 5.0
         ssf_avg = ssf_score_total / 4.0
-        kc_pct = int((kc_score_total / 25.0) * 100) if kc_score_total <= 25 else int(kc_score_total)
-        ssf_pct = int((ssf_score_total / 20.0) * 100) if ssf_score_total <= 20 else int(ssf_score_total)
+        kc_pct = int((kc_score_total / 25.0) * 100)
+        ssf_pct = int((ssf_score_total / 20.0) * 100)
 
         score_summary = {
             "knowledgeCompetence": {
@@ -1005,6 +1042,8 @@ class SummaryReportServiceV2:
         # Iterate using 'all_questions' (reordered list where follow-ups come right after parents)
         question_analysis = []
         for idx, iq in enumerate(all_questions):
+            category_map = {"tech": "Technical question", "tech_allied": "Technical Allied question", "behavioral": "Behavioral question"}
+            question_type = category_map.get(iq.category or "", "Technical question")
             question_type = _question_type_label(iq.category)
             
             attempt = attempts_by_question_id.get(iq.id)
@@ -1021,8 +1060,8 @@ class SummaryReportServiceV2:
                 areas = fb_data.get("areasOfImprovement") if isinstance(fb_data, dict) else None
 
                 feedback_item = {
-                    "strengths": strengths or "Answer provided and recorded.",
-                    "areasOfImprovement": areas or "Review topic key concepts for deeper coverage."
+                    "strengths": strengths or "Feedback unavailable for this answer.",
+                    "areasOfImprovement": areas or "Detailed feedback could not be generated — please review this question manually."
                 }
 
             question_analysis.append({
@@ -1030,6 +1069,7 @@ class SummaryReportServiceV2:
                 "totalQuestions": total_questions,
                 "type": question_type,
                 "question": iq.text,
+                "transcript": _extract_transcript_text(attempt),
                 "feedback": feedback_item,
             })
 

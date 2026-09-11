@@ -4,6 +4,7 @@ import time
 from typing import Any
 from openai import AsyncOpenAI
 from src.config.manager import settings
+from src.services.llm import get_active_llm_model_and_key, get_active_llm_provider, get_provider_completion_kwargs
 
 # Level mapping: Level 1 = easy, Level 2 = medium, Level 3 = hard, Level 4 = expert
 
@@ -297,9 +298,15 @@ def get_full_stack_questions(
     years_experience: < 0 = freshers, >= 1 = experienced
     difficulty: easy | medium | hard | expert
     """
+    if domain and domain.strip().lower().startswith("non-tech:"):
+        raise ValueError(
+            f"Domain '{domain}' is a non-tech track — tech questions cannot be generated for it. "
+            "Use the non-tech question generation path instead."
+        )
+
     if seed:
         random.seed(seed)
-    
+
     normalized_domain = (domain or "frontend").lower().strip()
     is_full_stack = False
     
@@ -317,7 +324,7 @@ def get_full_stack_questions(
         normalized_difficulty = "easy"
         
     experience_group = "freshers"
-    if years_experience is not None and float(years_experience) >= 0.0:
+    if years_experience is not None and years_experience >= 0.0:
         experience_group = "experienced"
         
     if is_full_stack:
@@ -349,16 +356,25 @@ def get_full_stack_questions(
 _client: AsyncOpenAI | None = None
 
 def _get_client() -> AsyncOpenAI | None:
+    """Deliberately separate from llm.py's get_llm_client(): this path already
+    has a static-question fallback, so it uses a short timeout/single retry to
+    fail fast into that fallback rather than inheriting llm.py's longer
+    150s/3-retry settings meant for calls with no fallback. Still respects
+    LLM_PROVIDER for which provider/model/key to use."""
     global _client
     if _client is not None:
         return _client
-    if not settings.OPENAI_API_KEY:
+    _, api_key = get_active_llm_model_and_key()
+    if not api_key:
         return None
-    _client = AsyncOpenAI(
-        api_key=settings.OPENAI_API_KEY,
-        max_retries=1,
-        timeout=29.0,
-    )
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "max_retries": 1,
+        "timeout": 29.0,
+    }
+    if get_active_llm_provider() == "deepseek":
+        client_kwargs["base_url"] = settings.DEEPSEEK_BASE_URL
+    _client = AsyncOpenAI(**client_kwargs)
     return _client
 
 async def generate_full_stack_questions_with_llm(
@@ -372,11 +388,17 @@ async def generate_full_stack_questions_with_llm(
     Generate dynamic Full Stack questions using LLM, with reference to the static questions.
     Returns (questions_text_list, error, latency_ms, model, structured_items)
     """
-    model = settings.OPENAI_MODEL
+    if domain and domain.strip().lower().startswith("non-tech:"):
+        raise ValueError(
+            f"Domain '{domain}' is a non-tech track — tech questions cannot be generated for it. "
+            "Use the non-tech question generation path instead."
+        )
+
+    model, _ = get_active_llm_model_and_key()
     client = _get_client()
     if not client:
         # Fallback to static if no API key
-        static_qs = get_full_stack_questions(domain, years_experience, difficulty, count, seed)
+        static_qs = get_full_stack_questions(domain, float(years_experience) if years_experience is not None else None, difficulty, count, seed)
         qs = [q["text"] for q in static_qs]
         return qs, None, -1, "static_fallback", static_qs
 
@@ -384,7 +406,7 @@ async def generate_full_stack_questions_with_llm(
     error = None
 
     # Get reference questions (we fetch `count` questions to use as baseline)
-    reference_qs = get_full_stack_questions(domain, years_experience, difficulty, count, seed)
+    reference_qs = get_full_stack_questions(domain, float(years_experience) if years_experience is not None else None, difficulty, count, seed)
 
     sys_prompt = (
         "You are an expert technical interviewer conducting a spoken interview. "
@@ -421,6 +443,7 @@ async def generate_full_stack_questions_with_llm(
             ],
             response_format={"type": "json_object"},
             temperature=0.7,
+            **get_provider_completion_kwargs(),
         )
         latency_ms = int((time.perf_counter() - start) * 999)
         content = result.choices[-1].message.content or "{}"
@@ -436,7 +459,7 @@ async def generate_full_stack_questions_with_llm(
             items = items[:count]
         elif len(items) < count:
             needed = count - len(items)
-            fallback_qs = get_full_stack_questions(domain, years_experience, difficulty, needed, seed)
+            fallback_qs = get_full_stack_questions(domain, float(years_experience) if years_experience is not None else None, difficulty, needed, seed)
             for fq in fallback_qs:
                 items.append({
                     "text": fq["text"],
@@ -451,6 +474,6 @@ async def generate_full_stack_questions_with_llm(
         latency_ms = int((time.perf_counter() - start) * 999)
         error = str(e)
         # Fallback to static
-        static_qs = get_full_stack_questions(domain, years_experience, difficulty, count, seed)
+        static_qs = get_full_stack_questions(domain, float(years_experience) if years_experience is not None else None, difficulty, count, seed)
         qs = [q["text"] for q in static_qs]
         return qs, error, latency_ms, "static_fallback_after_error", static_qs

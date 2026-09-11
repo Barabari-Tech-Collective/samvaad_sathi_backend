@@ -34,6 +34,7 @@ EXTENSION_TO_MIME = {
 
 MAX_AUDIO_SIZE_BYTES = 25 * 1024 * 1024  # 25MB (Whisper API limit)
 MAX_DURATION_SECONDS = 600  # 10 minutes
+MIN_DURATION_SECONDS = 3  # below this, a recording is very unlikely to contain a real answer
 
 
 async def validate_audio_file(file: UploadFile) -> Tuple[bytes, dict]:
@@ -105,11 +106,17 @@ async def validate_audio_file(file: UploadFile) -> Tuple[bytes, dict]:
             status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Audio duration ({estimated_duration:.1f}s) exceeds maximum allowed ({MAX_DURATION_SECONDS}s)"
         )
+    if estimated_duration and estimated_duration < MIN_DURATION_SECONDS:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Audio duration ({estimated_duration:.1f}s) is too short to contain a real answer (minimum {MIN_DURATION_SECONDS}s)"
+        )
 
     metadata = {
         "filename": file.filename or "unknown.audio",
         "content_type": content_type,
         "size": total_size,
+        "estimated_duration_seconds": estimated_duration,
     }
 
     return audio_bytes, metadata

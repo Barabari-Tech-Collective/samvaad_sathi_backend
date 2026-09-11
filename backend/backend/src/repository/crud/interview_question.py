@@ -58,6 +58,7 @@ class InterviewQuestionCRUDRepository(BaseCRUDRepository):
                 is_follow_up=bool(q_data.get("is_follow_up", False)),
                 parent_question_id=q_data.get("parent_question_id"),
                 follow_up_strategy=q_data.get("follow_up_strategy"),
+                audio_url=q_data.get("audio_url"),
             )
             self.async_session.add(question)
             created.append(question)

@@ -85,10 +85,10 @@ class FinalReportService:
                     crit = c["criteria"]
                     # derive when possible
                     mapping = {
-                        "clarity_score": (crit.get("clarity", {}) or {}).get("score"),
-                        "vocabulary_score": ((crit.get("vocabulary", {}) or {}).get("score") or (crit.get("jargon_use", {}) or {}).get("score")),
-                        "grammar_score": (crit.get("grammar", {}) or {}).get("score"),
-                        "structure_score": (crit.get("structure", {}) or {}).get("score"),
+                        "clarity_score": _criteria_score(crit, "clarity"),
+                        "vocabulary_score": _criteria_score(crit, "vocabulary") or _criteria_score(crit, "jargon_use"),
+                        "grammar_score": _criteria_score(crit, "grammar"),
+                        "structure_score": _criteria_score(crit, "structure"),
                     }
                     v = _as_float(mapping.get(k))
                 if v is not None:
@@ -199,6 +199,21 @@ def _as_float(v: Any) -> Optional[float]:
         return f if math.isfinite(f) else None
     except (TypeError, ValueError):
         return None
+
+
+def _criteria_score(criteria: Any, key: str) -> Optional[float]:
+    """Live LLM output for the `criteria` field has been observed to return
+    either a plain number or a nested {"score": ..., "reasons": [...]} object
+    for the same schema across different calls, regardless of provider -
+    the field is deliberately typed loosely (dict[str, Any]) in llm.py.
+    Calling .get("score") on a plain number crashes with AttributeError;
+    this handles both shapes."""
+    if not isinstance(criteria, dict):
+        return None
+    value = criteria.get(key)
+    if isinstance(value, dict):
+        return _as_float(value.get("score"))
+    return _as_float(value)
 
 
 def _as_list_str(v: Any) -> List[str]:

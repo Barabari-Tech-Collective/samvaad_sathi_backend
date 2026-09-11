@@ -30,6 +30,29 @@ class JobProfileBase(BaseSchemaModel):
 class JobProfileCreateV2(JobProfileBase):
     pass
 
+class JobProfileUpdateV2(BaseSchemaModel):
+    job_name: Optional[str] = pydantic.Field(
+        default=None,
+        validation_alias=pydantic.AliasChoices("job_name", "jobName", "title"),
+        serialization_alias="job_name"
+    )
+    job_description: Optional[str] = pydantic.Field(
+        default=None,
+        validation_alias=pydantic.AliasChoices("job_description", "jobDescription", "description"),
+        serialization_alias="job_description"
+    )
+    company_name: Optional[str] = None
+    experience_level: Optional[str] = None
+    skills: Optional[List[str]] = None
+    additional_context: Optional[str] = None
+    category: Optional[str] = None
+    employment_type: Optional[str] = pydantic.Field(
+        default=None,
+        alias="employmentType",
+        validation_alias=pydantic.AliasChoices("employmentType", "employment_type"),
+        serialization_alias="employmentType"
+    )
+
 class JobProfileResponse(JobProfileBase):
     id: int
     created_at: datetime.datetime

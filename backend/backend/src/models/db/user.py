@@ -39,6 +39,9 @@ class User(Base):  # type: ignore
     name: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(length=128), nullable=False)
     # Optional resume fields
     resume_text: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
+    original_resume_s3_key: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=512), nullable=True
+    )
 
     # --- New profile attributes ---
     degree: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
@@ -70,6 +73,14 @@ class User(Base):  # type: ignore
         sqlalchemy.Boolean, nullable=False, server_default=sqlalchemy.text("false"),
         doc="Indicates whether the user has completed the onboarding flow via /api/users/profile"
     )
+    # Authorization flag for the cross-student analytics/dashboard endpoints.
+    # Defaults to false: students must never see other students' data. Grant
+    # explicitly (see get_current_admin_user in api/dependencies/auth.py) to
+    # the mentor/ops accounts that actually run the dashboard.
+    is_admin: SQLAlchemyMapped[bool] = sqlalchemy_mapped_column(
+        sqlalchemy.Boolean, nullable=False, server_default=sqlalchemy.text("false"),
+        doc="Grants access to cross-student analytics endpoints. Default false."
+    )
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True), nullable=False, server_default=sqlalchemy_functions.now()
     )
@@ -79,6 +90,9 @@ class User(Base):  # type: ignore
     )
     interviews = relationship(
         "Interview", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    resumes = relationship(
+        "UserResume", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
 
     __mapper_args__ = {"eager_defaults": True}

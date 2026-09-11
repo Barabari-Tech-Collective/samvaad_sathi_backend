@@ -50,6 +50,7 @@ class QuestionItem(BaseSchemaModel):
     parent_question_id: int | None = None
     follow_up_strategy: str | None = None
     supplement: "QuestionSupplementOut | None" = None
+    audio_url: str | None = None
 
 
 class QuestionItemWithHint(BaseSchemaModel):
@@ -76,6 +77,7 @@ class QuestionSupplementOut(BaseSchemaModel):
 class InterviewCreate(BaseSchemaModel):
     track: str
     difficulty: str | None = None  # easy | medium | hard
+    job_profile_id: int | None = None
 
 
 class GenerateQuestionsRequest(BaseSchemaModel):

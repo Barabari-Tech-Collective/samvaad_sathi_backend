@@ -1,22 +1,17 @@
 import json
 from fastapi import HTTPException
-from openai import AsyncOpenAI
 
-from src.config.manager import settings
+from src.services.llm import get_llm_client, get_active_llm_model_and_key, get_provider_completion_kwargs
 from src.services.ai_resume.prompt_builder import build_structuring_prompt
-
-# Initialize OpenAI client
-client = AsyncOpenAI(
-    api_key=settings.OPENAI_API_KEY,
-)
 
 async def generate_structured_resume_data(
     resume_text: str,
     analysis_result: dict,
 ):
     """
-    Takes raw resume text and an ATS analysis, and uses OpenAI to output
-    a fully structured JSON dictionary matching the resume templates schema.
+    Takes raw resume text and an ATS analysis, and uses the configured LLM
+    provider to output a fully structured JSON dictionary matching the
+    resume templates schema.
     """
     try:
         # Build prompt
@@ -25,9 +20,16 @@ async def generate_structured_resume_data(
             analysis_result=analysis_result,
         )
 
-        # Call OpenAI
+        client = get_llm_client()
+        model, _ = get_active_llm_model_and_key()
+        if client is None:
+            raise HTTPException(
+                status_code=503,
+                detail="LLM provider is not configured",
+            )
+
         response = await client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=model,
             temperature=1,
             response_format={"type": "json_object"},
             messages=[
@@ -42,6 +44,7 @@ async def generate_structured_resume_data(
                     "content": prompt,
                 },
             ],
+            **get_provider_completion_kwargs(),
         )
 
         # Extract AI content

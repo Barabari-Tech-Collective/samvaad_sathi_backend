@@ -8,6 +8,7 @@ POST /pacing-practice/session/{id}/submit – submit audio, get score + metrics
 GET  /pacing-practice/session/{id}    – retrieve a past session result
 """
 
+import asyncio
 import logging
 
 import fastapi
@@ -37,6 +38,7 @@ from src.services.pacing_practice_service import (
     get_level_statuses,
     get_random_prompt,
     score_label,
+    wpm_status_and_feedback,
 )
 from src.services.whisper import transcribe_audio_with_whisper
 from src.services.analytics_events import track_analytics_event
@@ -133,7 +135,13 @@ async def create_pacing_session(
 
     # --- Pick a prompt ---
     try:
-        prompt_text, prompt_index = get_random_prompt(level)
+        # get_random_prompt loads the prompt bank from disk on the first call
+        # per worker process (then caches it in-memory) - that first read is
+        # blocking file I/O, which would otherwise run directly on the event
+        # loop and stall every other request this worker is handling for its
+        # duration. to_thread moves it off the loop; cheap dict-lookup calls
+        # after the cache is warm pay only the thread-hop overhead.
+        prompt_text, prompt_index = await asyncio.to_thread(get_random_prompt, level)
     except ValueError as exc:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -257,6 +265,7 @@ async def submit_pacing_session(
         "wpm": wpm,
         "pause_words_interval": pause_interval,
         "wpm_status": metrics["wpm_status"],
+        "wpm_feedback": metrics["wpm_feedback"],
         "pause": pause_data,
         "filler": filler_data,
         "level3_report": metrics.get("level3_report"),
@@ -359,11 +368,15 @@ async def get_pacing_session(
 
     if db_session.analysis_result and db_session.wpm is not None:
         ar = db_session.analysis_result
+        # Older sessions were persisted before wpm_feedback was stored -
+        # fall back to re-deriving it from the WPM value so status and
+        # feedback can never disagree with each other.
+        fallback_status, fallback_feedback = wpm_status_and_feedback(db_session.wpm)
         speech_speed = PacingAnalysisMetric(
             value=round(db_session.wpm, 1),
             ideal_range="120-150",
-            status=ar.get("wpm_status", ""),
-            feedback="",
+            status=ar.get("wpm_status") or fallback_status,
+            feedback=ar.get("wpm_feedback") or fallback_feedback,
         )
         # New format stores full dicts — with graceful fallback for old sessions
         if ar.get("pause"):

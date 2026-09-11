@@ -10,4 +10,8 @@ from .pacing_practice import PacingPracticeSession  # noqa: F401
 from .job_profile import JobProfile  # noqa: F401
 from .analytics_event import AnalyticsEvent  # noqa: F401
 from .job_profile_question import JobProfileQuestion  # noqa: F401
-
+from .user_resume import UserResume  # noqa: F401
+from .pronunciation_practice import PronunciationPractice  # noqa: F401
+from .structure_practice import StructurePractice, StructurePracticeAnswer  # noqa: F401
+from .ai_resume_analysis import AIResumeAnalysis  # noqa: F401
+from .resume_instance import UserResumeInstance  # noqa: F401
