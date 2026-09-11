@@ -71,9 +71,29 @@ from src.services.analytics_events import track_analytics_event
 logger = logging.getLogger(__name__)
 FOLLOW_UP_STRATEGY = "llm_transcription_based"
 FULL_STACK_ROLE = "Full Stack Developer"
+# Only the first N base questions of an interview may spawn a follow-up.
+# Applies to every track - tech and non-tech alike, per product decision.
+MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS = 2
 
 
 router = fastapi.APIRouter(prefix="/v2", tags=["interviews-v2"])
+
+
+def _apply_follow_up_eligibility(questions_data: list[dict[str, object]]) -> None:
+    """Cap follow-up eligibility to the first MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS
+    entries, mutating questions_data in place.
+
+    Enforced here rather than left to whatever a question source (an LLM
+    prompt, an admin-authored job-profile question, a client-supplied item)
+    happens to set, so the product rule holds regardless of where the
+    questions came from - see generate_full_stack_questions_with_llm's
+    prompt, which asks the model to tag every question "default" and would
+    silently defeat the cap if trusted on its own.
+    """
+    for idx, question_data in enumerate(questions_data):
+        question_data["follow_up_strategy"] = (
+            FOLLOW_UP_STRATEGY if idx < MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS else None
+        )
 
 
 def _supplements_enabled_for_track(track: str | None) -> bool:
@@ -502,11 +522,13 @@ async def generate_questions_v2(
         else:
             for question in questions:
                 questions_data.append({
-                    "text": question, 
-                    "topic": None, 
-                    "category": None, 
+                    "text": question,
+                    "topic": None,
+                    "category": None,
                     "follow_up_strategy": FOLLOW_UP_STRATEGY
                 })
+
+        _apply_follow_up_eligibility(questions_data)
 
         # Pre-calculate predictable S3 URLs and enqueue background generation
         tasks_to_run = _prepare_audio_for_questions(questions_data)
@@ -746,8 +768,7 @@ async def generate_non_tech_questions_v2(
             if resume_context:
                 questions_data[0]["text"] = f"Based on your background, {questions_data[0]['text']}"
 
-        for idx in range(min(2, len(questions_data))):
-            questions_data[idx]["follow_up_strategy"] = FOLLOW_UP_STRATEGY
+        _apply_follow_up_eligibility(questions_data)
 
         # Pre-calculate predictable S3 URLs and enqueue background generation
         tasks_to_run = _prepare_audio_for_questions(questions_data)

@@ -10,7 +10,7 @@ from src.models.db.question_attempt import QuestionAttempt
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
-from src.services.llm import generate_follow_up_question
+from src.services.llm import _is_near_empty_answer, generate_follow_up_question
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,18 @@ class FollowUpService:
         )
         if not answer_chunk:
             logger.debug("Skipping follow-up generation due to empty transcription chunk for question %s", question.id)
+            return None
+
+        # Same threshold analyze_domain_with_llm/analyze_communication_with_llm
+        # already use to short-circuit scoring on a near-empty answer (see
+        # _is_near_empty_answer in llm.py). Without this, "I don't know" or a
+        # one-word reply still had enough characters to pass the check above,
+        # so the LLM was asked to write a follow-up clarifying an answer that
+        # never said anything to clarify.
+        if _is_near_empty_answer(answer_chunk):
+            logger.debug(
+                "Skipping follow-up generation for near-empty answer (question %s)", question.id
+            )
             return None
 
         interview = await self._interview_repo.get_by_id(interview_id=attempt.interview_id)
