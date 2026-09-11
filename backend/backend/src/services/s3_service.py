@@ -25,14 +25,33 @@ except Exception as e:
     BUCKET_NAME = None
 
 
+def tts_audio_s3_key(question_id: int) -> str:
+    """
+    Predictable S3 key for a question's TTS audio, scoped to the currently
+    configured ElevenLabs voice.
+
+    Scoping by voice means that when ELEVENLABS_VOICE_ID changes, previously
+    generated audio no longer matches the current key and gets regenerated
+    instead of being served forever under a stale voice - see
+    interviews_v2._prepare_audio_for_questions, which uses this same
+    function to decide whether a question needs new TTS audio.
+    """
+    import hashlib
+
+    from src.config.manager import settings
+
+    voice_tag = hashlib.md5(settings.ELEVENLABS_VOICE_ID.encode()).hexdigest()[:8]
+    return f"Samvaad-Saathi/tts-audio/question_{question_id}_{voice_tag}.mp3"
+
+
 def upload_audio_to_s3(audio_bytes: bytes, question_id: int) -> Optional[str]:
     """
     Uploads the TTS audio byte stream to the S3 bucket.
-    
+
     Args:
         audio_bytes: The raw MP3 byte data from ElevenLabs.
         question_id: The ID of the question (used for naming the file).
-        
+
     Returns:
         The public S3 URL of the uploaded file, or None if the upload failed.
     """
@@ -40,8 +59,9 @@ def upload_audio_to_s3(audio_bytes: bytes, question_id: int) -> Optional[str]:
         logger.error("S3 client is not configured. Ensure AWS credentials are in .env.")
         return None
 
-    # Generate a predictable filename using the text hash ID.
-    s3_file_path = f"Samvaad-Saathi/tts-audio/question_{question_id}.mp3"
+    # Generate a predictable filename using the text hash ID, scoped to the
+    # active voice so a voice change can't leave old and new audio mixed.
+    s3_file_path = tts_audio_s3_key(question_id)
 
     try:
         s3_client.put_object(

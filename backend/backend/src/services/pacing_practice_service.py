@@ -8,6 +8,7 @@ Responsibilities
 * Derive level unlock status and overall readiness from persisted best scores.
 """
 
+import difflib
 import json
 import re
 import random
@@ -163,6 +164,17 @@ def _parse_prompt_pause_zones(prompt_text: str) -> dict:
             elif ch in _MEDIUM_PUNCT:
                 optional_.append(word_idx_for_this)
 
+    # A pause "after" the very last prompt word is unmeasurable - pauses are
+    # only detected as gaps *between* two consecutive words, and there's no
+    # word following the last one to measure a gap against (speech just
+    # ends there). Without this, the final full stop - the single mandatory
+    # zone in most short one-sentence prompts - could never be satisfied,
+    # permanently forcing "mandatory pauses not covered" regardless of how
+    # the user actually paused.
+    last_word_idx = word_idx - 1
+    mandatory = [z for z in mandatory if z != last_word_idx]
+    optional_ = [z for z in optional_ if z != last_word_idx]
+
     expected = len(mandatory) + len(optional_) * 0.6
 
     return {
@@ -185,6 +197,57 @@ def _detect_audio_pauses(words: list[dict]) -> list[int]:
 
 def _is_near_zone(pause_idx: int, zones: list[int], tolerance: int = 1) -> bool:
     return any(abs(pause_idx - z) <= tolerance for z in zones)
+
+
+def _prompt_word_tokens(prompt_text: str) -> list[str]:
+    """Bare (punctuation-stripped) lowercase word tokens from prompt_text, in
+    the same order/indexing as _parse_prompt_pause_zones' word_idx so the
+    two stay aligned."""
+    tokens: list[str] = []
+    for token in prompt_text.split():
+        bare = token.rstrip(".,!?;:—–")
+        if bare:
+            tokens.append(bare.lower())
+    return tokens
+
+
+def _align_words_to_prompt(words: list[dict], prompt_tokens: list[str]) -> list[int]:
+    """Map each transcribed-word index to its best-matching prompt-word index.
+
+    Whisper's transcript is rarely a perfect word-for-word match of the
+    prompt (dropped/added words, contraction differences, mis-transcribed
+    tokens), so pause positions detected in the transcript can't be
+    compared by raw index against zones computed from the prompt text -
+    doing so was making placement accuracy and mandatory compliance (70%
+    of the pause score) collapse to near-zero on almost any transcription
+    that wasn't an exact match, regardless of actual pause behaviour.
+
+    difflib finds the longest matching runs between the two token
+    sequences; positions inside a matching/replace run map 1:1 to the
+    aligned prompt position, and any inserted words fall back to the
+    nearest already-aligned neighbour.
+    """
+    spoken_tokens = [
+        w.get("word", "").strip().lower().strip(".,!?;:—–") for w in words
+    ]
+    if not spoken_tokens or not prompt_tokens:
+        return [0] * len(spoken_tokens)
+
+    matcher = difflib.SequenceMatcher(None, spoken_tokens, prompt_tokens, autojunk=False)
+    mapping: list[int | None] = [None] * len(spoken_tokens)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("equal", "replace"):
+            span = min(i2 - i1, j2 - j1)
+            for k in range(span):
+                mapping[i1 + k] = j1 + k
+
+    last_seen = 0
+    for idx in range(len(mapping)):
+        if mapping[idx] is not None:
+            last_seen = mapping[idx]
+        else:
+            mapping[idx] = last_seen
+    return mapping
 
 
 def _segment_lengths(words: list[dict], pause_positions: list[int]) -> list[int]:
@@ -219,13 +282,23 @@ def score_pause_distribution(words: list[dict], prompt_text: str) -> dict:
     all_zones       = mandatory_zones + optional_zones
     expected_pauses = structure["expected_pauses"]
 
+    # `detected` indexes the actual transcript (used for segment lengths and
+    # counts). `detected_aligned` maps those same pauses into prompt-word
+    # index space so they can be compared against mandatory_zones/
+    # optional_zones, which are computed from the prompt text.
     detected       = _detect_audio_pauses(words)
     total_detected = len(detected)
+
+    prompt_tokens   = _prompt_word_tokens(prompt_text)
+    word_alignment  = _align_words_to_prompt(words, prompt_tokens)
+    detected_aligned = [
+        word_alignment[p] for p in detected if p < len(word_alignment)
+    ]
 
     # ----- 1. Placement Accuracy (40 %) -----------------------------------
     total_zones = len(all_zones)
     if total_zones > 0:
-        correct = sum(1 for p in detected if _is_near_zone(p, all_zones))
+        correct = sum(1 for p in detected_aligned if _is_near_zone(p, all_zones))
         placement_acc = correct / total_zones
     else:
         placement_acc = 1.0
@@ -238,7 +311,7 @@ def score_pause_distribution(words: list[dict], prompt_text: str) -> dict:
     if n_mandatory > 0:
         mandatory_hit    = sum(
             1 for z in mandatory_zones
-            if any(abs(p - z) <= 1 for p in detected)
+            if any(abs(p - z) <= 1 for p in detected_aligned)
         )
         mandatory_compliance = mandatory_hit / n_mandatory
         mandatory_missed     = n_mandatory - mandatory_hit
@@ -250,6 +323,8 @@ def score_pause_distribution(words: list[dict], prompt_text: str) -> dict:
     mandatory_pts = mandatory_compliance * 30
 
     # ----- 3. Segment Length Accuracy (20 %) ------------------------------
+    # Segment lengths describe the actual spoken word chunks, so this stays
+    # in transcript-index space rather than the prompt-aligned one.
     segs = _segment_lengths(words, detected)
     if segs:
         good_segs = sum(1 for s in segs if 6 <= s <= 12)
@@ -288,7 +363,7 @@ def score_pause_distribution(words: list[dict], prompt_text: str) -> dict:
     n_optional  = len(optional_zones)
     comma_hit   = sum(
         1 for z in optional_zones
-        if any(abs(p - z) <= 1 for p in detected)
+        if any(abs(p - z) <= 1 for p in detected_aligned)
     )
     comma_missed = n_optional - comma_hit
 
@@ -357,6 +432,22 @@ def get_random_prompt(level: int) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
+
+def wpm_status_and_feedback(avg_wpm: float) -> tuple[str, str]:
+    """Map an average WPM to its (status, feedback) pair.
+
+    Shared by the live scoring path and the past-session retrieval fallback
+    so status and feedback text can never drift apart - see the bug where
+    GET /pacing-practice/session/{id} used to send back feedback="" and the
+    frontend fell back to stale copy that didn't match the real status.
+    """
+    if 120 <= avg_wpm <= 150:
+        return "Good", "Your speaking pace is within the ideal range for interviews"
+    elif avg_wpm < 120:
+        return "Needs Adjustment", "Try speaking a little faster to maintain listener engagement"
+    else:
+        return "Needs Adjustment", "Slow down slightly to give your listener time to follow along"
+
 
 def _wpm_score(wpm: float) -> float:
     """Map WPM to a 0-100 component score.
@@ -729,16 +820,24 @@ def build_level3_report(words: list[dict], prompt_text: str, transcript: str, au
             "feedback": pause_distribution["feedback"],
             "avg_words_per_pause": round((len(words) / max(1, pause_distribution["total_pauses"])), 1),
             "total_pauses": pause_distribution["total_pauses"],
-            "expected_pauses": 0.0,
+            # Level 3 answers are free-form (no scripted prompt to derive
+            # punctuation-based mandatory/optional zones from), so this
+            # reuses _score_pause_distribution_level3's duration-based
+            # metrics instead of the prompt-zone-based ones from
+            # score_pause_distribution. These used to be hardcoded to 0.0 /
+            # True regardless of actual pausing - always claiming "100%
+            # mandatory covered" alongside "0% compliance" at the same
+            # time, which is why the Level 3 report looked static.
+            "expected_pauses": float(pause_distribution["total_pauses"]),
             "mandatory_pause_count": 0,
             "mandatory_pauses_hit": 0,
             "mandatory_pauses_missed": 0,
             "comma_pauses_missed": 0,
             "mandatory_covered": True,
-            "placement_accuracy": 0.0,
-            "mandatory_compliance": 0.0,
-            "segment_accuracy": 0.0,
-            "penalty_pct": 0.0,
+            "placement_accuracy": float(pause_distribution["score"]),
+            "mandatory_compliance": 100.0,
+            "segment_accuracy": float(pause_distribution["score"]),
+            "penalty_pct": float(pause_distribution.get("long_pause_pct", 0.0)),
             "pause_words_interval": round((len(words) / max(1, pause_distribution["total_pauses"])), 2),
         },
         "filler": filler,
@@ -791,15 +890,7 @@ def build_pacing_metrics(
     else:
         avg_wpm = pace_raw.get("avg_wpm", 0.0)
 
-    if 120 <= avg_wpm <= 150:
-        wpm_status   = "Good"
-        wpm_feedback = "Your speaking pace is within the ideal range for interviews"
-    elif avg_wpm < 120:
-        wpm_status   = "Needs Adjustment"
-        wpm_feedback = "Try speaking a little faster to maintain listener engagement"
-    else:
-        wpm_status   = "Needs Adjustment"
-        wpm_feedback = "Slow down slightly to give your listener time to follow along"
+    wpm_status, wpm_feedback = wpm_status_and_feedback(avg_wpm)
 
     # --- Pause distribution (linguistic scorer) ---
     pause = score_pause_distribution(words, prompt_text)
