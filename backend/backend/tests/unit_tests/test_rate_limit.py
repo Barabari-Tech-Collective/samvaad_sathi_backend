@@ -52,14 +52,26 @@ async def test_rate_limiter_blocks_over_limit(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rate_limiter_fails_open_on_redis_error(monkeypatch):
+async def test_rate_limiter_degrades_to_local_counter_on_redis_error(monkeypatch):
+    """Supersedes an earlier test that asserted full fail-open.
+
+    Failing fully open meant any environment without Redis (staging, for
+    one) had no rate limiting at all, which defeated the purpose of having
+    it. Redis is still the correct shared backend; when it is unreachable
+    we now fall back to an in-process counter so protection degrades
+    rather than disappearing.
+    """
+    rate_limit_module._LOCAL_HITS.clear()
     monkeypatch.setattr(rate_limit_module.async_redis, "client", _RaisingRedisClient())
 
-    check = rate_limiter(key_prefix="tts", limit=1, window_seconds=60)
-    # Should not raise even though the (fake) limit of 1 would otherwise be
-    # exceeded by repeated calls - Redis being down must never block requests.
+    check = rate_limiter(key_prefix="tts", limit=2, window_seconds=60)
     await check(current_user=_FakeUser())
     await check(current_user=_FakeUser())
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await check(current_user=_FakeUser())
+    assert exc_info.value.status_code == 429
+    rate_limit_module._LOCAL_HITS.clear()
 
 
 @pytest.mark.asyncio

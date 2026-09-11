@@ -20,6 +20,11 @@ class BackendBaseSettings(BaseSettings):
     SERVER_PORT: int = decouple.config("BACKEND_SERVER_PORT", cast=int)  # type: ignore
     SERVER_WORKERS: int = decouple.config("BACKEND_SERVER_WORKERS", cast=int)  # type: ignore
     API_PREFIX: str = "/api"
+    # Interactive docs are served unauthenticated, so they hand anyone who
+    # finds the host a complete map of the API surface. Kept on by default for
+    # local/dev convenience; set EXPOSE_API_DOCS=False in any internet-facing
+    # environment (see set_backend_app_attributes, which nulls these out).
+    EXPOSE_API_DOCS: bool = decouple.config("EXPOSE_API_DOCS", cast=bool, default=True)  # type: ignore
     DOCS_URL: str = "/docs"
     OPENAPI_URL: str = "/openapi.json"
     REDOC_URL: str = "/redoc"
@@ -110,6 +115,24 @@ class BackendBaseSettings(BaseSettings):
     # Refresh token settings (in minutes). Default: 30 days
     REFRESH_TOKEN_EXPIRY_MINUTES: int = decouple.config("REFRESH_TOKEN_EXPIRY_MINUTES", cast=int, default=60 * 24 * 30)  # type: ignore
 
+    # ------------------------------
+    # Sampark Saathi central auth (replaces Cognito as the source of student identity)
+    # ------------------------------
+    # Public origin of the barabari-auth-service, e.g. https://barabari-auth-service.onrender.com
+    AUTH_SERVICE_BASE_URL: str = decouple.config("AUTH_SERVICE_BASE_URL", cast=str, default="")  # type: ignore
+    # Same value as auth-service's JWT_SECRET env var (a Base64 string decoded to raw HMAC key
+    # bytes on both sides - see src/securities/authorizations/sso_jwt.py). Shares auth-service's
+    # own local-dev default so both services validate each other's tokens out of the box.
+    AUTH_SERVICE_JWT_SECRET: str = decouple.config(
+        "AUTH_SERVICE_JWT_SECRET",
+        cast=str,
+        default="QWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXphYmNkZWYxMjM0NTY3ODkwMTIz",
+    )  # type: ignore
+    # This product's row in auth-service's `products` table (already seeded as SAMVAAD_SAATHI).
+    SAMPARK_PRODUCT_UNIQUE_ID: str = decouple.config(
+        "SAMPARK_PRODUCT_UNIQUE_ID", cast=str, default="81c53f68-35f4-4133-9e35-06f5c30354b785"
+    )  # type: ignore
+
     # Audio processing settings (stateless - no upload directory needed)
     MAX_AUDIO_SIZE_MB: int = decouple.config("MAX_AUDIO_SIZE_MB", cast=int, default=25)  # type: ignore
     OPENAI_MODEL: str = decouple.config("OPENAI_MODEL", cast=str, default="gpt-4o-mini")  # type: ignore
@@ -125,6 +148,19 @@ class BackendBaseSettings(BaseSettings):
     DEEPSEEK_API_KEY: str = decouple.config("DEEPSEEK_API_KEY", cast=str, default="")  # type: ignore
     DEEPSEEK_BASE_URL: str = decouple.config("DEEPSEEK_BASE_URL", cast=str, default="https://api.deepseek.com")  # type: ignore
     DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-v4-flash")  # type: ignore
+
+    # Which provider src/services/whisper.py's transcribe_audio_with_whisper()
+    # actually uses. "groq" (default, as of 2026-09-11 - live-verified against
+    # near word-perfect transcription on real synthesized audio, ~89% cheaper
+    # than OpenAI) or "openai" (kept as a fallback path, not deleted, in case
+    # Groq has an outage or broader real-audio testing turns up quality
+    # issues - switching back is a one-var change, not a redeploy of new
+    # code). See scaling plan Phase 8. Separate from LLM_PROVIDER; DeepSeek
+    # has no transcription capability at all, so this is a different provider.
+    STT_PROVIDER: str = decouple.config("STT_PROVIDER", cast=str, default="groq")  # type: ignore
+    GROQ_API_KEY: str = decouple.config("GROQ_API_KEY", cast=str, default="")  # type: ignore
+    GROQ_BASE_URL: str = decouple.config("GROQ_BASE_URL", cast=str, default="https://api.groq.com/openai/v1")  # type: ignore
+    GROQ_WHISPER_MODEL: str = decouple.config("GROQ_WHISPER_MODEL", cast=str, default="whisper-large-v3-turbo")  # type: ignore
 
     # ElevenLabs TTS
     ELEVENLABS_API_KEY: str = decouple.config("ELEVENLABS_API_KEY", cast=str, default="")  # type: ignore
@@ -148,6 +184,15 @@ class BackendBaseSettings(BaseSettings):
     RATE_LIMIT_TTS_PER_MINUTE: int = decouple.config("RATE_LIMIT_TTS_PER_MINUTE", cast=int, default=20)  # type: ignore
     RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR: int = decouple.config("RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR", cast=int, default=10)  # type: ignore
 
+    # Per-IP throttles on unauthenticated auth endpoints. These previously had
+    # no rate limiting at all, which combined with an unbounded password field
+    # left credential stuffing completely unthrottled.
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = decouple.config("RATE_LIMIT_LOGIN_PER_MINUTE", cast=int, default=10)  # type: ignore
+    RATE_LIMIT_SIGNUP_PER_HOUR: int = decouple.config("RATE_LIMIT_SIGNUP_PER_HOUR", cast=int, default=20)  # type: ignore
+
+    # Minimum password length enforced at registration.
+    MIN_PASSWORD_LENGTH: int = decouple.config("MIN_PASSWORD_LENGTH", cast=int, default=8)  # type: ignore
+
     # How long cached TTS audio for identical (text, voice_id) pairs is kept.
     # Interview questions repeat heavily across users, so caching cuts both
     # ElevenLabs cost and per-request latency on cache hits.
@@ -165,14 +210,17 @@ class BackendBaseSettings(BaseSettings):
         """
         Set all `FastAPI` class' attributes with the custom values defined in `BackendBaseSettings`.
         """
+        # Passing None disables the route entirely in FastAPI, which is what we
+        # want when docs are not meant to be public - serving a 404 rather than
+        # the full endpoint inventory.
         return {
             "title": self.TITLE,
             "version": self.VERSION,
             "debug": self.DEBUG,
             "description": self.DESCRIPTION,
-            "docs_url": self.DOCS_URL,
-            "openapi_url": self.OPENAPI_URL,
-            "redoc_url": self.REDOC_URL,
+            "docs_url": self.DOCS_URL if self.EXPOSE_API_DOCS else None,
+            "openapi_url": self.OPENAPI_URL if self.EXPOSE_API_DOCS else None,
+            "redoc_url": self.REDOC_URL if self.EXPOSE_API_DOCS else None,
             "openapi_prefix": self.OPENAPI_PREFIX,
             "api_prefix": self.API_PREFIX,
         }
