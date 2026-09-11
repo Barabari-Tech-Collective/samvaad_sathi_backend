@@ -141,7 +141,7 @@ async def get_me(
     resumes_stmt = (
         sqlalchemy.select(UserResume.id, UserResume.filename, UserResume.source)
         .where(UserResume.user_id == current_user.id)
-        .order_by(UserResume.created_at.desc())
+        .order_by(UserResume.created_at.desc(), UserResume.id.desc())
     )
     resumes_result = await session.execute(resumes_stmt)
     resumes = resumes_result.all()
