@@ -8,7 +8,7 @@ import sqlalchemy
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
-from src.api.dependencies.admin import get_current_admin_user
+from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.session import get_async_session
 from src.models.db.interview import Interview
@@ -103,7 +103,7 @@ async def get_student_analytics(
     # against the caller - any student could read any other student's full
     # performance analytics by incrementing the id. Students keep access to
     # their own analytics; anything else requires admin.
-    if user_id != current_user.id and not getattr(current_user, "is_admin", False):
+    if user_id != current_user.id and not is_admin_user(current_user):
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_403_FORBIDDEN,
             detail="You may only view your own analytics.",
@@ -132,7 +132,7 @@ async def get_interview_analytics(
 ):
     # Same gap as /student/{user_id}: interview_id was taken from the path
     # with no ownership check. Students keep access to their own interviews.
-    if not getattr(current_user, "is_admin", False):
+    if not is_admin_user(current_user):
         owner_id = (
             await session.execute(
                 sqlalchemy.select(Interview.user_id).where(Interview.id == interview_id)
