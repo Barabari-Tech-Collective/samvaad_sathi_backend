@@ -137,33 +137,28 @@ async def get_me(
     # Get total interview attempts count
     total_attempts = await summary_repo.count_by_user(user_id=current_user.id)
 
-    # Fetch the latest onboarding resume filename (if any) for display on the Profile page
-    stmt = (
-        sqlalchemy.select(UserResume.filename)
-        .where(
-            UserResume.user_id == current_user.id,
-            UserResume.source == "onboarding",
-        )
+    # Fetch all user resumes to avoid multiple queries
+    resumes_stmt = (
+        sqlalchemy.select(UserResume.id, UserResume.filename, UserResume.source)
+        .where(UserResume.user_id == current_user.id)
         .order_by(UserResume.created_at.desc())
-        .limit(1)
     )
-    result = await session.execute(stmt)
-    onboarding_resume_filename: str | None = result.scalar_one_or_none()
+    resumes_result = await session.execute(resumes_stmt)
+    resumes = resumes_result.all()
 
-    # Fetch the latest ATS final resume filename + id (needed for the "Replace" button on Profile page)
-    ats_stmt = (
-        sqlalchemy.select(UserResume.id, UserResume.filename)
-        .where(
-            UserResume.user_id == current_user.id,
-            UserResume.source == "ats_final",
-        )
-        .order_by(UserResume.created_at.desc())
-        .limit(1)
-    )
-    ats_result = await session.execute(ats_stmt)
-    ats_row = ats_result.one_or_none()
-    ats_resume_id: int | None = ats_row[0] if ats_row else None
-    ats_resume_filename: str | None = ats_row[1] if ats_row else None
+    onboarding_resume_filename: str | None = None
+    ats_resume_id: int | None = None
+    ats_resume_filename: str | None = None
+
+    for resume_id, filename, source in resumes:
+        if source == "onboarding" and onboarding_resume_filename is None:
+            onboarding_resume_filename = filename
+        elif source == "ats_final" and ats_resume_filename is None:
+            ats_resume_id = resume_id
+            ats_resume_filename = filename
+            
+        if onboarding_resume_filename and ats_resume_filename:
+            break
 
     token = jwt_generator.generate_access_token_for_user(user=current_user)
     return UserInResponse(
