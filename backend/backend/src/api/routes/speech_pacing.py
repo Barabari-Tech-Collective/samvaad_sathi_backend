@@ -8,6 +8,7 @@ POST /pacing-practice/session/{id}/submit – submit audio, get score + metrics
 GET  /pacing-practice/session/{id}    – retrieve a past session result
 """
 
+import asyncio
 import logging
 
 import fastapi
@@ -133,7 +134,13 @@ async def create_pacing_session(
 
     # --- Pick a prompt ---
     try:
-        prompt_text, prompt_index = get_random_prompt(level)
+        # get_random_prompt loads the prompt bank from disk on the first call
+        # per worker process (then caches it in-memory) - that first read is
+        # blocking file I/O, which would otherwise run directly on the event
+        # loop and stall every other request this worker is handling for its
+        # duration. to_thread moves it off the loop; cheap dict-lookup calls
+        # after the cache is warm pay only the thread-hop overhead.
+        prompt_text, prompt_index = await asyncio.to_thread(get_random_prompt, level)
     except ValueError as exc:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
