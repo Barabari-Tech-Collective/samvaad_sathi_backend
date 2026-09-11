@@ -145,11 +145,14 @@ class BackendBaseSettings(BaseSettings):
     DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-v4-flash")  # type: ignore
 
     # Which provider src/services/whisper.py's transcribe_audio_with_whisper()
-    # actually uses. "openai" (default, unchanged behavior) or "groq". Groq
-    # hosts open-source Whisper via an OpenAI-compatible transcription endpoint -
-    # see scaling plan Phase 8. Separate from LLM_PROVIDER; DeepSeek has no
-    # transcription capability at all, so this is a different provider entirely.
-    STT_PROVIDER: str = decouple.config("STT_PROVIDER", cast=str, default="openai")  # type: ignore
+    # actually uses. "groq" (default, as of 2026-09-11 - live-verified against
+    # near word-perfect transcription on real synthesized audio, ~89% cheaper
+    # than OpenAI) or "openai" (kept as a fallback path, not deleted, in case
+    # Groq has an outage or broader real-audio testing turns up quality
+    # issues - switching back is a one-var change, not a redeploy of new
+    # code). See scaling plan Phase 8. Separate from LLM_PROVIDER; DeepSeek
+    # has no transcription capability at all, so this is a different provider.
+    STT_PROVIDER: str = decouple.config("STT_PROVIDER", cast=str, default="groq")  # type: ignore
     GROQ_API_KEY: str = decouple.config("GROQ_API_KEY", cast=str, default="")  # type: ignore
     GROQ_BASE_URL: str = decouple.config("GROQ_BASE_URL", cast=str, default="https://api.groq.com/openai/v1")  # type: ignore
     GROQ_WHISPER_MODEL: str = decouple.config("GROQ_WHISPER_MODEL", cast=str, default="whisper-large-v3-turbo")  # type: ignore
