@@ -14,18 +14,37 @@ logger = logging.getLogger(__name__)
 
 _client: AsyncOpenAI | None = None
 
+
+def _active_stt_provider() -> str:
+    provider = (settings.STT_PROVIDER or "openai").strip().lower()
+    return provider if provider in ("openai", "groq") else "openai"
+
+
+def _active_stt_model_and_key() -> Tuple[str, str]:
+    """Model string and API key for whichever provider STT_PROVIDER selects.
+    Groq's transcription endpoint is OpenAI-compatible (same AsyncOpenAI
+    client, same request shape), so only base_url/api_key/model differ."""
+    if _active_stt_provider() == "groq":
+        return settings.GROQ_WHISPER_MODEL, settings.GROQ_API_KEY
+    return "whisper-1", settings.OPENAI_API_KEY
+
+
 def _get_client() -> AsyncOpenAI | None:
     global _client
     if _client is not None:
         return _client
-    api_key = settings.OPENAI_API_KEY
+    provider = _active_stt_provider()
+    _, api_key = _active_stt_model_and_key()
     if not api_key:
         return None
-    _client = AsyncOpenAI(
-        api_key=api_key,
-        timeout=60.0,
-        max_retries=2,
-    )
+    client_kwargs: dict = {
+        "api_key": api_key,
+        "timeout": 60.0,
+        "max_retries": 2,
+    }
+    if provider == "groq":
+        client_kwargs["base_url"] = settings.GROQ_BASE_URL
+    _client = AsyncOpenAI(**client_kwargs)
     return _client
 
 
@@ -45,11 +64,11 @@ async def transcribe_audio_with_whisper(
     Returns:
         Tuple of (transcription_dict, error_message, latency_ms, model_name)
     """
-    model_name = "whisper-1"
-    api_key = settings.OPENAI_API_KEY
-    
+    provider = _active_stt_provider()
+    model_name, api_key = _active_stt_model_and_key()
+
     if not api_key:
-        return None, "OpenAI API key not configured", None, model_name
+        return None, f"{provider.upper()} API key not configured", None, model_name
     
     if not audio_bytes:
         return None, "Empty audio file", None, model_name
@@ -66,9 +85,9 @@ async def transcribe_audio_with_whisper(
     
     try:
         client = _get_client()
-        logger.debug("OpenAI Whisper client initialized")
+        logger.debug("%s Whisper client initialized", provider)
         if client is None:
-            return None, "OpenAI API key not configured", None, model_name
+            return None, f"{provider.upper()} API key not configured", None, model_name
 
         # Create temporary file for Whisper API (it requires a file, not bytes).
         # Writing can be several MB, so it's offloaded to a thread to avoid
@@ -85,7 +104,8 @@ async def transcribe_audio_with_whisper(
             with open(temp_file_path, "rb") as audio_file:
                 api_start = time.perf_counter()
                 logger.info(
-                "OpenAI Whisper API request started | File=%s",
+                "%s Whisper API request started | File=%s",
+                provider,
                 filename,
                 )
                 transcript = await client.audio.transcriptions.create(
@@ -96,7 +116,8 @@ async def transcribe_audio_with_whisper(
                     timestamp_granularities=["word"]  # Enable word-level timestamps
                 )
                 logger.info(
-                "OpenAI Whisper API completed | File=%s | Duration=%.2fs",
+                "%s Whisper API completed | File=%s | Duration=%.2fs",
+                provider,
                 filename,
                 time.perf_counter() - api_start,
                 )
@@ -147,24 +168,22 @@ async def transcribe_audio_with_whisper(
         end_time = time.perf_counter()
         latency_ms = int((end_time - start_time) * 1000)
         logger.error(
-        "Whisper authentication failed | File=%s",
+        "Whisper authentication failed | Provider=%s | File=%s",
+        provider,
         filename,
         )
-        return None, "Invalid OpenAI API key", latency_ms, model_name
-    
+        return None, f"Invalid {provider.upper()} API key", latency_ms, model_name
+
     except openai.RateLimitError:
         end_time = time.perf_counter()
         latency_ms = int((end_time - start_time) * 1000)
-        logger.error(
-        "Whisper rate limit exceeded | File=%s",
-        filename,
-        )
         logger.warning(
-        "OpenAI Whisper rate limit exceeded | File=%s | Latency=%d ms",
+        "%s Whisper rate limit exceeded | File=%s | Latency=%d ms",
+        provider,
         filename,
         latency_ms,
         )
-        return None, "OpenAI API rate limit exceeded", latency_ms, model_name
+        return None, f"{provider.upper()} API rate limit exceeded", latency_ms, model_name
     
     except openai.BadRequestError as e:
         end_time = time.perf_counter()

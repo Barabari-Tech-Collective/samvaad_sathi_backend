@@ -110,6 +110,24 @@ class BackendBaseSettings(BaseSettings):
     # Refresh token settings (in minutes). Default: 30 days
     REFRESH_TOKEN_EXPIRY_MINUTES: int = decouple.config("REFRESH_TOKEN_EXPIRY_MINUTES", cast=int, default=60 * 24 * 30)  # type: ignore
 
+    # ------------------------------
+    # Sampark Saathi central auth (replaces Cognito as the source of student identity)
+    # ------------------------------
+    # Public origin of the barabari-auth-service, e.g. https://barabari-auth-service.onrender.com
+    AUTH_SERVICE_BASE_URL: str = decouple.config("AUTH_SERVICE_BASE_URL", cast=str, default="")  # type: ignore
+    # Same value as auth-service's JWT_SECRET env var (a Base64 string decoded to raw HMAC key
+    # bytes on both sides - see src/securities/authorizations/sso_jwt.py). Shares auth-service's
+    # own local-dev default so both services validate each other's tokens out of the box.
+    AUTH_SERVICE_JWT_SECRET: str = decouple.config(
+        "AUTH_SERVICE_JWT_SECRET",
+        cast=str,
+        default="QWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXphYmNkZWYxMjM0NTY3ODkwMTIz",
+    )  # type: ignore
+    # This product's row in auth-service's `products` table (already seeded as SAMVAAD_SAATHI).
+    SAMPARK_PRODUCT_UNIQUE_ID: str = decouple.config(
+        "SAMPARK_PRODUCT_UNIQUE_ID", cast=str, default="81c53f68-35f4-4133-9e35-06f5c30354b785"
+    )  # type: ignore
+
     # Audio processing settings (stateless - no upload directory needed)
     MAX_AUDIO_SIZE_MB: int = decouple.config("MAX_AUDIO_SIZE_MB", cast=int, default=25)  # type: ignore
     OPENAI_MODEL: str = decouple.config("OPENAI_MODEL", cast=str, default="gpt-4o-mini")  # type: ignore
@@ -125,6 +143,16 @@ class BackendBaseSettings(BaseSettings):
     DEEPSEEK_API_KEY: str = decouple.config("DEEPSEEK_API_KEY", cast=str, default="")  # type: ignore
     DEEPSEEK_BASE_URL: str = decouple.config("DEEPSEEK_BASE_URL", cast=str, default="https://api.deepseek.com")  # type: ignore
     DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-v4-flash")  # type: ignore
+
+    # Which provider src/services/whisper.py's transcribe_audio_with_whisper()
+    # actually uses. "openai" (default, unchanged behavior) or "groq". Groq
+    # hosts open-source Whisper via an OpenAI-compatible transcription endpoint -
+    # see scaling plan Phase 8. Separate from LLM_PROVIDER; DeepSeek has no
+    # transcription capability at all, so this is a different provider entirely.
+    STT_PROVIDER: str = decouple.config("STT_PROVIDER", cast=str, default="openai")  # type: ignore
+    GROQ_API_KEY: str = decouple.config("GROQ_API_KEY", cast=str, default="")  # type: ignore
+    GROQ_BASE_URL: str = decouple.config("GROQ_BASE_URL", cast=str, default="https://api.groq.com/openai/v1")  # type: ignore
+    GROQ_WHISPER_MODEL: str = decouple.config("GROQ_WHISPER_MODEL", cast=str, default="whisper-large-v3-turbo")  # type: ignore
 
     # ElevenLabs TTS
     ELEVENLABS_API_KEY: str = decouple.config("ELEVENLABS_API_KEY", cast=str, default="")  # type: ignore
