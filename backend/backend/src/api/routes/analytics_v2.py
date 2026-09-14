@@ -87,7 +87,11 @@ def _apply_interview_filters(
     if college:
         filtered_stmt = filtered_stmt.join(User, User.id == Interview.user_id).where(User.university == college)
     if role:
-        filtered_stmt = filtered_stmt.where(Interview.track == role)
+        import re
+        clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
+        filtered_stmt = filtered_stmt.where(
+            sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(Interview.track), '[^a-z0-9]', '', 'g') == clean_role
+        )
     if difficulty:
         filtered_stmt = filtered_stmt.where(Interview.difficulty == difficulty)
     if start_date is not None:
