@@ -1614,7 +1614,8 @@ async def get_difficulty_metrics(
 ):
     del current_user
     service = AnalyticsService(session)
-    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date, role=role)
+    clean_role = role.strip() if role and role.strip() else None
+    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date, role=clean_role)
     items = _sort_difficulty_items(items)
     normalized_items = _zero_fill_metric_nulls(items)
     return TablePageResponse(table_type="difficulty_metrics", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
