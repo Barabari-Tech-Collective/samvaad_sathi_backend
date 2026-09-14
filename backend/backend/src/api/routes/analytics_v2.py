@@ -1608,12 +1608,13 @@ async def get_role_detail(
 async def get_difficulty_metrics(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    role: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
     service = AnalyticsService(session)
-    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date)
+    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date, role=role)
     items = _sort_difficulty_items(items)
     normalized_items = _zero_fill_metric_nulls(items)
     return TablePageResponse(table_type="difficulty_metrics", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
