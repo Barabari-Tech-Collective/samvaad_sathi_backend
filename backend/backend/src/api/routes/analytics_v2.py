@@ -87,7 +87,11 @@ def _apply_interview_filters(
     if college:
         filtered_stmt = filtered_stmt.join(User, User.id == Interview.user_id).where(User.university == college)
     if role:
-        filtered_stmt = filtered_stmt.where(Interview.track == role)
+        import re
+        clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
+        filtered_stmt = filtered_stmt.where(
+            sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(Interview.track), '[^a-z0-9]', '', 'g') == clean_role
+        )
     if difficulty:
         filtered_stmt = filtered_stmt.where(Interview.difficulty == difficulty)
     if start_date is not None:
@@ -1608,12 +1612,14 @@ async def get_role_detail(
 async def get_difficulty_metrics(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    role: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
     service = AnalyticsService(session)
-    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date)
+    clean_role = role.strip() if role and role.strip() else None
+    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date, role=clean_role)
     items = _sort_difficulty_items(items)
     normalized_items = _zero_fill_metric_nulls(items)
     return TablePageResponse(table_type="difficulty_metrics", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
