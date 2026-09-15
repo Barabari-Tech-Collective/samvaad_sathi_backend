@@ -6,6 +6,7 @@ from src.models.db.user import User
 from src.repository.crud.user import UserCRUDRepository
 from src.securities.authorizations.jwt import jwt_generator
 from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTokenError
+from src.securities.authorizations.access_revocation import is_access_revoked
 from src.api.dependencies.repository import get_repository
 
 # Create HTTPBearer security scheme for Swagger UI
@@ -27,6 +28,19 @@ async def get_current_user(
         email = claims.get("sub")
         if not email:
             raise SsoTokenError("Missing sub claim")
+
+        # Entitlement is only checked at /authorize and /token (login/token-issuance
+        # time) - this token could have been issued before a since-processed revoke, and
+        # verification here never calls back to auth-service to find out. This local,
+        # Redis-backed check (populated by the RabbitMQ consumer in
+        # src/mqconsumer/user_access_revoked_consumer.py) closes that window without
+        # adding a synchronous cross-service call to every request.
+        unique_id = claims.get("userUniqueId")
+        if unique_id and await is_access_revoked(unique_id):
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                detail="Access to Samvaad Saathi has been revoked",
+            )
     except SsoTokenError:
         try:
             _, email = jwt_generator.retrieve_details_from_token(token=token, secret_key=settings.JWT_SECRET_KEY)

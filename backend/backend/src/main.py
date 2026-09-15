@@ -11,6 +11,7 @@ from src.config.events import (
     execute_backend_server_event_handler,
     terminate_backend_server_event_handler,
 )
+from src.config.loki_logging import configure_loki_logging
 from src.config.manager import settings
 
 
@@ -25,6 +26,7 @@ def initialize_backend_application() -> fastapi.FastAPI:
      # Configure application logging
     logging.getLogger().setLevel(settings.LOGGING_LEVEL)
     logging.getLogger("src").setLevel(settings.LOGGING_LEVEL)
+    configure_loki_logging()
 
     logging.getLogger(__name__).info(
     "######## APPLICATION INFO LOG TEST ########"

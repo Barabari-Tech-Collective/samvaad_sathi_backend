@@ -9,6 +9,7 @@ from src.api.routes.analysis import router as analysis_router
 from src.api.routes.report import router as report_router
 from src.api.routes.auth_cognito import router as cognito_router
 from src.api.routes.auth_sso import router as sso_router
+from src.api.routes.internal_admin import router as internal_admin_router
 from src.api.routes.summary_report import router as summary_report_router
 from src.api.routes.summary_report_v2 import router as summary_report_v2_router
 from src.api.routes.tts import router as tts_router
@@ -38,6 +39,7 @@ router.include_router(router=summary_report_router)
 router.include_router(router=summary_report_v2_router)
 router.include_router(router=cognito_router)
 router.include_router(router=sso_router)
+router.include_router(router=internal_admin_router)
 router.include_router(router=tts_router)
 router.include_router(router=speech_pacing_router)
 router.include_router(router=job_profiles_v2_router)
