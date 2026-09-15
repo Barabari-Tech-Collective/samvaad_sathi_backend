@@ -174,6 +174,9 @@ class BackendBaseSettings(BaseSettings):
     ELEVENLABS_API_KEY: str = decouple.config("ELEVENLABS_API_KEY", cast=str, default="")  # type: ignore
     ELEVENLABS_VOICE_ID: str = decouple.config("ELEVENLABS_VOICE_ID", cast=str, default="hpp4J3VqNfWAUOO0d1Us")  # type: ignore
 
+    # Toggle to bypass expensive TTS APIs (ElevenLabs and OpenAI TTS) in staging
+    MOCK_TTS: bool = decouple.config("MOCK_TTS", cast=bool, default=False)  # type: ignore
+
     # Barabari Sampark Saathi resume-round callback
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
