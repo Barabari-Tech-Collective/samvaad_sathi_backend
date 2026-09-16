@@ -673,8 +673,6 @@ async def generate_questions_v2(
 
         remaining = l.count
         batch_size = 10
-        
-        # Calculate batches
         batches = []
         while remaining > 0:
             current_batch = min(remaining, batch_size)
