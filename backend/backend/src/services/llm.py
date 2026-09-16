@@ -1572,11 +1572,19 @@ async def generate_interview_questions_with_llm(
     }
 
     try:
+        # structured_output defaults max_tokens to 2048, which is only enough for
+        # roughly 3-5 fully detailed questions (each item carries text, topic,
+        # keywords, concepts_covered, expected_answer, and example_output). Larger
+        # batches - e.g. the job-profile question generator's batches of 10 - were
+        # getting truncated mid-JSON, which fails to parse and surfaces as a 500.
+        # Scale the budget with how many questions this call is actually producing.
+        max_tokens_for_batch = min(8000, max(2048, total * 500 + 500))
         result, perr, latency, model = await structured_output(
             QuestionsResponseLLM,
             system_prompt=sys_prompt,
             user_content=user_prompt,
             temperature=0.2,
+            max_tokens=max_tokens_for_batch,
         )
         error = perr
         if result:
