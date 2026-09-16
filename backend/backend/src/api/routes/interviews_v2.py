@@ -2,6 +2,7 @@ import json
 import fastapi
 import logging
 import re
+from typing import Any
 from fastapi import Form, UploadFile, File
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -50,6 +51,7 @@ from src.services.question_supplements import (
     serialize_question_supplement,
 )
 from src.services.structure_hints import generate_structure_hints_for_questions
+from src.config.manager import settings
 from src.services.pronunciation_tts import generate_pronunciation_audio
 from src.services.structure_analysis import analyze_structure_answer
 from src.services.audio_processor import validate_audio_file, save_audio_file, cleanup_temp_audio_file
@@ -79,7 +81,7 @@ MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS = 2
 router = fastapi.APIRouter(prefix="/v2", tags=["interviews-v2"])
 
 
-def _apply_follow_up_eligibility(questions_data: list[dict[str, object]]) -> None:
+def _apply_follow_up_eligibility(questions_data: list[dict[str, Any]]) -> None:
     """Cap follow-up eligibility to the first MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS
     entries, mutating questions_data in place.
 
@@ -161,6 +163,9 @@ def _prepare_audio_for_questions(questions: list[dict]) -> list[dict]:
     ELEVENLABS_VOICE_ID changes, old and newly generated questions would
     permanently play back in different voices within the same interview.
     """
+    if getattr(settings, "MOCK_TTS", False):
+        return []
+
     import hashlib
     from decouple import config
 
@@ -1267,7 +1272,7 @@ async def get_pronunciation_audio(
             detail="Failed to generate pronunciation audio",
         )
     
-    if not audio_bytes:
+    if not audio_bytes and not settings.MOCK_TTS:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="No audio generated",

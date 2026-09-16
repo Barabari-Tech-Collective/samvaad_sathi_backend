@@ -24,6 +24,10 @@ async def generate_tts_audio(
         Tuple of (audio_bytes, error_message, latency_ms).
         ``audio_bytes`` is empty and ``error_message`` is set on failure.
     """
+    if settings.MOCK_TTS:
+        logger.info("Staging Mode: MOCK_TTS is enabled. Skipping ElevenLabs TTS to save cost.")
+        return b"", None, 0
+
     api_key = settings.ELEVENLABS_API_KEY
     if not api_key:
         logger.warning("ELEVENLABS_API_KEY is not configured")

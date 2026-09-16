@@ -40,6 +40,10 @@ async def generate_pronunciation_audio(
     Returns:
         Tuple of (audio_bytes, error_message, latency_ms)
     """
+    if settings.MOCK_TTS:
+        logger.info(f"Staging Mode: MOCK_TTS is enabled. Skipping OpenAI TTS for '{word}' to save cost.")
+        return b"", None, 0
+
     client = _get_client()
     if not client:
         logger.warning("OpenAI client not available for TTS")
