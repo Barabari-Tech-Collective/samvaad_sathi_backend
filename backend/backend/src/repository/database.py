@@ -1,3 +1,4 @@
+import logging
 import os
 import ssl
 import pydantic
@@ -11,6 +12,8 @@ from sqlalchemy.pool import Pool as SQLAlchemyPool, QueuePool as SQLAlchemyQueue
 
 from src.config.manager import settings
 
+logger = logging.getLogger(__name__)
+
 
 class AsyncDatabase:
     def __init__(self):
@@ -18,7 +21,16 @@ class AsyncDatabase:
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
-        print(self.set_async_db_uri)
+        # Log connection target without the password. The previous version
+        # printed the full connection URI (including the password) on every
+        # startup, which leaked the DB credential into application logs.
+        logger.info(
+            "Connecting to database: postgresql+asyncpg://%s:***@%s:%s/%s",
+            settings.DB_POSTGRES_USERNAME,
+            settings.DB_POSTGRES_HOST,
+            settings.DB_POSTGRES_PORT,
+            settings.DB_POSTGRES_NAME,
+        )
         self.async_engine: SQLAlchemyAsyncEngine = create_sqlalchemy_async_engine(
             url=self.set_async_db_uri,
             echo=settings.IS_DB_ECHO_LOG,
