@@ -753,7 +753,11 @@ class AnalyticsService:
         if college:
             stmt = stmt.join(User, User.id == Interview.user_id).where(User.university == college)
         if role:
-            stmt = stmt.where(Interview.track == role)
+            import re
+            clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
+            stmt = stmt.where(
+                sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(Interview.track), '[^a-z0-9]', '', 'g') == clean_role
+            )
         if difficulty:
             stmt = stmt.where(Interview.difficulty == difficulty)
         if start_date is not None:
