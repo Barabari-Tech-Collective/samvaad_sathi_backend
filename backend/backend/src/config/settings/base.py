@@ -48,6 +48,10 @@ class BackendBaseSettings(BaseSettings):
     DB_POSTGRES_SCHEMA: str = decouple.config("POSTGRES_SCHEMA", cast=str)  # type: ignore
     DB_TIMEOUT: int = decouple.config("DB_TIMEOUT", cast=int)  # type: ignore
     DB_POSTGRES_USERNAME: str = decouple.config("POSTGRES_USERNAME", cast=str)  # type: ignore
+    # Managed Postgres providers require TLS, while a developer's local
+    # PostgreSQL instance commonly does not. Keep TLS on by default so staging
+    # and production remain fail-safe; local setup must opt out explicitly.
+    DB_SSL_ENABLED: bool = decouple.config("DB_SSL_ENABLED", cast=bool, default=True)  # type: ignore
 
     IS_DB_ECHO_LOG: bool = decouple.config("IS_DB_ECHO_LOG", cast=bool)  # type: ignore
     IS_DB_FORCE_ROLLBACK: bool = decouple.config("IS_DB_FORCE_ROLLBACK", cast=bool)  # type: ignore
@@ -140,6 +144,70 @@ class BackendBaseSettings(BaseSettings):
     SAMPARK_PRODUCT_UNIQUE_ID: str = decouple.config(
         "SAMPARK_PRODUCT_UNIQUE_ID", cast=str, default="81c53f68-35f4-4133-9e35-06f5c30354b785"
     )  # type: ignore
+    # The exact callback URL registered in auth-service's SSO_ALLOWED_REDIRECT_URIS.
+    # auth-service compares this by exact string, so it must NOT be derived from the
+    # incoming request: behind a TLS-terminating proxy (Render, nginx) request.url_for()
+    # yields http:// unless uvicorn is told to trust X-Forwarded-Proto, which silently
+    # produces a value that will never match the registered https:// entry. Set this
+    # explicitly per environment; it falls back to url_for() only for local dev.
+    SSO_REDIRECT_URI: str = decouple.config("SSO_REDIRECT_URI", cast=str, default="")  # type: ignore
+    # auth-service issues one token type across every Barabari product using a shared
+    # JWT secret, and the token carries no audience/product claim - so a token minted
+    # for another product, or for an ADMIN/OWNER of the admin panel, verifies here just
+    # as well as a student's. Samvaad Saathi is a student-facing product, so it accepts
+    # only this role. Empty disables the check.
+    SSO_REQUIRED_ROLE: str = decouple.config("SSO_REQUIRED_ROLE", cast=str, default="STUDENT")  # type: ignore
+
+    # Trust X-Forwarded-Proto/-For from the reverse proxy in front of this app. Correct
+    # for Render and for nginx on EC2, where the proxy is the only way in. Set False
+    # only if this process is ever exposed directly to the internet, where a client
+    # could forge those headers.
+    TRUST_PROXY_HEADERS: bool = decouple.config("TRUST_PROXY_HEADERS", cast=bool, default=True)  # type: ignore
+
+    # ------------------------------
+    # Central-auth entitlement revocation (Phase 6, part B)
+    # ------------------------------
+    # auth-service's /authorize and /token only check entitlement at login/token-issuance
+    # time - an already-issued access token keeps working for its own lifetime regardless
+    # of a later revoke, since verification here never calls back to auth-service. This
+    # consumes auth-service's USER_ACCESS_REVOKED_EVENT broadcast (RabbitMQ, same bridge
+    # already used for STUDENT_CREATED_EVENT/STUDENT_PROFILE_SAVED_EVENT) to close that
+    # window without adding a synchronous cross-service call to every request - see
+    # src/mqconsumer/user_access_revoked_consumer.py and get_current_user's revoked check.
+    # False disables the consumer entirely (e.g. local dev without RabbitMQ running);
+    # matches Redis's own fail-open-at-startup behavior - a stopped consumer just means
+    # revocation isn't enforced, not that the app fails to start.
+    RABBITMQ_ENABLED: bool = decouple.config("RABBITMQ_ENABLED", cast=bool, default=False)  # type: ignore
+    RABBITMQ_HOST: str = decouple.config("RABBITMQ_HOST", cast=str, default="localhost")  # type: ignore
+    RABBITMQ_PORT: int = decouple.config("RABBITMQ_PORT", cast=int, default=5672)  # type: ignore
+    RABBITMQ_USERNAME: str = decouple.config("RABBITMQ_USERNAME", cast=str, default="guest")  # type: ignore
+    RABBITMQ_PASSWORD: str = decouple.config("RABBITMQ_PASSWORD", cast=str, default="guest")  # type: ignore
+    RABBITMQ_VIRTUAL_HOST: str = decouple.config("RABBITMQ_VIRTUAL_HOST", cast=str, default="/")  # type: ignore
+    RABBITMQ_SSL_ENABLED: bool = decouple.config("RABBITMQ_SSL_ENABLED", cast=bool, default=False)  # type: ignore
+    # Must match auth-service's env.rabbitQueues.userAccessRevoked.exchange exactly - a
+    # topic exchange auth-service publishes to and every consuming product (this one now,
+    # others later) binds its own queue to independently. Defaults to the prod name; local
+    # dev against a local auth-service should override to the "-local"-suffixed one.
+    RABBITMQ_ACCESS_REVOKED_EXCHANGE: str = decouple.config(
+        "RABBITMQ_ACCESS_REVOKED_EXCHANGE", cast=str, default="barabari.user-access-revoked-exchange"
+    )  # type: ignore
+    RABBITMQ_ACCESS_REVOKED_ROUTING_KEY: str = decouple.config(
+        "RABBITMQ_ACCESS_REVOKED_ROUTING_KEY", cast=str, default="barabari.user-access-revoked-routing-key"
+    )  # type: ignore
+    # This product's own durable queue name, bound to the exchange above. Distinct from
+    # any other product's queue name so a topic-exchange fan-out reaches every consumer
+    # independently rather than round-robin-splitting one shared queue between them.
+    RABBITMQ_ACCESS_REVOKED_QUEUE: str = decouple.config(
+        "RABBITMQ_ACCESS_REVOKED_QUEUE", cast=str, default="barabari.samvaad-saathi.access-revoked-queue"
+    )  # type: ignore
+    # How long a revoked-flag lives in Redis once set. Deliberately longer than
+    # auth-service's own access-token lifetime (default 1 hour) rather than trying to
+    # match it exactly - erring long only costs a little unused Redis memory, erring short
+    # would let a revoked user regain silent access before their old token actually
+    # expires.
+    ACCESS_REVOKED_FLAG_TTL_SECONDS: int = decouple.config(
+        "ACCESS_REVOKED_FLAG_TTL_SECONDS", cast=int, default=60 * 60 * 24
+    )  # type: ignore
 
     # Audio processing settings (stateless - no upload directory needed)
     MAX_AUDIO_SIZE_MB: int = decouple.config("MAX_AUDIO_SIZE_MB", cast=int, default=25)  # type: ignore
@@ -180,6 +248,24 @@ class BackendBaseSettings(BaseSettings):
     # Barabari Sampark Saathi resume-round callback
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
+    # Auth-service Central Student Registry. Product backends use this server-side key to
+    # hydrate common profile fields; it must match auth-service CENTRAL_PROFILE_API_KEY.
+    CENTRAL_PROFILE_API_KEY: str = decouple.config("CENTRAL_PROFILE_API_KEY", cast=str, default="")  # type: ignore
+
+    # Super-admin plan, Phase 12: shared secret for the *inbound* direction (auth-service's
+    # SUPER_ADMIN panel calling into this service to designate a Samvaad Saathi admin) - a
+    # new, dedicated trust relationship, not a reuse of SAMPARK_SAATHI_API_KEY above (which
+    # is for a different pair of services and a different direction). Empty by default,
+    # which the endpoint treats as "disabled" rather than "open" - see internal_admin.py.
+    SUPER_ADMIN_API_KEY: str = decouple.config("SUPER_ADMIN_API_KEY", cast=str, default="")  # type: ignore
+
+    # ------------------------------
+    # Grafana Cloud Loki (free tier) - Super-admin plan, Phase 13. Optional: unset in local
+    # dev, logging_config.py only attaches the Loki handler when LOKI_URL is present.
+    # ------------------------------
+    LOKI_URL: str = decouple.config("LOKI_URL", cast=str, default="")  # type: ignore
+    LOKI_USERNAME: str = decouple.config("LOKI_USERNAME", cast=str, default="")  # type: ignore
+    LOKI_API_KEY: str = decouple.config("LOKI_API_KEY", cast=str, default="")  # type: ignore
 
     # ------------------------------
     # Redis (self-hosted on the same EC2 instance, no managed service)

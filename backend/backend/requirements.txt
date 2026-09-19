@@ -169,3 +169,9 @@ audioop-lts; python_version >= '3.13'
 # Redis client + async task queue (self-hosted Redis - see project scaling plan)
 redis==5.3.1
 arq==0.28.0
+
+# Consumes USER_ACCESS_REVOKED_EVENT broadcast by auth-service (central-auth Phase 6)
+aio-pika==9.5.5
+
+# Ships stdlib `logging` output to Grafana Cloud Loki (central-auth Phase 13, free tier)
+python-logging-loki==0.3.1
