@@ -126,6 +126,30 @@ class UserCRUDRepository(BaseCRUDRepository):
             await self.async_session.refresh(user)
         return user  # type: ignore
 
+    async def sync_central_identity(
+        self,
+        *,
+        user_id: int,
+        central_user_id: str,
+        name: str | None = None,
+        degree: str | None = None,
+        university: str | None = None,
+    ) -> User:
+        """Link the stable central ID and refresh only fields owned by the registry."""
+        user = await self.get_user_by_id(user_id=user_id)
+        if user.student_id and user.student_id != central_user_id:
+            raise EntityAlreadyExists("This Samvaad account is linked to another central account")
+        user.student_id = central_user_id
+        if name:
+            user.name = name
+        if degree:
+            user.degree = degree
+        if university:
+            user.university = university
+        await self.async_session.commit()
+        await self.async_session.refresh(user)
+        return user
+
     async def set_onboarded(self, *, user_id: int, value: bool = True) -> User:
         stmt = sqlalchemy.select(User).where(User.id == user_id)
         query = await self.async_session.execute(statement=stmt)

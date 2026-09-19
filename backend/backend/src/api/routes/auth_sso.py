@@ -105,11 +105,37 @@ async def sso_callback(
         return RedirectResponse(url=f"{target}#error={quote('Received an unverifiable token')}")
 
     email = claims.get("sub")
+    central_user_id = claims.get("userUniqueId")
     if not email:
         return RedirectResponse(url=f"{target}#error={quote('Token is missing an email claim')}")
+    if not central_user_id:
+        return RedirectResponse(url=f"{target}#error={quote('Token is missing a central user ID')}")
+
+    central_profile: dict = {}
+    if settings.CENTRAL_PROFILE_API_KEY:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                profile_resp = await client.get(
+                    f"{settings.AUTH_SERVICE_BASE_URL}/barabari-auth/api/auth/internal/v1/students/{central_user_id}/profile",
+                    headers={
+                        "X-Internal-Api-Key": settings.CENTRAL_PROFILE_API_KEY,
+                        "X-Product-Unique-Id": settings.SAMPARK_PRODUCT_UNIQUE_ID,
+                    },
+                )
+                profile_body = (
+                    profile_resp.json()
+                    if profile_resp.headers.get("content-type", "").startswith("application/json")
+                    else {}
+                )
+                if profile_resp.status_code == 200 and profile_body.get("isSuccess"):
+                    central_profile = profile_body.get("data") or {}
+            except httpx.HTTPError:
+                # Login remains available during a registry outage. The stable ID is still
+                # linked below and common fields can refresh on the next login.
+                central_profile = {}
 
     try:
-        await user_repo.get_user_by_email(email=email)
+        user = await user_repo.get_user_by_email(email=email)
     except EntityDoesNotExist:
         # First time this student has reached Samvaad Saathi via Sampark Saathi SSO -
         # mirrors auth_cognito.py's authorize(), which likewise auto-created a local User
@@ -117,8 +143,20 @@ async def sso_callback(
         # unused for SSO accounts (auth-service owns the credential), so a random value
         # keeps the NOT NULL column satisfied without a usable local password existing.
         random_password = secrets.token_urlsafe(16)
-        name = email.split("@")[0]
-        await user_repo.create_user(email=email, password=random_password, name=name)
+        name = " ".join(
+            part for part in [central_profile.get("firstName"), central_profile.get("lastName")] if part
+        ) or email.split("@")[0]
+        user = await user_repo.create_user(email=email, password=random_password, name=name)
+
+    await user_repo.sync_central_identity(
+        user_id=user.id,
+        central_user_id=str(central_user_id),
+        name=" ".join(
+            part for part in [central_profile.get("firstName"), central_profile.get("lastName")] if part
+        ) or None,
+        degree=central_profile.get("programType"),
+        university=central_profile.get("institutionName"),
+    )
 
     return RedirectResponse(url=f"{target}?token={quote(access_token)}&refresh_token={quote(refresh_token)}")
 

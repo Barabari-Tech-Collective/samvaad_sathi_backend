@@ -48,6 +48,10 @@ class BackendBaseSettings(BaseSettings):
     DB_POSTGRES_SCHEMA: str = decouple.config("POSTGRES_SCHEMA", cast=str)  # type: ignore
     DB_TIMEOUT: int = decouple.config("DB_TIMEOUT", cast=int)  # type: ignore
     DB_POSTGRES_USERNAME: str = decouple.config("POSTGRES_USERNAME", cast=str)  # type: ignore
+    # Managed Postgres providers require TLS, while a developer's local
+    # PostgreSQL instance commonly does not. Keep TLS on by default so staging
+    # and production remain fail-safe; local setup must opt out explicitly.
+    DB_SSL_ENABLED: bool = decouple.config("DB_SSL_ENABLED", cast=bool, default=True)  # type: ignore
 
     IS_DB_ECHO_LOG: bool = decouple.config("IS_DB_ECHO_LOG", cast=bool)  # type: ignore
     IS_DB_FORCE_ROLLBACK: bool = decouple.config("IS_DB_FORCE_ROLLBACK", cast=bool)  # type: ignore
@@ -241,6 +245,9 @@ class BackendBaseSettings(BaseSettings):
     # Barabari Sampark Saathi resume-round callback
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
+    # Auth-service Central Student Registry. Product backends use this server-side key to
+    # hydrate common profile fields; it must match auth-service CENTRAL_PROFILE_API_KEY.
+    CENTRAL_PROFILE_API_KEY: str = decouple.config("CENTRAL_PROFILE_API_KEY", cast=str, default="")  # type: ignore
 
     # Super-admin plan, Phase 12: shared secret for the *inbound* direction (auth-service's
     # SUPER_ADMIN panel calling into this service to designate a Samvaad Saathi admin) - a
