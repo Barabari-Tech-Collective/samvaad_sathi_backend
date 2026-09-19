@@ -1568,12 +1568,24 @@ async def get_roles_summary(
 async def get_roles_performance(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    difficulty: str | None = None,
+    category: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
     service = AnalyticsService(session)
-    items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date)
+    # Change made: Added difficulty and category query filters to /roles/performance.
+    # Why it was made: Allows frontend / clients to filter role performance data by difficulty level
+    # (easy, medium, hard, expert) and career category (IT, Design, Sales, Marketing, HR, Data, Operations).
+    clean_difficulty = difficulty.strip().lower() if difficulty and difficulty.strip() else None
+    clean_category = category.strip() if category and category.strip() else None
+    items = await service.get_role_segment_analytics(
+        start_date=start_date,
+        end_date=end_date,
+        difficulty=clean_difficulty,
+        category=clean_category,
+    )
     normalized_items = _zero_fill_metric_nulls(items)
     return TablePageResponse(table_type="role_performance", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
 
