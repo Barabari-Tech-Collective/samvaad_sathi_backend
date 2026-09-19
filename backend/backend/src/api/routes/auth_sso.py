@@ -3,6 +3,7 @@ from urllib.parse import quote, urlencode
 
 import fastapi
 import httpx
+import pydantic
 from fastapi import Request
 from fastapi.responses import RedirectResponse
 
@@ -11,6 +12,10 @@ from src.api.dependencies.repository import get_repository
 from src.repository.crud.user import UserCRUDRepository
 from src.utilities.exceptions.database import EntityDoesNotExist
 from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTokenError
+
+
+class RequestAccessBody(pydantic.BaseModel):
+    request_code: str
 
 router = fastapi.APIRouter(prefix="/auth/sso", tags=["users"])
 
@@ -49,6 +54,8 @@ async def sso_callback(
     request: Request,
     code: str | None = None,
     state: str | None = None,
+    error: str | None = None,
+    requestCode: str | None = None,  # noqa: N803 - matches auth-service's query param name
     user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
 ):
     """
@@ -62,6 +69,16 @@ async def sso_callback(
 
     if not state or not expected_state or state != expected_state:
         return RedirectResponse(url=f"{target}#error={quote('Invalid or missing state')}")
+    # auth-service's /authorize sends this instead of a code when the student is
+    # authenticated but doesn't have Samvaad Saathi in their product entitlements
+    # (central-auth Phase 6) - a real, expected outcome, not a protocol error, so it gets
+    # its own message rather than falling through to the generic "missing code" one below.
+    # requestCode (central-auth Phase 10) rides along in the same redirect: the frontend's
+    # "Request access" button needs it to call /auth/sso/request-access below, since this
+    # denied student has no bearer token at all to authenticate that call otherwise.
+    if error == "access_denied":
+        params = urlencode({"error": "access_denied", "requestCode": requestCode or ""})
+        return RedirectResponse(url=f"{target}#{params}")
     if not code:
         return RedirectResponse(url=f"{target}#error={quote('Missing authorization code')}")
 
@@ -130,3 +147,31 @@ async def sso_refresh(refresh_token: str = fastapi.Form(...)):
         raise fastapi.HTTPException(status_code=401, detail=body.get("errorMessage") or "Invalid or expired refresh token")
 
     return {"token": body["data"]["accessToken"], "refresh_token": body["data"]["refreshToken"]}
+
+
+@router.post("/request-access")
+async def sso_request_access(payload: RequestAccessBody):
+    """
+    Central-auth plan, Phase 10: the "Request access" button on the "you don't have
+    access yet" screen calls this. Same-origin from the frontend's perspective (this
+    service proxies to auth-service server-to-server) rather than the frontend calling
+    auth-service directly, since auth-service's CORS allow-list is built for Sampark
+    Saathi's own domains, not this product's - and there's no bearer token to send anyway,
+    only the one-time requestCode /callback captured above.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.post(
+                f"{settings.AUTH_SERVICE_BASE_URL}/barabari-auth/api/auth/public/v1/request-access-with-code",
+                json={"code": payload.request_code},
+            )
+        except httpx.HTTPError as exc:
+            raise fastapi.HTTPException(status_code=502, detail=f"Sampark Saathi unreachable: {exc}")
+
+    body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+    if resp.status_code not in (200, 201) or not body.get("isSuccess"):
+        raise fastapi.HTTPException(
+            status_code=400, detail=body.get("errorMessage") or "Could not submit the access request"
+        )
+
+    return {"message": body.get("data", {}).get("message", "Access request submitted")}

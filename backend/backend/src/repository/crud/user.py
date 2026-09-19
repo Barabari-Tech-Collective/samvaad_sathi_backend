@@ -179,6 +179,21 @@ class UserCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(user)
         return user
 
+    # ------------------------------------------------------------------
+    # Super-admin plan, Phase 12
+    # ------------------------------------------------------------------
+    async def set_admin_status(self, *, email: str, is_admin: bool) -> User:
+        user = await self.get_user_by_email(email=email)
+        user.is_admin = is_admin
+        await self.async_session.commit()
+        await self.async_session.refresh(user)
+        return user
+
+    async def list_admins(self) -> list[User]:
+        stmt = sqlalchemy.select(User).where(User.is_admin.is_(True))
+        query = await self.async_session.execute(statement=stmt)
+        return list(query.scalars().all())
+
     async def delete_user(self, *, user_id: int) -> None:
         """Deletes a user and ensures their S3 resumes are cleaned up to prevent orphaned objects."""
         from src.models.db.user_resume import UserResume
