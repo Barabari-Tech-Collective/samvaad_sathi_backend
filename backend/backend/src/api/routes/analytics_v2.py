@@ -424,7 +424,7 @@ async def get_dashboard_recent_interviews(
             "knowledge_score": _metric_or_zero(knowledge_score, digits=2),
             "duration_seconds": _metric_or_zero(interview.duration_seconds),
             "date": interview.created_at,
-            "status": interview.status,
+            "status": "Incomplete" if interview.status == "active" else interview.status,
         })
     return TablePageResponse(table_type="recent_interviews", items=items, page=1, limit=limit, total=len(items))
 
@@ -1756,13 +1756,25 @@ async def get_predictive_alerts(
     description="Returns role-level comparisons against platform average, including score deltas.",
 )
 async def get_benchmarking(
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
     service = AnalyticsService(session)
-    role_items = await service.get_role_segment_analytics()
-    overall_avg = _safe_avg([item.get("avg_score") for item in role_items])
+    role_items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date)
+    
+    total_completed = sum(item.get("completed_interviews", 0) for item in role_items)
+    if total_completed > 0:
+        weighted_sum = sum(
+            (item.get("avg_score", 0) * item.get("completed_interviews", 0))
+            for item in role_items if item.get("avg_score") is not None
+        )
+        overall_avg = round(weighted_sum / total_completed, 2)
+    else:
+        overall_avg = None
+
     items = []
     for item in role_items:
         role_avg = item.get("avg_score")

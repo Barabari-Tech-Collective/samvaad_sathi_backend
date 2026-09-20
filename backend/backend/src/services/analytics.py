@@ -380,7 +380,7 @@ class AnalyticsService:
         for role_name, role_interviews in grouped.items():
             scores = [
                 _extract_overall_score(reports.get(i.id), summaries.get(i.id))
-                for i in role_interviews
+                for i in role_interviews if i.status == "completed"
             ]
             scores_clean = [s for s in scores if s is not None]
             completed = len([i for i in role_interviews if i.status == "completed"])
@@ -392,6 +392,7 @@ class AnalyticsService:
                 {
                     "role": role_name,
                     "interviews": len(role_interviews),
+                    "completed_interviews": completed,
                     "avg_score": _round_opt(_avg_non_null(scores_clean), 2) if scores_clean else None,
                     "drop_off_rate": round((1 - (completed / len(role_interviews))) * 100.0, 2) if role_interviews else 0.0,
                     "common_weaknesses": weak_tags,
@@ -1465,9 +1466,7 @@ def _to_float(value: Any) -> float | None:
 def _normalize_score(value: float | None) -> float | None:
     if value is None:
         return None
-    if value <= 5:
-        return value * 20
-    return max(0.0, min(100.0, value))
+    return max(0.0, min(100.0, float(value)))
 
 
 def _round_opt(value: float | None, digits: int = 2) -> float | None:
