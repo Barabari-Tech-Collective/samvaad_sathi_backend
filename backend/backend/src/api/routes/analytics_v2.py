@@ -592,18 +592,21 @@ async def get_students_table(
         avg_knowledge_score = round(sum(k_scores) / len(k_scores), 2) if k_scores else 0
         avg_speech_score = round(sum(s_scores) / len(s_scores), 2) if s_scores else 0
 
+        completed_interviews = [i for i in user_interviews if i.status == "completed"]
+        sorted_completed = sorted(completed_interviews, key=lambda interview: interview.created_at or datetime.datetime.min)
+        
         latest_score = 0
-        if user_interviews:
-            latest_interview = sorted(user_interviews, key=lambda interview: interview.created_at or datetime.datetime.min)[-1]
+        if sorted_completed:
+            latest_interview = sorted_completed[-1]
             score_value = reports_map.get(latest_interview.id)
             latest_score = round(score_value, 2) if isinstance(score_value, (float, int)) else 0
 
         improvement_percent = 0
-        if user_interviews and len(scores) >= 2:
-            first_score = next((reports_map.get(interview.id) for interview in user_interviews if reports_map.get(interview.id) is not None), None)
-            last_score = next((reports_map.get(interview.id) for interview in reversed(user_interviews) if reports_map.get(interview.id) is not None), None)
-            if isinstance(first_score, (float, int)) and isinstance(last_score, (float, int)) and first_score > 0:
-                improvement_percent = round(((last_score - first_score) / first_score) * 100.0, 2)
+        if len(sorted_completed) >= 2:
+            prev_score = reports_map.get(sorted_completed[-2].id)
+            latest_score_val = reports_map.get(sorted_completed[-1].id)
+            if isinstance(prev_score, (float, int)) and isinstance(latest_score_val, (float, int)) and prev_score > 0:
+                improvement_percent = round(((latest_score_val - prev_score) / prev_score) * 100.0, 2)
 
         last_active = max((interview.created_at for interview in user_interviews if interview.created_at is not None), default=None)
         items.append(

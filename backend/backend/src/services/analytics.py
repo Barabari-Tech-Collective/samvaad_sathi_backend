@@ -1393,9 +1393,10 @@ def _improvement_percent_from_interviews(
         if len(items) < 2:
             continue
         items.sort(key=lambda x: x[0])
-        first_score = items[0][1]
+        prev_score = items[-2][1]
         latest_score = items[-1][1]
-        improvements.append(latest_score - first_score)
+        if prev_score > 0:
+            improvements.append(((latest_score - prev_score) / prev_score) * 100.0)
 
     if not improvements:
         return 0.0
