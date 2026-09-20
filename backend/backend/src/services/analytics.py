@@ -498,6 +498,10 @@ class AnalyticsService:
         reports = await self._reports_by_interview(interview_ids)
         summaries = await self._summary_reports_by_interview(interview_ids)
         users_stmt = sqlalchemy.select(User)
+        if start_date is not None:
+            users_stmt = users_stmt.where(User.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
+        if end_date is not None:
+            users_stmt = users_stmt.where(User.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc))
         users = list((await self._db.execute(users_stmt)).scalars().all())
 
         events = await self._list_analytics_events(
@@ -508,13 +512,10 @@ class AnalyticsService:
             college=college,
         )
 
-        now = datetime.datetime.now(datetime.timezone.utc)
-        active_cutoff = now - datetime.timedelta(days=30)
-
-        active_user_ids = {i.user_id for i in interviews if i.created_at and i.created_at >= active_cutoff}
+        active_user_ids = {i.user_id for i in interviews}
         avg_scores = [
             _extract_overall_score(reports.get(i.id), summaries.get(i.id))
-            for i in interviews
+            for i in interviews if i.status == "completed"
         ]
         avg_scores_clean = [x for x in avg_scores if x is not None]
 
@@ -1341,8 +1342,6 @@ class AnalyticsService:
 
 
 def _extract_overall_score(report: Report | None, summary_report: SummaryReport | None) -> float | None:
-    if report and report.overall_score is not None:
-        return _normalize_score(_to_float(report.overall_score))
     if summary_report and isinstance(summary_report.report_json, dict):
         score_summary = summary_report.report_json.get("overallScoreSummary") or summary_report.report_json.get("scoreSummary") or {}
         
@@ -1353,6 +1352,8 @@ def _extract_overall_score(report: Report | None, summary_report: SummaryReport 
         speech_pct = _to_float(speech_struct.get("averagePct") or speech_struct.get("percentage"))
         
         return _avg_non_null([knowledge_pct, speech_pct])
+    if report and report.overall_score is not None:
+        return _normalize_score(_to_float(report.overall_score))
     return None
 
 
@@ -1378,6 +1379,8 @@ def _improvement_percent_from_interviews(
     summary_reports = summary_reports or {}
     by_user: dict[int, list[tuple[datetime.datetime, float]]] = defaultdict(list)
     for interview in interviews:
+        if interview.status != "completed":
+            continue
         score = _extract_overall_score(reports.get(interview.id), summary_reports.get(interview.id))
         if score is None:
             continue
@@ -1400,6 +1403,10 @@ def _improvement_percent_from_interviews(
 
 
 def _extract_speech_score(report: Report | None, summary_report: SummaryReport | None) -> float | None:
+    if summary_report and isinstance(summary_report.report_json, dict):
+        return _to_float(
+            ((summary_report.report_json.get("scoreSummary") or {}).get("speechAndStructure") or {}).get("percentage")
+        )
     if report and isinstance(report.speech_structure_fluency, dict):
         section = report.speech_structure_fluency
         candidates = [
@@ -1411,27 +1418,19 @@ def _extract_speech_score(report: Report | None, summary_report: SummaryReport |
         score = _avg_non_null([_to_float(c) for c in candidates if c is not None])
         if score is not None:
             return _normalize_score(score)
-    if summary_report and isinstance(summary_report.report_json, dict):
-        return _normalize_score(
-            _to_float(
-                ((summary_report.report_json.get("scoreSummary") or {}).get("speechAndStructure") or {}).get("percentage")
-            )
-        )
     return None
 
 
 def _extract_knowledge_score(report: Report | None, summary_report: SummaryReport | None) -> float | None:
+    if summary_report and isinstance(summary_report.report_json, dict):
+        return _to_float(
+            ((summary_report.report_json.get("scoreSummary") or {}).get("knowledgeCompetence") or {}).get("percentage")
+        )
     if report and isinstance(report.knowledge_competence, dict):
         section = report.knowledge_competence
         value = _to_float(section.get("average_domain_score") or section.get("averageDomainScore"))
         if value is not None:
             return _normalize_score(value)
-    if summary_report and isinstance(summary_report.report_json, dict):
-        return _normalize_score(
-            _to_float(
-                ((summary_report.report_json.get("scoreSummary") or {}).get("knowledgeCompetence") or {}).get("percentage")
-            )
-        )
     return None
 
 

@@ -573,12 +573,14 @@ async def get_students_table(
     items: list[dict[str, Any]] = []
     for user in users:
         user_interviews = interviews_by_user.get(user.id, [])
-        scores = [(reports_map.get(interview.id) or 0.0) for interview in user_interviews if reports_map.get(interview.id) is not None]
+        scores = [(reports_map.get(interview.id) or 0.0) for interview in user_interviews if reports_map.get(interview.id) is not None and interview.status == "completed"]
         avg_score = round(sum(scores) / len(scores), 2) if scores else 0
         
         k_scores = []
         s_scores = []
         for interview in user_interviews:
+            if interview.status != "completed":
+                continue
             sub = sub_scores_map.get(interview.id)
             if sub:
                 speech_val, knowledge_val = sub
@@ -820,25 +822,28 @@ async def get_student_interviews(
     offset = (page - 1) * limit
 
     stmt = (
-        sqlalchemy.select(Interview, Report.overall_score)
+        sqlalchemy.select(Interview, Report, SummaryReport)
         .outerjoin(Report, Report.interview_id == Interview.id)
+        .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
         .where(Interview.user_id == student_id)
         .order_by(Interview.created_at.desc())
         .offset(offset)
         .limit(limit)
     )
     rows = list((await session.execute(stmt)).all())
+    
+    from src.services.analytics import _extract_overall_score
     items = [
         {
             "interview_id": interview.id,
             "role": interview.track,
             "difficulty": interview.difficulty,
             "status": interview.status,
-            "score": _metric_or_zero(score, digits=2),
+            "score": _metric_or_zero(_extract_overall_score(report, summary_report), digits=2),
             "duration_seconds": _metric_or_zero(interview.duration_seconds),
             "created_at": interview.created_at,
         }
-        for interview, score in rows
+        for interview, report, summary_report in rows
     ]
     return TablePageResponse(table_type="student_interviews", items=items, page=page, limit=limit, total=total)
 
