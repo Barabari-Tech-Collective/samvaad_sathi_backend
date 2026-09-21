@@ -28,7 +28,7 @@ class KpiCard(BaseSchemaModel):
 
 
 class TimeSeriesPoint(BaseSchemaModel):
-    date: datetime.date
+    date: datetime.date | datetime.datetime | str
     value: float | int
 
 

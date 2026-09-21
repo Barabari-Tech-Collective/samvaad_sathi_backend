@@ -1502,24 +1502,19 @@ async def get_interview_speech_metrics_timeline(
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
-    stmt = (
-        sqlalchemy.select(QuestionAttempt.created_at, QuestionAttempt.analysis_json)
-        .where(QuestionAttempt.interview_id == interview_id)
-        .order_by(QuestionAttempt.created_at.asc())
-    )
-    rows = list((await session.execute(stmt)).all())
+    from src.services.analytics import AnalyticsService
+    service = AnalyticsService(session)
+    metrics = await service.get_interview_level_analytics(interview_id=interview_id)
+    if metrics is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+        
+    items = metrics.get("question_level", [])
     points: list[TimeSeriesPoint] = []
-    for created_at, analysis_json in rows:
-        analysis = analysis_json or {}
-        communication = analysis.get("communication") if isinstance(analysis, dict) else {}
-        energy = None
-        if isinstance(communication, dict):
-            raw_energy = communication.get("energy") or communication.get("energy_score")
-            if isinstance(raw_energy, (int, float)):
-                energy = float(raw_energy)
-        point_date = _to_date(created_at)
-        if point_date is not None and energy is not None:
-            points.append(TimeSeriesPoint(date=point_date, value=round(energy, 2)))
+    
+    for item in items:
+        speech_score = item.get("speech_score") or 0.0
+        points.append(TimeSeriesPoint(date=f"Q{item['order']}", value=round(speech_score, 2)))
+            
     return TimeSeriesResponse(chart_type="line", points=points)
 
 
