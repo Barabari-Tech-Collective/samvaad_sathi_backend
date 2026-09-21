@@ -60,6 +60,8 @@ class AnalyticsService:
         question_map = {q.id: q for q in questions}
 
         for interview in interviews:
+            if interview.status != "completed":
+                continue
             report = reports.get(interview.id)
             summary_report = summary_reports.get(interview.id)
             overall = _extract_overall_score(report, summary_report)
@@ -145,10 +147,13 @@ class AnalyticsService:
 
         ordered_scores = sorted(score_points, key=lambda x: x.get("created_at") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
         latest_score = ordered_scores[-1]["overall_score"] if ordered_scores else None
-        first_score = ordered_scores[0]["overall_score"] if ordered_scores else None
+        prev_score = ordered_scores[-2]["overall_score"] if len(ordered_scores) >= 2 else None
         avg_last_3 = _avg_non_null([x["overall_score"] for x in ordered_scores[-3:]])
         best_score = max(overall_scores) if overall_scores else None
-        improvement = (latest_score - first_score) if latest_score is not None and first_score is not None else None
+        
+        improvement = None
+        if latest_score is not None and prev_score is not None and prev_score > 0:
+            improvement = ((latest_score - prev_score) / prev_score) * 100.0
 
         reattempt_stats = await self._reattempt_stats(user_id=user_id, start_date=start_date, end_date=end_date)
         interview_times = [i.created_at for i in interviews if i.created_at is not None]
@@ -171,7 +176,7 @@ class AnalyticsService:
                 "average_last_3": round(avg_last_3, 2) if avg_last_3 is not None else None,
                 "best_score": round(best_score, 2) if best_score is not None else None,
                 "improvement_rate": round(improvement, 2) if improvement is not None else None,
-                "improvement_formula": "latest_score - first_score",
+                "improvement_formula": "(latest_score - prev_score) / prev_score * 100",
                 "score_history": [
                     {
                         "interview_id": item["interview_id"],
@@ -885,6 +890,8 @@ class AnalyticsService:
         pre_scores: list[float] = []
         post_scores: list[float] = []
         for interview in interviews:
+            if interview.status != "completed":
+                continue
             score = _extract_overall_score(reports.get(interview.id), summaries.get(interview.id))
             if score is None:
                 continue

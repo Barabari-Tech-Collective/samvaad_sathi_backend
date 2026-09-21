@@ -707,14 +707,23 @@ async def get_student_summary(
     performance = metrics.get("performance", {})
     attempts = metrics.get("attempt_behavior", {})
     practice = metrics.get("practice_compliance", {})
+    score_history = performance.get("score_history", [])
+    overall_scores = [item["overall_score"] for item in score_history if item.get("overall_score") is not None]
+    speech_scores = [item["speech_score"] for item in score_history if item.get("speech_score") is not None]
+    knowledge_scores = [item["knowledge_score"] for item in score_history if item.get("knowledge_score") is not None]
+
+    true_avg_score = round(sum(overall_scores) / len(overall_scores), 2) if overall_scores else 0
+    true_avg_speech = round(sum(speech_scores) / len(speech_scores), 2) if speech_scores else 0
+    true_avg_knowledge = round(sum(knowledge_scores) / len(knowledge_scores), 2) if knowledge_scores else 0
+
     kpis = [
         KpiCard(key="total_interviews", label="Total Interviews", value=attempts.get("interviews_attempted", 0)),
-        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(performance.get("average_last_3"), digits=2)),
+        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(true_avg_score, digits=2)),
         KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_zero(performance.get("improvement_rate"), digits=2), unit="percent"),
-        KpiCard(key="last_active_date", label="Last Active Date", value=(performance.get("score_history", [])[-1].get("created_at").isoformat().replace("+00:00", "Z") if performance.get("score_history") and performance.get("score_history", [])[-1].get("created_at") else None)),
+        KpiCard(key="last_active_date", label="Last Active Date", value=(score_history[-1].get("created_at").isoformat().replace("+00:00", "Z") if score_history and score_history[-1].get("created_at") else None)),
         KpiCard(key="practice_completion_rate", label="Practice Completion Rate", value=_metric_or_zero(practice.get("completion_ratio"), digits=2), unit="ratio"),
-        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero((performance.get("score_history", [])[-1].get("speech_score") if performance.get("score_history") else None), digits=2)),
-        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero((performance.get("score_history", [])[-1].get("knowledge_score") if performance.get("score_history") else None), digits=2)),
+        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero(true_avg_speech, digits=2)),
+        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero(true_avg_knowledge, digits=2)),
     ]
     return StudentSummaryResponse(student_id=student_id, kpis=kpis)
 
@@ -835,14 +844,16 @@ async def get_student_interviews(
     )
     rows = list((await session.execute(stmt)).all())
     
-    from src.services.analytics import _extract_overall_score
+    from src.services.analytics import _extract_overall_score, _extract_speech_score, _extract_knowledge_score
     items = [
         {
             "interview_id": interview.id,
             "role": interview.track,
             "difficulty": interview.difficulty,
-            "status": interview.status,
+            "status": "Incomplete" if interview.status and interview.status.lower() == "active" else interview.status,
             "score": _metric_or_zero(_extract_overall_score(report, summary_report), digits=2),
+            "speech_score": _metric_or_zero(_extract_speech_score(report, summary_report), digits=2),
+            "knowledge_score": _metric_or_zero(_extract_knowledge_score(report, summary_report), digits=2),
             "duration_seconds": _metric_or_zero(interview.duration_seconds),
             "created_at": interview.created_at,
         }
