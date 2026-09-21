@@ -601,14 +601,28 @@ async def get_students_table(
             score_value = reports_map.get(latest_interview.id)
             latest_score = round(score_value, 2) if isinstance(score_value, (float, int)) else 0
 
-        improvement_percent = 0
-        if len(sorted_completed) >= 2:
-            prev_score = reports_map.get(sorted_completed[-2].id)
-            latest_score_val = reports_map.get(sorted_completed[-1].id)
+        latest_timestamp = max((i.created_at for i in user_interviews if i.created_at is not None), default=None)
+                    
+        last_active = None
+        if latest_timestamp is not None:
+            last_active = latest_timestamp.strftime("%b %d, %Y")
+        elif getattr(user, 'updated_at', None) is not None:
+            last_active = getattr(user, 'updated_at').strftime("%b %d, %Y")
+        elif getattr(user, 'created_at', None) is not None:
+            last_active = getattr(user, 'created_at').strftime("%b %d, %Y")
+            
+        # Avoid misleading 0% or -100% when there aren't enough completed interviews
+        completed_interviews = [i for i in user_interviews if i.status == "completed"]
+        
+        improvement_percent = 0.0
+        if len(completed_interviews) >= 2:
+            prev_score = reports_map.get(sorted_completed[-2].id) if len(sorted_completed) >= 2 else None
+            latest_score_val = reports_map.get(sorted_completed[-1].id) if sorted_completed else None
             if isinstance(prev_score, (float, int)) and isinstance(latest_score_val, (float, int)) and prev_score > 0:
                 improvement_percent = round(((latest_score_val - prev_score) / prev_score) * 100.0, 2)
+        else:
+            improvement_percent = None
 
-        last_active = max((interview.created_at for interview in user_interviews if interview.created_at is not None), default=None)
         items.append(
             {
                 "student_id": user.id,
@@ -618,7 +632,7 @@ async def get_students_table(
                 "knowledge_score": avg_knowledge_score,
                 "speech_score": avg_speech_score,
                 "latest_score": latest_score,
-                "improvement_percent": improvement_percent,
+                "improvement_percent": round(improvement_percent, 2) if improvement_percent is not None else None,
                 "interviews_count": len(user_interviews),
                 "last_active": last_active,
             }
@@ -1290,11 +1304,34 @@ async def get_college_practice_metrics(
     service = AnalyticsService(session)
     alerts = await service.get_alerts()
     college_alerts = [a for a in alerts.get("system_alerts", []) if a.get("college") == college_name]
+    
+    # Calculate difficulty distribution
+    stmt = (
+        sqlalchemy.select(Interview.difficulty, sqlalchemy.func.count(Interview.id))
+        .join(User, User.id == Interview.user_id)
+        .where(User.university == college_name)
+        .where(Interview.status == "completed")
+        .group_by(Interview.difficulty)
+    )
+    rows = list((await session.execute(stmt)).all())
+    
+    buckets_map = {"easy": 0, "medium": 0, "hard": 0, "expert": 0}
+    for diff, count in rows:
+        label = (diff or "").lower()
+        if label in buckets_map:
+            buckets_map[label] += int(count)
+
     items = [
         {
             "college": college_name,
             "practice_alerts_count": len(college_alerts),
             "attention_required": bool(college_alerts),
+            "distribution": [
+                {"label": "Easy", "count": buckets_map["easy"]},
+                {"label": "Medium", "count": buckets_map["medium"]},
+                {"label": "Hard", "count": buckets_map["hard"]},
+                {"label": "Expert", "count": buckets_map["expert"]},
+            ]
         }
     ]
     return DashboardTopListResponse(table_type="college_practice_metrics", items=items)
@@ -1308,8 +1345,8 @@ async def get_college_weak_skills(
 ):
     del current_user
     stmt = (
-        sqlalchemy.select(QuestionAttempt.analysis_json, Interview.track)
-        .join(Interview, Interview.id == QuestionAttempt.interview_id)
+        sqlalchemy.select(SummaryReport.report_json, Interview.track)
+        .join(Interview, Interview.id == SummaryReport.interview_id)
         .join(User, User.id == Interview.user_id)
         .where(User.university == college_name)
     )
@@ -1320,14 +1357,26 @@ async def get_college_weak_skills(
         communication = analysis.get("communication") if isinstance(analysis, dict) else {}
         domain = analysis.get("domain") if isinstance(analysis, dict) else {}
         weaknesses = []
-        if isinstance(communication, dict):
-            weaknesses.extend(communication.get("improvements") or [])
-            weaknesses.extend(communication.get("recommendations") or [])
-        if isinstance(domain, dict):
-            weaknesses.extend(domain.get("improvements") or [])
+        
+        # Extract from nextSteps
+        next_steps = analysis.get("nextSteps", [])
+        if isinstance(next_steps, list):
+            for step in next_steps:
+                if isinstance(step, dict) and "title" in step:
+                    weaknesses.append(step["title"])
+        
+        # Extract from speechFluencyFeedback
+        fluency = analysis.get("speechFluencyFeedback", {})
+        if isinstance(fluency, dict) and "areasOfImprovement" in fluency:
+            weaknesses.append(fluency["areasOfImprovement"])
+            
         for weakness in weaknesses:
             if isinstance(weakness, str) and weakness.strip():
-                counts[(role or "unknown", weakness.strip().lower())] += 1
+                # Keep the weakness relatively short for a heatmap tag, or extract keywords
+                tag = weakness.strip()
+                if len(tag) > 30:
+                    tag = tag[:27] + "..."
+                counts[(role or "unknown", tag)] += 1
     items = [HeatmapCell(x=role_name, y=tag, value=count) for (role_name, tag), count in counts.items()]
     return HeatmapResponse(chart_type="heatmap", items=items)
 

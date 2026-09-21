@@ -465,25 +465,34 @@ class AnalyticsService:
 
         output: list[dict[str, Any]] = []
         for college_name, college_interviews in grouped.items():
-            scores = [_extract_overall_score(reports.get(i.id), summaries.get(i.id)) for i in college_interviews]
+            completed_interviews = [i for i in college_interviews if i.status == "completed"]
+            scores = [_extract_overall_score(reports.get(i.id), summaries.get(i.id)) for i in completed_interviews]
             clean_scores = [s for s in scores if s is not None]
-            completed = len([i for i in college_interviews if i.status == "completed"])
-
-            sorted_scored = sorted(
-                [(_extract_overall_score(reports.get(i.id), summaries.get(i.id)), i.created_at) for i in college_interviews],
-                key=lambda x: x[1] if x[1] is not None else datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
-            )
-            first = next((x[0] for x in sorted_scored if x[0] is not None), None)
-            latest = next((x[0] for x in reversed(sorted_scored) if x[0] is not None), None)
+            
+            # Calculate average improvement of individual students
+            user_interviews_map = defaultdict(list)
+            for i in completed_interviews:
+                user_interviews_map[i.user_id].append(i)
+                
+            individual_improvements = []
+            for uid, u_interviews in user_interviews_map.items():
+                sorted_u = sorted(u_interviews, key=lambda x: x.created_at or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+                if len(sorted_u) >= 2:
+                    prev_score = _extract_overall_score(reports.get(sorted_u[-2].id), summaries.get(sorted_u[-2].id))
+                    latest_score = _extract_overall_score(reports.get(sorted_u[-1].id), summaries.get(sorted_u[-1].id))
+                    if isinstance(prev_score, (int, float)) and isinstance(latest_score, (int, float)) and prev_score > 0:
+                        individual_improvements.append(((latest_score - prev_score) / prev_score) * 100.0)
+                        
+            improvement_rate = round(sum(individual_improvements) / len(individual_improvements), 2) if individual_improvements else None
 
             output.append(
                 {
                     "college": college_name,
                     "interviews": len(college_interviews),
                     "avg_score": _round_opt(_avg_non_null(clean_scores), 2) if clean_scores else None,
-                    "improvement_rate": round(latest - first, 2) if latest is not None and first is not None else None,
+                    "improvement_rate": improvement_rate,
                     "usage_frequency": len({i.user_id for i in college_interviews}),
-                    "completion_rate": round((completed / len(college_interviews)) * 100.0, 2) if college_interviews else 0.0,
+                    "completion_rate": round((len(completed_interviews) / len(college_interviews)) * 100.0, 2) if college_interviews else 0.0,
                 }
             )
 
