@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 from collections import defaultdict
 from typing import Any, Sequence
 
@@ -114,7 +115,10 @@ def _safe_percent(numerator: float | int, denominator: float | int) -> float:
 def _extract_distribution_buckets(raw_distribution: list[dict[str, Any]]) -> list[DistributionBucket]:
     buckets: list[DistributionBucket] = []
     for item in raw_distribution:
-        label = f"{int(item.get('start', 0))}-{int(item.get('end', 0))}"
+        if "range" in item:
+            label = str(item["range"])
+        else:
+            label = f"{int(item.get('start', 0))}-{int(item.get('end', 0))}"
         buckets.append(DistributionBucket(label=label, count=int(item.get("count", 0))))
     return buckets
 
@@ -271,7 +275,7 @@ async def get_dashboard_interviews_per_day(
         college=college,
     ).order_by(sqlalchemy.func.date(Interview.created_at).asc())
     rows = list((await session.execute(stmt)).all())
-    points = [TimeSeriesPoint(date=row[0], value=int(row[1])) for row in rows if row[0] is not None]
+    points = [TimeSeriesPoint(label=row[0], value=int(row[1])) for row in rows if row[0] is not None]
     return TimeSeriesResponse(chart_type="line", points=points)
 
 
@@ -297,7 +301,47 @@ async def get_dashboard_active_users_trend(
         college=college,
     ).order_by(sqlalchemy.func.date(Interview.created_at).asc())
     rows = list((await session.execute(stmt)).all())
-    points = [TimeSeriesPoint(date=row[0], value=int(row[1])) for row in rows if row[0] is not None]
+    points = [TimeSeriesPoint(label=row[0], value=int(row[1])) for row in rows if row[0] is not None]
+    return TimeSeriesResponse(chart_type="area", points=points)
+
+
+@router.get("/dashboard/new-students-trend", response_model=TimeSeriesResponse, status_code=200, summary="New students trend", description="Reasoning: tracks daily new user signups. Output: date-wise new student time-series points.")
+async def get_dashboard_new_students_trend(
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
+    role: str | None = None,
+    difficulty: str | None = None,
+    college: str | None = None,
+    current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+) -> TimeSeriesResponse:
+    del current_user
+    stmt = sqlalchemy.select(
+        sqlalchemy.func.date(User.created_at), sqlalchemy.func.count(User.id)
+    ).group_by(
+        sqlalchemy.func.date(User.created_at)
+    )
+
+    if college:
+        stmt = stmt.where(User.university == college)
+    if role:
+        clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
+        stmt = stmt.where(
+            sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(User.target_position), '[^a-z0-9]', '', 'g') == clean_role
+        )
+    if start_date is not None:
+        stmt = stmt.where(
+            User.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+        )
+    if end_date is not None:
+        stmt = stmt.where(
+            User.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+        )
+
+    stmt = stmt.order_by(sqlalchemy.func.date(User.created_at).asc())
+    
+    rows = list((await session.execute(stmt)).all())
+    points = [TimeSeriesPoint(label=row[0], value=int(row[1])) for row in rows if row[0] is not None]
     return TimeSeriesResponse(chart_type="area", points=points)
 
 
@@ -321,7 +365,16 @@ async def get_dashboard_top_roles(
         difficulty=difficulty,
         college=college,
     )
-    return DashboardTopListResponse(table_type="top_roles", items=_zero_fill_metric_nulls(items[:limit]))
+    
+    normalized_items = _zero_fill_metric_nulls(items[:limit])
+    max_usage = max((i.get("interviews") or 0 for i in normalized_items), default=0)
+    for i in normalized_items:
+        tags = []
+        if max_usage > 0 and (i.get("interviews") or 0) == max_usage:
+            tags.append("Most Popular")
+        i["tags"] = tags
+        
+    return DashboardTopListResponse(table_type="top_roles", items=normalized_items)
 
 
 @router.get(
@@ -352,6 +405,83 @@ async def get_dashboard_top_colleges(
         college=college,
     )
     return DashboardTopListResponse(table_type="top_colleges", items=_zero_fill_metric_nulls(items[:limit]))
+
+
+@router.get(
+    "/dashboard/students-per-college",
+    response_model=DashboardTopListResponse,
+    status_code=200,
+    summary="Students per college",
+    description="Returns top colleges by number of unique students who took interviews in the given period.",
+)
+async def get_dashboard_students_per_college(
+    limit: int = fastapi.Query(default=10, ge=1, le=100),
+    view_type: str = fastapi.Query(default="all"),
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
+    role: str | None = None,
+    difficulty: str | None = None,
+    college: str | None = None,
+    current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    del current_user
+    
+    if view_type == "interviewed":
+        stmt = sqlalchemy.select(
+            sqlalchemy.func.coalesce(User.university, "unknown").label("college"),
+            sqlalchemy.func.count(sqlalchemy.distinct(User.id)).label("students_count")
+        ).select_from(Interview).join(User, User.id == Interview.user_id)
+        
+        if college:
+            stmt = stmt.where(User.university == college)
+        if role:
+            clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
+            stmt = stmt.where(
+                sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(Interview.track), '[^a-z0-9]', '', 'g') == clean_role
+            )
+        if difficulty:
+            stmt = stmt.where(Interview.difficulty == difficulty)
+        if start_date is not None:
+            stmt = stmt.where(
+                Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+            )
+        if end_date is not None:
+            stmt = stmt.where(
+                Interview.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+            )
+            
+        stmt = stmt.group_by(User.university).order_by(sqlalchemy.desc("students_count"))
+    else:
+        stmt = sqlalchemy.select(
+            sqlalchemy.func.coalesce(User.university, "unknown").label("college"),
+            sqlalchemy.func.count(User.id).label("students_count")
+        ).select_from(User)
+        
+        if college:
+            stmt = stmt.where(User.university == college)
+        if role:
+            clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
+            stmt = stmt.where(
+                sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(User.target_position), '[^a-z0-9]', '', 'g') == clean_role
+            )
+        if start_date is not None:
+            stmt = stmt.where(
+                User.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+            )
+        if end_date is not None:
+            stmt = stmt.where(
+                User.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+            )
+            
+        stmt = stmt.group_by(User.university).order_by(sqlalchemy.desc("students_count"))
+        
+    rows = list((await session.execute(stmt)).all())
+    items = [
+        {"college": row.college, "students_count": int(row.students_count)}
+        for row in rows
+    ]
+    return DashboardTopListResponse(table_type="students_per_college", items=items[:limit])
 
 
 @router.get(
@@ -424,7 +554,7 @@ async def get_dashboard_recent_interviews(
             "knowledge_score": _metric_or_zero(knowledge_score, digits=2),
             "duration_seconds": _metric_or_zero(interview.duration_seconds),
             "date": interview.created_at,
-            "status": interview.status,
+            "status": "Incomplete" if interview.status and interview.status.lower() == "active" else (interview.status.title() if interview.status else interview.status),
         })
     return TablePageResponse(table_type="recent_interviews", items=items, page=1, limit=limit, total=len(items))
 
@@ -573,12 +703,14 @@ async def get_students_table(
     items: list[dict[str, Any]] = []
     for user in users:
         user_interviews = interviews_by_user.get(user.id, [])
-        scores = [(reports_map.get(interview.id) or 0.0) for interview in user_interviews if reports_map.get(interview.id) is not None]
+        scores = [(reports_map.get(interview.id) or 0.0) for interview in user_interviews if reports_map.get(interview.id) is not None and interview.status == "completed"]
         avg_score = round(sum(scores) / len(scores), 2) if scores else 0
         
         k_scores = []
         s_scores = []
         for interview in user_interviews:
+            if interview.status != "completed":
+                continue
             sub = sub_scores_map.get(interview.id)
             if sub:
                 speech_val, knowledge_val = sub
@@ -590,20 +722,41 @@ async def get_students_table(
         avg_knowledge_score = round(sum(k_scores) / len(k_scores), 2) if k_scores else 0
         avg_speech_score = round(sum(s_scores) / len(s_scores), 2) if s_scores else 0
 
+        completed_interviews = [i for i in user_interviews if i.status == "completed"]
+        sorted_completed = sorted(completed_interviews, key=lambda interview: interview.created_at or datetime.datetime.min)
+        
         latest_score = 0
-        if user_interviews:
-            latest_interview = sorted(user_interviews, key=lambda interview: interview.created_at or datetime.datetime.min)[-1]
+        if sorted_completed:
+            latest_interview = sorted_completed[-1]
             score_value = reports_map.get(latest_interview.id)
             latest_score = round(score_value, 2) if isinstance(score_value, (float, int)) else 0
 
-        improvement_percent = 0
-        if user_interviews and len(scores) >= 2:
-            first_score = next((reports_map.get(interview.id) for interview in user_interviews if reports_map.get(interview.id) is not None), None)
-            last_score = next((reports_map.get(interview.id) for interview in reversed(user_interviews) if reports_map.get(interview.id) is not None), None)
-            if isinstance(first_score, (float, int)) and isinstance(last_score, (float, int)) and first_score > 0:
-                improvement_percent = round(((last_score - first_score) / first_score) * 100.0, 2)
+        latest_timestamp = max((i.created_at for i in user_interviews if i.created_at is not None), default=None)
+                    
+        last_active = None
+        if latest_timestamp is not None:
+            last_active = latest_timestamp.isoformat().replace("+00:00", "Z")
+        elif getattr(user, 'updated_at', None) is not None:
+            last_active = getattr(user, 'updated_at').isoformat().replace("+00:00", "Z")
+        elif getattr(user, 'created_at', None) is not None:
+            last_active = getattr(user, 'created_at').isoformat().replace("+00:00", "Z")
+            
+        # Avoid misleading 0% or -100% when there aren't enough completed interviews
+        improvement_percent = 0.0
+        if len(completed_interviews) >= 2:
+            prev_score = reports_map.get(sorted_completed[-2].id) if len(sorted_completed) >= 2 else None
+            latest_score_val = reports_map.get(sorted_completed[-1].id) if sorted_completed else None
+            if isinstance(prev_score, (float, int)) and isinstance(latest_score_val, (float, int)) and prev_score > 0:
+                improvement_percent = round(((latest_score_val - prev_score) / prev_score) * 100.0, 2)
+        else:
+            improvement_percent = None
 
-        last_active = max((interview.created_at for interview in user_interviews if interview.created_at is not None), default=None)
+        thirty_days_ago = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=30)
+        recent_interviews = [i for i in user_interviews if i.created_at and i.created_at.replace(tzinfo=None) > thirty_days_ago]
+        tags = []
+        if len(recent_interviews) >= 1:
+            tags.append("Active")
+            
         items.append(
             {
                 "student_id": user.id,
@@ -613,9 +766,10 @@ async def get_students_table(
                 "knowledge_score": avg_knowledge_score,
                 "speech_score": avg_speech_score,
                 "latest_score": latest_score,
-                "improvement_percent": improvement_percent,
+                "improvement_percent": round(improvement_percent, 2) if improvement_percent is not None else None,
                 "interviews_count": len(user_interviews),
                 "last_active": last_active,
+                "tags": tags,
             }
         )
 
@@ -702,14 +856,23 @@ async def get_student_summary(
     performance = metrics.get("performance", {})
     attempts = metrics.get("attempt_behavior", {})
     practice = metrics.get("practice_compliance", {})
+    score_history = performance.get("score_history", [])
+    overall_scores = [item["overall_score"] for item in score_history if item.get("overall_score") is not None]
+    speech_scores = [item["speech_score"] for item in score_history if item.get("speech_score") is not None]
+    knowledge_scores = [item["knowledge_score"] for item in score_history if item.get("knowledge_score") is not None]
+
+    true_avg_score = round(sum(overall_scores) / len(overall_scores), 2) if overall_scores else 0
+    true_avg_speech = round(sum(speech_scores) / len(speech_scores), 2) if speech_scores else 0
+    true_avg_knowledge = round(sum(knowledge_scores) / len(knowledge_scores), 2) if knowledge_scores else 0
+
     kpis = [
         KpiCard(key="total_interviews", label="Total Interviews", value=attempts.get("interviews_attempted", 0)),
-        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(performance.get("average_last_3"), digits=2)),
+        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(true_avg_score, digits=2)),
         KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_zero(performance.get("improvement_rate"), digits=2), unit="percent"),
-        KpiCard(key="last_active_date", label="Last Active Date", value=(performance.get("score_history", [])[-1].get("created_at").isoformat().replace("+00:00", "Z") if performance.get("score_history") and performance.get("score_history", [])[-1].get("created_at") else None)),
+        KpiCard(key="last_active_date", label="Last Active Date", value=(score_history[-1].get("created_at").isoformat().replace("+00:00", "Z") if score_history and score_history[-1].get("created_at") else None)),
         KpiCard(key="practice_completion_rate", label="Practice Completion Rate", value=_metric_or_zero(practice.get("completion_ratio"), digits=2), unit="ratio"),
-        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero((performance.get("score_history", [])[-1].get("speech_score") if performance.get("score_history") else None), digits=2)),
-        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero((performance.get("score_history", [])[-1].get("knowledge_score") if performance.get("score_history") else None), digits=2)),
+        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero(true_avg_speech, digits=2)),
+        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero(true_avg_knowledge, digits=2)),
     ]
     return StudentSummaryResponse(student_id=student_id, kpis=kpis)
 
@@ -820,25 +983,30 @@ async def get_student_interviews(
     offset = (page - 1) * limit
 
     stmt = (
-        sqlalchemy.select(Interview, Report.overall_score)
+        sqlalchemy.select(Interview, Report, SummaryReport)
         .outerjoin(Report, Report.interview_id == Interview.id)
+        .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
         .where(Interview.user_id == student_id)
         .order_by(Interview.created_at.desc())
         .offset(offset)
         .limit(limit)
     )
     rows = list((await session.execute(stmt)).all())
+    
+    from src.services.analytics import _extract_overall_score, _extract_speech_score, _extract_knowledge_score
     items = [
         {
             "interview_id": interview.id,
             "role": interview.track,
             "difficulty": interview.difficulty,
-            "status": interview.status,
-            "score": _metric_or_zero(score, digits=2),
+            "status": "Incomplete" if interview.status and interview.status.lower() == "active" else (interview.status.title() if interview.status else interview.status),
+            "score": _metric_or_zero(_extract_overall_score(report, summary_report), digits=2),
+            "speech_score": _metric_or_zero(_extract_speech_score(report, summary_report), digits=2),
+            "knowledge_score": _metric_or_zero(_extract_knowledge_score(report, summary_report), digits=2),
             "duration_seconds": _metric_or_zero(interview.duration_seconds),
             "created_at": interview.created_at,
         }
-        for interview, score in rows
+        for interview, report, summary_report in rows
     ]
     return TablePageResponse(table_type="student_interviews", items=items, page=page, limit=limit, total=total)
 
@@ -944,17 +1112,30 @@ async def get_colleges_table(
     )
     students_by_college = {name: count for name, count in (await session.execute(students_by_college_stmt)).all()}
 
+    max_score = max((item.get("avg_score") or 0 for item in all_items if item.get("interviews", 0) > 1), default=0)
+    max_interviews = max((item.get("usage_frequency") or 0 for item in all_items), default=0)
+    
     items = []
     for item in all_items[start_index:end_index]:
         college_name = item.get("college")
+        avg_score_val = item.get("avg_score") or 0
+        freq = item.get("usage_frequency") or 0
+        
+        tags = []
+        if max_score > 0 and avg_score_val == max_score and item.get("interviews", 0) > 1:
+            tags.append("Top Performing")
+        if max_interviews > 0 and freq == max_interviews:
+            tags.append("Most Active")
+            
         items.append(
             {
                 "college_name": college_name,
                 "students_count": int(students_by_college.get(college_name, 0)),
                 "interviews_count": item.get("interviews"),
-                "avg_score": _metric_or_zero(item.get("avg_score"), digits=2),
+                "avg_score": _metric_or_zero(avg_score_val, digits=2),
                 "improvement_percent": _metric_or_zero(item.get("improvement_rate"), digits=2),
-                "active_users": item.get("usage_frequency"),
+                "active_users": freq,
+                "tags": tags,
             }
         )
     return TablePageResponse(table_type="colleges", items=items, page=page, limit=limit, total=total)
@@ -1219,7 +1400,7 @@ async def get_college_student_growth(
         if day is None:
             continue
         cumulative += int(count)
-        points.append(TimeSeriesPoint(date=day, value=cumulative))
+        points.append(TimeSeriesPoint(label=day, value=cumulative))
     return TimeSeriesResponse(chart_type="line", points=points)
 
 
@@ -1247,7 +1428,7 @@ async def get_college_score_trend(
     )
     rows = list((await session.execute(stmt)).all())
     points = [
-        TimeSeriesPoint(date=day, value=round(float(avg_score), 2))
+        TimeSeriesPoint(label=day, value=round(float(avg_score), 2))
         for day, avg_score in rows
         if day is not None and avg_score is not None
     ]
@@ -1271,11 +1452,34 @@ async def get_college_practice_metrics(
     service = AnalyticsService(session)
     alerts = await service.get_alerts()
     college_alerts = [a for a in alerts.get("system_alerts", []) if a.get("college") == college_name]
+    
+    # Calculate difficulty distribution
+    stmt = (
+        sqlalchemy.select(Interview.difficulty, sqlalchemy.func.count(Interview.id))
+        .join(User, User.id == Interview.user_id)
+        .where(User.university == college_name)
+        .where(Interview.status == "completed")
+        .group_by(Interview.difficulty)
+    )
+    rows = list((await session.execute(stmt)).all())
+    
+    buckets_map = {"easy": 0, "medium": 0, "hard": 0, "expert": 0}
+    for diff, count in rows:
+        label = (diff or "").lower()
+        if label in buckets_map:
+            buckets_map[label] += int(count)
+
     items = [
         {
             "college": college_name,
             "practice_alerts_count": len(college_alerts),
             "attention_required": bool(college_alerts),
+            "distribution": [
+                {"label": "Easy", "count": buckets_map["easy"]},
+                {"label": "Medium", "count": buckets_map["medium"]},
+                {"label": "Hard", "count": buckets_map["hard"]},
+                {"label": "Expert", "count": buckets_map["expert"]},
+            ]
         }
     ]
     return DashboardTopListResponse(table_type="college_practice_metrics", items=items)
@@ -1289,8 +1493,8 @@ async def get_college_weak_skills(
 ):
     del current_user
     stmt = (
-        sqlalchemy.select(QuestionAttempt.analysis_json, Interview.track)
-        .join(Interview, Interview.id == QuestionAttempt.interview_id)
+        sqlalchemy.select(SummaryReport.report_json, Interview.track)
+        .join(Interview, Interview.id == SummaryReport.interview_id)
         .join(User, User.id == Interview.user_id)
         .where(User.university == college_name)
     )
@@ -1301,14 +1505,26 @@ async def get_college_weak_skills(
         communication = analysis.get("communication") if isinstance(analysis, dict) else {}
         domain = analysis.get("domain") if isinstance(analysis, dict) else {}
         weaknesses = []
-        if isinstance(communication, dict):
-            weaknesses.extend(communication.get("improvements") or [])
-            weaknesses.extend(communication.get("recommendations") or [])
-        if isinstance(domain, dict):
-            weaknesses.extend(domain.get("improvements") or [])
+        
+        # Extract from nextSteps
+        next_steps = analysis.get("nextSteps", [])
+        if isinstance(next_steps, list):
+            for step in next_steps:
+                if isinstance(step, dict) and "title" in step:
+                    weaknesses.append(step["title"])
+        
+        # Extract from speechFluencyFeedback
+        fluency = analysis.get("speechFluencyFeedback", {})
+        if isinstance(fluency, dict) and "areasOfImprovement" in fluency:
+            weaknesses.append(fluency["areasOfImprovement"])
+            
         for weakness in weaknesses:
             if isinstance(weakness, str) and weakness.strip():
-                counts[(role or "unknown", weakness.strip().lower())] += 1
+                # Keep the weakness relatively short for a heatmap tag, or extract keywords
+                tag = weakness.strip()
+                if len(tag) > 30:
+                    tag = tag[:27] + "..."
+                counts[(role or "unknown", tag)] += 1
     items = [HeatmapCell(x=role_name, y=tag, value=count) for (role_name, tag), count in counts.items()]
     return HeatmapResponse(chart_type="heatmap", items=items)
 
@@ -1483,24 +1699,19 @@ async def get_interview_speech_metrics_timeline(
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
-    stmt = (
-        sqlalchemy.select(QuestionAttempt.created_at, QuestionAttempt.analysis_json)
-        .where(QuestionAttempt.interview_id == interview_id)
-        .order_by(QuestionAttempt.created_at.asc())
-    )
-    rows = list((await session.execute(stmt)).all())
+    from src.services.analytics import AnalyticsService
+    service = AnalyticsService(session)
+    metrics = await service.get_interview_level_analytics(interview_id=interview_id)
+    if metrics is None:
+        raise fastapi.HTTPException(status_code=404, detail="Interview not found")
+        
+    items = metrics.get("question_level", [])
     points: list[TimeSeriesPoint] = []
-    for created_at, analysis_json in rows:
-        analysis = analysis_json or {}
-        communication = analysis.get("communication") if isinstance(analysis, dict) else {}
-        energy = None
-        if isinstance(communication, dict):
-            raw_energy = communication.get("energy") or communication.get("energy_score")
-            if isinstance(raw_energy, (int, float)):
-                energy = float(raw_energy)
-        point_date = _to_date(created_at)
-        if point_date is not None and energy is not None:
-            points.append(TimeSeriesPoint(date=point_date, value=round(energy, 2)))
+    
+    for item in items:
+        speech_score = item.get("speech_score") or 0.0
+        points.append(TimeSeriesPoint(label=f"Q{item['order']}", value=round(speech_score, 2)))
+            
     return TimeSeriesResponse(chart_type="line", points=points)
 
 
@@ -1575,6 +1786,14 @@ async def get_roles_performance(
     service = AnalyticsService(session)
     items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date)
     normalized_items = _zero_fill_metric_nulls(items)
+    
+    max_usage = max((i.get("interviews") or 0 for i in normalized_items), default=0)
+    for i in normalized_items:
+        tags = []
+        if max_usage > 0 and (i.get("interviews") or 0) == max_usage:
+            tags.append("Most Popular")
+        i["tags"] = tags
+        
     return TablePageResponse(table_type="role_performance", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
 
 
@@ -1751,19 +1970,37 @@ async def get_predictive_alerts(
     description="Returns role-level comparisons against platform average, including score deltas.",
 )
 async def get_benchmarking(
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
     service = AnalyticsService(session)
-    role_items = await service.get_role_segment_analytics()
-    overall_avg = _safe_avg([item.get("avg_score") for item in role_items])
+    role_items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date)
+    
+    total_completed = sum(item.get("completed_interviews", 0) for item in role_items)
+    if total_completed > 0:
+        weighted_sum = sum(
+            (item.get("avg_score", 0) * item.get("completed_interviews", 0))
+            for item in role_items if item.get("avg_score") is not None
+        )
+        overall_avg = round(weighted_sum / total_completed, 2)
+    else:
+        overall_avg = None
+
+    max_usage = max((item.get("interviews") or 0 for item in role_items), default=0)
     items = []
     for item in role_items:
         role_avg = item.get("avg_score")
         delta = None
         if isinstance(role_avg, (int, float)) and isinstance(overall_avg, (int, float)):
             delta = round(float(role_avg) - float(overall_avg), 2)
+            
+        tags = []
+        if max_usage > 0 and (item.get("interviews") or 0) == max_usage:
+            tags.append("Most Popular")
+            
         items.append(
             {
                 "dimension": "role",
@@ -1771,6 +2008,7 @@ async def get_benchmarking(
                 "avg_score": role_avg,
                 "platform_avg": overall_avg,
                 "delta": delta,
+                "tags": tags,
             }
         )
     normalized_items = _zero_fill_metric_nulls(items)
