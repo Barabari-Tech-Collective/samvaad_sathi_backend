@@ -527,6 +527,8 @@ class AnalyticsService:
             college=college,
         )
 
+        now = datetime.datetime.now(datetime.timezone.utc)
+        active_cutoff = now - datetime.timedelta(days=30)
         active_user_ids = {i.user_id for i in interviews if i.created_at and i.created_at >= active_cutoff}
         avg_scores = [
             _extract_overall_score(reports.get(i.id), summaries.get(i.id))
