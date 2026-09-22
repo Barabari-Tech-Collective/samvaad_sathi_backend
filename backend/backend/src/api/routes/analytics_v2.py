@@ -114,7 +114,10 @@ def _safe_percent(numerator: float | int, denominator: float | int) -> float:
 def _extract_distribution_buckets(raw_distribution: list[dict[str, Any]]) -> list[DistributionBucket]:
     buckets: list[DistributionBucket] = []
     for item in raw_distribution:
-        label = f"{int(item.get('start', 0))}-{int(item.get('end', 0))}"
+        if "range" in item:
+            label = str(item["range"])
+        else:
+            label = f"{int(item.get('start', 0))}-{int(item.get('end', 0))}"
         buckets.append(DistributionBucket(label=label, count=int(item.get("count", 0))))
     return buckets
 
