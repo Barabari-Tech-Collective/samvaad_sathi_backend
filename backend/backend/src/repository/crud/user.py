@@ -126,6 +126,30 @@ class UserCRUDRepository(BaseCRUDRepository):
             await self.async_session.refresh(user)
         return user  # type: ignore
 
+    async def sync_central_identity(
+        self,
+        *,
+        user_id: int,
+        central_user_id: str,
+        name: str | None = None,
+        degree: str | None = None,
+        university: str | None = None,
+    ) -> User:
+        """Link the stable central ID and refresh only fields owned by the registry."""
+        user = await self.get_user_by_id(user_id=user_id)
+        if user.student_id and user.student_id != central_user_id:
+            raise EntityAlreadyExists("This Samvaad account is linked to another central account")
+        user.student_id = central_user_id
+        if name:
+            user.name = name
+        if degree:
+            user.degree = degree
+        if university:
+            user.university = university
+        await self.async_session.commit()
+        await self.async_session.refresh(user)
+        return user
+
     async def set_onboarded(self, *, user_id: int, value: bool = True) -> User:
         stmt = sqlalchemy.select(User).where(User.id == user_id)
         query = await self.async_session.execute(statement=stmt)
@@ -134,7 +158,7 @@ class UserCRUDRepository(BaseCRUDRepository):
             raise EntityDoesNotExist("User does not exist!")
         # If column exists, set; otherwise ignore to be backward compatible
         if hasattr(user, "is_onboarded"):
-            user.is_onboarded = bool(value)
+            user.is_onboarded = value
             await self.async_session.commit()
             await self.async_session.refresh(user)
         return user  # type: ignore
@@ -178,6 +202,21 @@ class UserCRUDRepository(BaseCRUDRepository):
         await self.async_session.commit()
         await self.async_session.refresh(user)
         return user
+
+    # ------------------------------------------------------------------
+    # Super-admin plan, Phase 12
+    # ------------------------------------------------------------------
+    async def set_admin_status(self, *, email: str, is_admin: bool) -> User:
+        user = await self.get_user_by_email(email=email)
+        user.is_admin = is_admin
+        await self.async_session.commit()
+        await self.async_session.refresh(user)
+        return user
+
+    async def list_admins(self) -> list[User]:
+        stmt = sqlalchemy.select(User).where(User.is_admin.is_(True))
+        query = await self.async_session.execute(statement=stmt)
+        return list(query.scalars().all())
 
     async def delete_user(self, *, user_id: int) -> None:
         """Deletes a user and ensures their S3 resumes are cleaned up to prevent orphaned objects."""
