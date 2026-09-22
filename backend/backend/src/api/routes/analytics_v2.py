@@ -691,6 +691,12 @@ async def get_students_table(
         else:
             improvement_percent = None
 
+        thirty_days_ago = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=30)
+        recent_interviews = [i for i in user_interviews if i.created_at and i.created_at.replace(tzinfo=None) > thirty_days_ago]
+        tags = []
+        if len(recent_interviews) >= 1:
+            tags.append("Active")
+            
         items.append(
             {
                 "student_id": user.id,
@@ -703,6 +709,7 @@ async def get_students_table(
                 "improvement_percent": round(improvement_percent, 2) if improvement_percent is not None else None,
                 "interviews_count": len(user_interviews),
                 "last_active": last_active,
+                "tags": tags,
             }
         )
 
@@ -1045,17 +1052,30 @@ async def get_colleges_table(
     )
     students_by_college = {name: count for name, count in (await session.execute(students_by_college_stmt)).all()}
 
+    max_score = max((item.get("avg_score") or 0 for item in all_items if item.get("interviews", 0) > 1), default=0)
+    max_interviews = max((item.get("usage_frequency") or 0 for item in all_items), default=0)
+    
     items = []
     for item in all_items[start_index:end_index]:
         college_name = item.get("college")
+        avg_score_val = item.get("avg_score") or 0
+        freq = item.get("usage_frequency") or 0
+        
+        tags = []
+        if max_score > 0 and avg_score_val == max_score and item.get("interviews", 0) > 1:
+            tags.append("Top Performing")
+        if max_interviews > 0 and freq == max_interviews:
+            tags.append("Most Active")
+            
         items.append(
             {
                 "college_name": college_name,
                 "students_count": int(students_by_college.get(college_name, 0)),
                 "interviews_count": item.get("interviews"),
-                "avg_score": _metric_or_zero(item.get("avg_score"), digits=2),
+                "avg_score": _metric_or_zero(avg_score_val, digits=2),
                 "improvement_percent": _metric_or_zero(item.get("improvement_rate"), digits=2),
-                "active_users": item.get("usage_frequency"),
+                "active_users": freq,
+                "tags": tags,
             }
         )
     return TablePageResponse(table_type="colleges", items=items, page=page, limit=limit, total=total)
@@ -1706,6 +1726,14 @@ async def get_roles_performance(
     service = AnalyticsService(session)
     items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date)
     normalized_items = _zero_fill_metric_nulls(items)
+    
+    max_usage = max((i.get("interviews") or 0 for i in normalized_items), default=0)
+    for i in normalized_items:
+        tags = []
+        if max_usage > 0 and (i.get("interviews") or 0) == max_usage:
+            tags.append("Most Popular")
+        i["tags"] = tags
+        
     return TablePageResponse(table_type="role_performance", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
 
 
