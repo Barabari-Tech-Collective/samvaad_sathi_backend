@@ -324,7 +324,16 @@ async def get_dashboard_top_roles(
         difficulty=difficulty,
         college=college,
     )
-    return DashboardTopListResponse(table_type="top_roles", items=_zero_fill_metric_nulls(items[:limit]))
+    
+    normalized_items = _zero_fill_metric_nulls(items[:limit])
+    max_usage = max((i.get("interviews") or 0 for i in normalized_items), default=0)
+    for i in normalized_items:
+        tags = []
+        if max_usage > 0 and (i.get("interviews") or 0) == max_usage:
+            tags.append("Most Popular")
+        i["tags"] = tags
+        
+    return DashboardTopListResponse(table_type="top_roles", items=normalized_items)
 
 
 @router.get(
