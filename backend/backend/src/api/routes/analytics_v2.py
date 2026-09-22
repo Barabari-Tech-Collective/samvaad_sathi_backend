@@ -355,6 +355,43 @@ async def get_dashboard_top_colleges(
 
 
 @router.get(
+    "/dashboard/students-per-college",
+    response_model=DashboardTopListResponse,
+    status_code=200,
+    summary="Students per college",
+    description="Returns top colleges by number of unique students who took interviews in the given period.",
+)
+async def get_dashboard_students_per_college(
+    limit: int = fastapi.Query(default=10, ge=1, le=100),
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
+    role: str | None = None,
+    difficulty: str | None = None,
+    college: str | None = None,
+    current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    del current_user
+    
+    stmt = (
+        sqlalchemy.select(
+            sqlalchemy.func.coalesce(User.university, "unknown").label("college"),
+            sqlalchemy.func.count(User.id).label("students_count")
+        )
+        .select_from(User)
+        .group_by(User.university)
+        .order_by(sqlalchemy.desc("students_count"))
+    )
+    
+    rows = list((await session.execute(stmt)).all())
+    items = [
+        {"college": row.college, "students_count": int(row.students_count)}
+        for row in rows
+    ]
+    return DashboardTopListResponse(table_type="students_per_college", items=items[:limit])
+
+
+@router.get(
     "/dashboard/score-distribution",
     response_model=DistributionResponse,
     status_code=200,
