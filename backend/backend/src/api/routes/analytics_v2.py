@@ -501,7 +501,7 @@ async def get_dashboard_recent_interviews(
             "knowledge_score": _metric_or_zero(knowledge_score, digits=2),
             "duration_seconds": _metric_or_zero(interview.duration_seconds),
             "date": interview.created_at,
-            "status": "Incomplete" if interview.status == "active" else interview.status,
+            "status": "Incomplete" if interview.status and interview.status.lower() == "active" else (interview.status.title() if interview.status else interview.status),
         })
     return TablePageResponse(table_type="recent_interviews", items=items, page=1, limit=limit, total=len(items))
 
@@ -684,9 +684,9 @@ async def get_students_table(
         if latest_timestamp is not None:
             last_active = latest_timestamp.isoformat().replace("+00:00", "Z")
         elif getattr(user, 'updated_at', None) is not None:
-            last_active = getattr(user, 'updated_at').strftime("%b %d, %Y")
+            last_active = getattr(user, 'updated_at').isoformat().replace("+00:00", "Z")
         elif getattr(user, 'created_at', None) is not None:
-            last_active = getattr(user, 'created_at').strftime("%b %d, %Y")
+            last_active = getattr(user, 'created_at').isoformat().replace("+00:00", "Z")
             
         # Avoid misleading 0% or -100% when there aren't enough completed interviews
         completed_interviews = [i for i in user_interviews if i.status == "completed"]
