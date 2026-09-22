@@ -3,11 +3,12 @@ from __future__ import annotations
 import datetime
 import math
 from collections import defaultdict
+from enum import Enum
 from typing import Any, Sequence
 
 import fastapi
 import sqlalchemy
-from fastapi import Depends
+from fastapi import Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
 from src.api.dependencies.admin import get_current_admin_user
@@ -72,6 +73,43 @@ router = fastapi.APIRouter(
 
 
 _DIFFICULTY_ORDER = {"easy": 0, "medium": 1, "hard": 2, "expert": 3}
+
+
+# Change: Replaced manual .strip().lower() sanitization with str Enums (DifficultyEnum, CategoryEnum).
+# FastAPI + Pydantic handle input validation automatically and generate strict OpenAPI/Swagger docs.
+class DifficultyEnum(str, Enum):
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+    EXPERT = "expert"
+
+    # Allow case-insensitive matching (e.g. "Easy", "EASY", "easy" all resolve to EASY).
+    @classmethod
+    def _missing_(cls, value: object):
+        if isinstance(value, str):
+            for member in cls:
+                if member.value.lower() == value.lower():
+                    return member
+        return None
+
+
+class CategoryEnum(str, Enum):
+    IT = "IT"
+    DESIGN = "Design"
+    SALES = "Sales"
+    MARKETING = "Marketing"
+    HR = "HR"
+    DATA = "Data"
+    OPERATIONS = "Operations"
+
+    # Allow case-insensitive matching (e.g. "it", "IT", "It" all resolve to IT).
+    @classmethod
+    def _missing_(cls, value: object):
+        if isinstance(value, str):
+            for member in cls:
+                if member.value.lower() == value.lower():
+                    return member
+        return None
 
 
 def _apply_interview_filters(
@@ -1568,23 +1606,20 @@ async def get_roles_summary(
 async def get_roles_performance(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
-    difficulty: str | None = None,
-    category: str | None = None,
+    # Change: Using DifficultyEnum/CategoryEnum with Query instead of raw str + manual .strip().lower().
+    # FastAPI validates input and auto-generates strict OpenAPI docs for allowed values.
+    difficulty: DifficultyEnum | None = Query(default=None, description="Filter by difficulty level"),
+    category: CategoryEnum | None = Query(default=None, description="Filter by career category"),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
     service = AnalyticsService(session)
-    # Change made: Added difficulty and category query filters to /roles/performance.
-    # Why it was made: Allows frontend / clients to filter role performance data by difficulty level
-    # (easy, medium, hard, expert) and career category (IT, Design, Sales, Marketing, HR, Data, Operations).
-    clean_difficulty = difficulty.strip().lower() if difficulty and difficulty.strip() else None
-    clean_category = category.strip() if category and category.strip() else None
     items = await service.get_role_segment_analytics(
         start_date=start_date,
         end_date=end_date,
-        difficulty=clean_difficulty,
-        category=clean_category,
+        difficulty=difficulty.value if difficulty else None,
+        category=category.value if category else None,
     )
     normalized_items = _zero_fill_metric_nulls(items)
     return TablePageResponse(table_type="role_performance", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))

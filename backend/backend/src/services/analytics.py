@@ -20,82 +20,10 @@ from src.models.db.user import User
 from src.models.db.analytics_event import AnalyticsEvent
 from src.models.db.job_profile import JobProfile
 
-# Change made: Added TRACK_TO_CATEGORY mapping.
-# Why it was made: To provide domain category mapping (IT, Design, Sales, Marketing, HR, Data, Operations)
-# for interviews where job_profile_id or job_profile.category is null, while respecting JobProfile.category
-# as the primary source of truth when present.
-TRACK_TO_CATEGORY: dict[str, list[str]] = {
-    "it": [
-        "full stack developer",
-        "javascript developer",
-        "react developer",
-        "node js developer",
-        "express js developer",
-        "ui developer",
-        "developer",
-        "frontend developer",
-        "backend developer",
-        "software engineer",
-        "web developer",
-        "devops engineer",
-        "cloud engineer",
-        "qa engineer",
-        "software developer",
-    ],
-    "design": [
-        "ui/ux",
-        "ui/ux designer",
-        "product designer",
-        "product desigmer",
-        "non-tech: ui/ux designer",
-        "non-tech: product desigmer",
-        "non-tech: ui/ux",
-        "graphic designer",
-    ],
-    "data": [
-        "data analyst",
-        "data analystics",
-        "data analysis",
-        "data scientist",
-        "data engineer",
-        "machine learning engineer",
-        "business intelligence",
-    ],
-    "sales": [
-        "sales",
-        "sales executive",
-        "sales representative",
-        "business development",
-        "account executive",
-        "inside sales",
-    ],
-    "marketing": [
-        "marketing",
-        "digital marketing",
-        "marketing specialist",
-        "seo specialist",
-        "content marketing",
-        "growth marketing",
-        "social media marketing",
-    ],
-    "hr": [
-        "hr",
-        "human resources",
-        "hr executive",
-        "talent acquisition",
-        "technical recruiter",
-        "hr manager",
-        "hr generalist",
-    ],
-    "operations": [
-        "operations",
-        "operations manager",
-        "operations associate",
-        "supply chain",
-        "logistics",
-        "business operations",
-    ],
-}
+# Change made: Moved TRACK_TO_CATEGORY mapping dictionary to src.services.mappings.
+# Why it was made: Decouples static role/domain category mappings from core analytics logic, keeping
+# this service file focused strictly on business logic as requested during PR review.
+from src.services.mappings import TRACK_TO_CATEGORY
 
 
 class AnalyticsService:
@@ -472,6 +400,7 @@ class AnalyticsService:
             ]
             scores_clean = [s for s in scores if s is not None]
 
+            # TODO: Tech Debt - Move these aggregations (distinct headcount, averages) to SQL queries to prevent memory bottlenecks at scale.
             # Change made: Compute knowledge competence scores and unique student attendees for this role.
             # Why it was made: To provide student headcount (students_attending) and domain technical competence
             # (avg_knowledge_score) on the role performance dashboard.
@@ -876,7 +805,8 @@ class AnalyticsService:
                     cat_condition,
                     sqlalchemy.and_(
                         sqlalchemy.or_(Interview.job_profile_id.is_(None), JobProfile.category.is_(None)),
-                        sqlalchemy.func.lower(Interview.track).in_(mapped_tracks),
+                        # Change: Added trim() to handle dirty legacy data (e.g. trailing spaces in track names).
+                        sqlalchemy.func.trim(sqlalchemy.func.lower(Interview.track)).in_(mapped_tracks),
                     ),
                 )
             stmt = stmt.join(JobProfile, Interview.job_profile_id == JobProfile.id, isouter=True).where(cat_condition)
