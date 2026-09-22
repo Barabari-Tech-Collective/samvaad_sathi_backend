@@ -304,6 +304,47 @@ async def get_dashboard_active_users_trend(
     return TimeSeriesResponse(chart_type="area", points=points)
 
 
+@router.get("/dashboard/new-students-trend", response_model=TimeSeriesResponse, status_code=200, summary="New students trend", description="Reasoning: tracks daily new user signups. Output: date-wise new student time-series points.")
+async def get_dashboard_new_students_trend(
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
+    role: str | None = None,
+    difficulty: str | None = None,
+    college: str | None = None,
+    current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+) -> TimeSeriesResponse:
+    del current_user
+    stmt = sqlalchemy.select(
+        sqlalchemy.func.date(User.created_at), sqlalchemy.func.count(User.id)
+    ).group_by(
+        sqlalchemy.func.date(User.created_at)
+    )
+
+    if college:
+        stmt = stmt.where(User.university == college)
+    if role:
+        import re
+        clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
+        stmt = stmt.where(
+            sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(User.target_position), '[^a-z0-9]', '', 'g') == clean_role
+        )
+    if start_date is not None:
+        stmt = stmt.where(
+            User.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+        )
+    if end_date is not None:
+        stmt = stmt.where(
+            User.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+        )
+
+    stmt = stmt.order_by(sqlalchemy.func.date(User.created_at).asc())
+    
+    rows = list((await session.execute(stmt)).all())
+    points = [TimeSeriesPoint(label=row[0], value=int(row[1])) for row in rows if row[0] is not None]
+    return TimeSeriesResponse(chart_type="area", points=points)
+
+
 @router.get("/dashboard/top-roles", response_model=DashboardTopListResponse, status_code=200, summary="Top roles by interview volume", description="Reasoning: identifies highest-demand roles for planning content and resources. Output: top-list role metrics.")
 async def get_dashboard_top_roles(
     limit: int = fastapi.Query(default=5, ge=1, le=20),
