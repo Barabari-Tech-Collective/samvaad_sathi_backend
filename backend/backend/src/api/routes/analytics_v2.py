@@ -363,6 +363,7 @@ async def get_dashboard_top_colleges(
 )
 async def get_dashboard_students_per_college(
     limit: int = fastapi.Query(default=10, ge=1, le=100),
+    view_type: str = fastapi.Query(default="all"),
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
@@ -373,16 +374,43 @@ async def get_dashboard_students_per_college(
 ):
     del current_user
     
-    stmt = (
-        sqlalchemy.select(
+    if view_type == "interviewed":
+        stmt = sqlalchemy.select(
             sqlalchemy.func.coalesce(User.university, "unknown").label("college"),
-            sqlalchemy.func.count(User.id).label("students_count")
+            sqlalchemy.func.count(sqlalchemy.distinct(User.id)).label("students_count")
+        ).select_from(Interview).join(User, User.id == Interview.user_id)
+        
+        if college:
+            stmt = stmt.where(User.university == college)
+        if role:
+            import re
+            clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
+            stmt = stmt.where(
+                sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(Interview.track), '[^a-z0-9]', '', 'g') == clean_role
+            )
+        if difficulty:
+            stmt = stmt.where(Interview.difficulty == difficulty)
+        if start_date is not None:
+            stmt = stmt.where(
+                Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+            )
+        if end_date is not None:
+            stmt = stmt.where(
+                Interview.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+            )
+            
+        stmt = stmt.group_by(User.university).order_by(sqlalchemy.desc("students_count"))
+    else:
+        stmt = (
+            sqlalchemy.select(
+                sqlalchemy.func.coalesce(User.university, "unknown").label("college"),
+                sqlalchemy.func.count(User.id).label("students_count")
+            )
+            .select_from(User)
+            .group_by(User.university)
+            .order_by(sqlalchemy.desc("students_count"))
         )
-        .select_from(User)
-        .group_by(User.university)
-        .order_by(sqlalchemy.desc("students_count"))
-    )
-    
+        
     rows = list((await session.execute(stmt)).all())
     items = [
         {"college": row.college, "students_count": int(row.students_count)}
