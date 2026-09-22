@@ -274,7 +274,7 @@ async def get_dashboard_interviews_per_day(
         college=college,
     ).order_by(sqlalchemy.func.date(Interview.created_at).asc())
     rows = list((await session.execute(stmt)).all())
-    points = [TimeSeriesPoint(date=row[0], value=int(row[1])) for row in rows if row[0] is not None]
+    points = [TimeSeriesPoint(label=row[0], value=int(row[1])) for row in rows if row[0] is not None]
     return TimeSeriesResponse(chart_type="line", points=points)
 
 
@@ -300,7 +300,7 @@ async def get_dashboard_active_users_trend(
         college=college,
     ).order_by(sqlalchemy.func.date(Interview.created_at).asc())
     rows = list((await session.execute(stmt)).all())
-    points = [TimeSeriesPoint(date=row[0], value=int(row[1])) for row in rows if row[0] is not None]
+    points = [TimeSeriesPoint(label=row[0], value=int(row[1])) for row in rows if row[0] is not None]
     return TimeSeriesResponse(chart_type="area", points=points)
 
 
@@ -682,7 +682,7 @@ async def get_students_table(
                     
         last_active = None
         if latest_timestamp is not None:
-            last_active = latest_timestamp.strftime("%b %d, %Y")
+            last_active = latest_timestamp.isoformat().replace("+00:00", "Z")
         elif getattr(user, 'updated_at', None) is not None:
             last_active = getattr(user, 'updated_at').strftime("%b %d, %Y")
         elif getattr(user, 'created_at', None) is not None:
@@ -948,7 +948,7 @@ async def get_student_interviews(
             "interview_id": interview.id,
             "role": interview.track,
             "difficulty": interview.difficulty,
-            "status": "Incomplete" if interview.status and interview.status.lower() == "active" else interview.status,
+            "status": "Incomplete" if interview.status and interview.status.lower() == "active" else (interview.status.title() if interview.status else interview.status),
             "score": _metric_or_zero(_extract_overall_score(report, summary_report), digits=2),
             "speech_score": _metric_or_zero(_extract_speech_score(report, summary_report), digits=2),
             "knowledge_score": _metric_or_zero(_extract_knowledge_score(report, summary_report), digits=2),
@@ -1349,7 +1349,7 @@ async def get_college_student_growth(
         if day is None:
             continue
         cumulative += int(count)
-        points.append(TimeSeriesPoint(date=day, value=cumulative))
+        points.append(TimeSeriesPoint(label=day, value=cumulative))
     return TimeSeriesResponse(chart_type="line", points=points)
 
 
@@ -1377,7 +1377,7 @@ async def get_college_score_trend(
     )
     rows = list((await session.execute(stmt)).all())
     points = [
-        TimeSeriesPoint(date=day, value=round(float(avg_score), 2))
+        TimeSeriesPoint(label=day, value=round(float(avg_score), 2))
         for day, avg_score in rows
         if day is not None and avg_score is not None
     ]
@@ -1659,7 +1659,7 @@ async def get_interview_speech_metrics_timeline(
     
     for item in items:
         speech_score = item.get("speech_score") or 0.0
-        points.append(TimeSeriesPoint(date=f"Q{item['order']}", value=round(speech_score, 2)))
+        points.append(TimeSeriesPoint(label=f"Q{item['order']}", value=round(speech_score, 2)))
             
     return TimeSeriesResponse(chart_type="line", points=points)
 

@@ -527,7 +527,7 @@ class AnalyticsService:
             college=college,
         )
 
-        active_user_ids = {i.user_id for i in interviews}
+        active_user_ids = {i.user_id for i in interviews if i.created_at and i.created_at >= active_cutoff}
         avg_scores = [
             _extract_overall_score(reports.get(i.id), summaries.get(i.id))
             for i in interviews if i.status == "completed"
