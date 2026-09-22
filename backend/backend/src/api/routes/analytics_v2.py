@@ -1938,12 +1938,18 @@ async def get_benchmarking(
     else:
         overall_avg = None
 
+    max_usage = max((item.get("interviews") or 0 for item in role_items), default=0)
     items = []
     for item in role_items:
         role_avg = item.get("avg_score")
         delta = None
         if isinstance(role_avg, (int, float)) and isinstance(overall_avg, (int, float)):
             delta = round(float(role_avg) - float(overall_avg), 2)
+            
+        tags = []
+        if max_usage > 0 and (item.get("interviews") or 0) == max_usage:
+            tags.append("Most Popular")
+            
         items.append(
             {
                 "dimension": "role",
@@ -1951,6 +1957,7 @@ async def get_benchmarking(
                 "avg_score": role_avg,
                 "platform_avg": overall_avg,
                 "delta": delta,
+                "tags": tags,
             }
         )
     normalized_items = _zero_fill_metric_nulls(items)
