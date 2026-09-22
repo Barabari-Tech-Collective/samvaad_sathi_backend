@@ -6,6 +6,7 @@ from typing import Optional
 from decouple import config
 import boto3
 from botocore.exceptions import ClientError
+import sqlalchemy.exc
 
 logger = logging.getLogger(__name__)
 

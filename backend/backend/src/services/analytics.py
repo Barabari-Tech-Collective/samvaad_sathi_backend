@@ -60,6 +60,8 @@ class AnalyticsService:
         question_map = {q.id: q for q in questions}
 
         for interview in interviews:
+            if interview.status != "completed":
+                continue
             report = reports.get(interview.id)
             summary_report = summary_reports.get(interview.id)
             overall = _extract_overall_score(report, summary_report)
@@ -145,10 +147,13 @@ class AnalyticsService:
 
         ordered_scores = sorted(score_points, key=lambda x: x.get("created_at") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
         latest_score = ordered_scores[-1]["overall_score"] if ordered_scores else None
-        first_score = ordered_scores[0]["overall_score"] if ordered_scores else None
+        prev_score = ordered_scores[-2]["overall_score"] if len(ordered_scores) >= 2 else None
         avg_last_3 = _avg_non_null([x["overall_score"] for x in ordered_scores[-3:]])
         best_score = max(overall_scores) if overall_scores else None
-        improvement = (latest_score - first_score) if latest_score is not None and first_score is not None else None
+        
+        improvement = None
+        if latest_score is not None and prev_score is not None and prev_score > 0:
+            improvement = ((latest_score - prev_score) / prev_score) * 100.0
 
         reattempt_stats = await self._reattempt_stats(user_id=user_id, start_date=start_date, end_date=end_date)
         interview_times = [i.created_at for i in interviews if i.created_at is not None]
@@ -171,7 +176,7 @@ class AnalyticsService:
                 "average_last_3": round(avg_last_3, 2) if avg_last_3 is not None else None,
                 "best_score": round(best_score, 2) if best_score is not None else None,
                 "improvement_rate": round(improvement, 2) if improvement is not None else None,
-                "improvement_formula": "latest_score - first_score",
+                "improvement_formula": "(latest_score - prev_score) / prev_score * 100",
                 "score_history": [
                     {
                         "interview_id": item["interview_id"],
@@ -380,7 +385,7 @@ class AnalyticsService:
         for role_name, role_interviews in grouped.items():
             scores = [
                 _extract_overall_score(reports.get(i.id), summaries.get(i.id))
-                for i in role_interviews
+                for i in role_interviews if i.status == "completed"
             ]
             scores_clean = [s for s in scores if s is not None]
             completed = len([i for i in role_interviews if i.status == "completed"])
@@ -392,6 +397,7 @@ class AnalyticsService:
                 {
                     "role": role_name,
                     "interviews": len(role_interviews),
+                    "completed_interviews": completed,
                     "avg_score": _round_opt(_avg_non_null(scores_clean), 2) if scores_clean else None,
                     "drop_off_rate": round((1 - (completed / len(role_interviews))) * 100.0, 2) if role_interviews else 0.0,
                     "common_weaknesses": weak_tags,
@@ -459,25 +465,34 @@ class AnalyticsService:
 
         output: list[dict[str, Any]] = []
         for college_name, college_interviews in grouped.items():
-            scores = [_extract_overall_score(reports.get(i.id), summaries.get(i.id)) for i in college_interviews]
+            completed_interviews = [i for i in college_interviews if i.status == "completed"]
+            scores = [_extract_overall_score(reports.get(i.id), summaries.get(i.id)) for i in completed_interviews]
             clean_scores = [s for s in scores if s is not None]
-            completed = len([i for i in college_interviews if i.status == "completed"])
-
-            sorted_scored = sorted(
-                [(_extract_overall_score(reports.get(i.id), summaries.get(i.id)), i.created_at) for i in college_interviews],
-                key=lambda x: x[1] if x[1] is not None else datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
-            )
-            first = next((x[0] for x in sorted_scored if x[0] is not None), None)
-            latest = next((x[0] for x in reversed(sorted_scored) if x[0] is not None), None)
+            
+            # Calculate average improvement of individual students
+            user_interviews_map = defaultdict(list)
+            for i in completed_interviews:
+                user_interviews_map[i.user_id].append(i)
+                
+            individual_improvements = []
+            for uid, u_interviews in user_interviews_map.items():
+                sorted_u = sorted(u_interviews, key=lambda x: x.created_at or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+                if len(sorted_u) >= 2:
+                    prev_score = _extract_overall_score(reports.get(sorted_u[-2].id), summaries.get(sorted_u[-2].id))
+                    latest_score = _extract_overall_score(reports.get(sorted_u[-1].id), summaries.get(sorted_u[-1].id))
+                    if isinstance(prev_score, (int, float)) and isinstance(latest_score, (int, float)) and prev_score > 0:
+                        individual_improvements.append(((latest_score - prev_score) / prev_score) * 100.0)
+                        
+            improvement_rate = round(sum(individual_improvements) / len(individual_improvements), 2) if individual_improvements else None
 
             output.append(
                 {
                     "college": college_name,
                     "interviews": len(college_interviews),
                     "avg_score": _round_opt(_avg_non_null(clean_scores), 2) if clean_scores else None,
-                    "improvement_rate": round(latest - first, 2) if latest is not None and first is not None else None,
+                    "improvement_rate": improvement_rate,
                     "usage_frequency": len({i.user_id for i in college_interviews}),
-                    "completion_rate": round((completed / len(college_interviews)) * 100.0, 2) if college_interviews else 0.0,
+                    "completion_rate": round((len(completed_interviews) / len(college_interviews)) * 100.0, 2) if college_interviews else 0.0,
                 }
             )
 
@@ -498,6 +513,10 @@ class AnalyticsService:
         reports = await self._reports_by_interview(interview_ids)
         summaries = await self._summary_reports_by_interview(interview_ids)
         users_stmt = sqlalchemy.select(User)
+        if start_date is not None:
+            users_stmt = users_stmt.where(User.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
+        if end_date is not None:
+            users_stmt = users_stmt.where(User.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc))
         users = list((await self._db.execute(users_stmt)).scalars().all())
 
         events = await self._list_analytics_events(
@@ -510,11 +529,10 @@ class AnalyticsService:
 
         now = datetime.datetime.now(datetime.timezone.utc)
         active_cutoff = now - datetime.timedelta(days=30)
-
         active_user_ids = {i.user_id for i in interviews if i.created_at and i.created_at >= active_cutoff}
         avg_scores = [
             _extract_overall_score(reports.get(i.id), summaries.get(i.id))
-            for i in interviews
+            for i in interviews if i.status == "completed"
         ]
         avg_scores_clean = [x for x in avg_scores if x is not None]
 
@@ -883,6 +901,8 @@ class AnalyticsService:
         pre_scores: list[float] = []
         post_scores: list[float] = []
         for interview in interviews:
+            if interview.status != "completed":
+                continue
             score = _extract_overall_score(reports.get(interview.id), summaries.get(interview.id))
             if score is None:
                 continue
@@ -1341,8 +1361,6 @@ class AnalyticsService:
 
 
 def _extract_overall_score(report: Report | None, summary_report: SummaryReport | None) -> float | None:
-    if report and report.overall_score is not None:
-        return _normalize_score(_to_float(report.overall_score))
     if summary_report and isinstance(summary_report.report_json, dict):
         score_summary = summary_report.report_json.get("overallScoreSummary") or summary_report.report_json.get("scoreSummary") or {}
         
@@ -1353,6 +1371,8 @@ def _extract_overall_score(report: Report | None, summary_report: SummaryReport 
         speech_pct = _to_float(speech_struct.get("averagePct") or speech_struct.get("percentage"))
         
         return _avg_non_null([knowledge_pct, speech_pct])
+    if report and report.overall_score is not None:
+        return _normalize_score(_to_float(report.overall_score))
     return None
 
 
@@ -1378,6 +1398,8 @@ def _improvement_percent_from_interviews(
     summary_reports = summary_reports or {}
     by_user: dict[int, list[tuple[datetime.datetime, float]]] = defaultdict(list)
     for interview in interviews:
+        if interview.status != "completed":
+            continue
         score = _extract_overall_score(reports.get(interview.id), summary_reports.get(interview.id))
         if score is None:
             continue
@@ -1389,9 +1411,10 @@ def _improvement_percent_from_interviews(
         if len(items) < 2:
             continue
         items.sort(key=lambda x: x[0])
-        first_score = items[0][1]
+        prev_score = items[-2][1]
         latest_score = items[-1][1]
-        improvements.append(latest_score - first_score)
+        if prev_score > 0:
+            improvements.append(((latest_score - prev_score) / prev_score) * 100.0)
 
     if not improvements:
         return 0.0
@@ -1400,6 +1423,10 @@ def _improvement_percent_from_interviews(
 
 
 def _extract_speech_score(report: Report | None, summary_report: SummaryReport | None) -> float | None:
+    if summary_report and isinstance(summary_report.report_json, dict):
+        return _to_float(
+            ((summary_report.report_json.get("scoreSummary") or {}).get("speechAndStructure") or {}).get("percentage")
+        )
     if report and isinstance(report.speech_structure_fluency, dict):
         section = report.speech_structure_fluency
         candidates = [
@@ -1411,27 +1438,19 @@ def _extract_speech_score(report: Report | None, summary_report: SummaryReport |
         score = _avg_non_null([_to_float(c) for c in candidates if c is not None])
         if score is not None:
             return _normalize_score(score)
-    if summary_report and isinstance(summary_report.report_json, dict):
-        return _normalize_score(
-            _to_float(
-                ((summary_report.report_json.get("scoreSummary") or {}).get("speechAndStructure") or {}).get("percentage")
-            )
-        )
     return None
 
 
 def _extract_knowledge_score(report: Report | None, summary_report: SummaryReport | None) -> float | None:
+    if summary_report and isinstance(summary_report.report_json, dict):
+        return _to_float(
+            ((summary_report.report_json.get("scoreSummary") or {}).get("knowledgeCompetence") or {}).get("percentage")
+        )
     if report and isinstance(report.knowledge_competence, dict):
         section = report.knowledge_competence
         value = _to_float(section.get("average_domain_score") or section.get("averageDomainScore"))
         if value is not None:
             return _normalize_score(value)
-    if summary_report and isinstance(summary_report.report_json, dict):
-        return _normalize_score(
-            _to_float(
-                ((summary_report.report_json.get("scoreSummary") or {}).get("knowledgeCompetence") or {}).get("percentage")
-            )
-        )
     return None
 
 
@@ -1466,9 +1485,7 @@ def _to_float(value: Any) -> float | None:
 def _normalize_score(value: float | None) -> float | None:
     if value is None:
         return None
-    if value <= 5:
-        return value * 20
-    return max(0.0, min(100.0, value))
+    return max(0.0, min(100.0, float(value)))
 
 
 def _round_opt(value: float | None, digits: int = 2) -> float | None:
