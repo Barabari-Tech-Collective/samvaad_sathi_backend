@@ -465,14 +465,6 @@ async def get_dashboard_students_per_college(
             stmt = stmt.where(
                 sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(User.target_position), '[^a-z0-9]', '', 'g') == clean_role
             )
-        if start_date is not None:
-            stmt = stmt.where(
-                User.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
-            )
-        if end_date is not None:
-            stmt = stmt.where(
-                User.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc)
-            )
             
         stmt = stmt.group_by(User.university).order_by(sqlalchemy.desc("students_count"))
         
@@ -1095,21 +1087,45 @@ async def get_colleges_summary(
 async def get_colleges_table(
     page: int = fastapi.Query(default=1, ge=1),
     limit: int = fastapi.Query(default=20, ge=1, le=100),
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
+    role: str | None = None,
+    difficulty: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
     service = AnalyticsService(session)
-    all_items = await service.get_college_segment_analytics()
+    all_items = await service.get_college_segment_analytics(
+        start_date=start_date,
+        end_date=end_date,
+        role=role,
+        difficulty=difficulty,
+    )
     total = len(all_items)
     start_index = (page - 1) * limit
     end_index = start_index + limit
 
-    students_by_college_stmt = (
-        sqlalchemy.select(User.university, sqlalchemy.func.count(User.id))
-        .where(User.university.is_not(None))
-        .group_by(User.university)
+    students_by_college_stmt = sqlalchemy.select(
+        sqlalchemy.func.coalesce(User.university, "unknown"), 
+        sqlalchemy.func.count(User.id)
     )
+    
+    if role:
+        clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
+        students_by_college_stmt = students_by_college_stmt.where(
+            sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(User.target_position), '[^a-z0-9]', '', 'g') == clean_role
+        )
+    if start_date is not None:
+        students_by_college_stmt = students_by_college_stmt.where(
+            User.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+        )
+    if end_date is not None:
+        students_by_college_stmt = students_by_college_stmt.where(
+            User.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+        )
+        
+    students_by_college_stmt = students_by_college_stmt.group_by(User.university)
     students_by_college = {name: count for name, count in (await session.execute(students_by_college_stmt)).all()}
 
     max_score = max((item.get("avg_score") or 0 for item in all_items if item.get("interviews", 0) > 1), default=0)
