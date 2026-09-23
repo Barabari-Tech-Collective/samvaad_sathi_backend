@@ -1106,8 +1106,9 @@ async def get_colleges_table(
     start_index = (page - 1) * limit
     end_index = start_index + limit
 
+    coalesced_univ = sqlalchemy.func.coalesce(User.university, "unknown")
     students_by_college_stmt = sqlalchemy.select(
-        sqlalchemy.func.coalesce(User.university, "unknown"), 
+        coalesced_univ, 
         sqlalchemy.func.count(User.id)
     )
     
@@ -1125,7 +1126,7 @@ async def get_colleges_table(
             User.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc)
         )
         
-    students_by_college_stmt = students_by_college_stmt.group_by(User.university)
+    students_by_college_stmt = students_by_college_stmt.group_by(coalesced_univ)
     students_by_college = {name: count for name, count in (await session.execute(students_by_college_stmt)).all()}
 
     max_score = max((item.get("avg_score") or 0 for item in all_items if item.get("interviews", 0) > 1), default=0)
