@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 from collections import defaultdict
 from typing import Any, Sequence
 
@@ -802,15 +803,15 @@ class AnalyticsService:
         if college:
             stmt = stmt.join(User, User.id == Interview.user_id).where(User.university == college)
         if role:
-            import re
             clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
             stmt = stmt.where(
                 sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(Interview.track), '[^a-z0-9]', '', 'g') == clean_role
             )
-        # Change made: Case-insensitive difficulty filtering (easy, medium, hard, expert).
-        # Why it was made: Allows callers to pass mixed-case strings (e.g. 'Easy' or 'medium') without missing rows.
-        if difficulty and difficulty.strip():
-            stmt = stmt.where(sqlalchemy.func.lower(Interview.difficulty) == difficulty.strip().lower())
+        # Change: Optimized difficulty filtering to direct equality check (Interview.difficulty == difficulty).
+        # Why it was made: DifficultyEnum guarantees clean lowercase values ("easy", "medium", etc.), allowing
+        # the database to leverage the B-tree index on Interview.difficulty instead of performing a table scan with LOWER().
+        if difficulty:
+            stmt = stmt.where(Interview.difficulty == difficulty)
         # Change made: Added category filtering using JobProfile.category with fallback to TRACK_TO_CATEGORY.
         # Why it was made: Filters interviews by career domain (IT, Design, Sales, Marketing, HR, Data, Operations).
         # Links to JobProfile where available, and falls back to track name mapping when job_profile_id is null.
@@ -827,12 +828,15 @@ class AnalyticsService:
                         sqlalchemy.func.trim(sqlalchemy.func.lower(Interview.track)).in_(mapped_tracks),
                     ),
                 )
+            # Deduplication is handled by the blanket .distinct() below (line 838) to prevent
+            # interview row duplication if legacy data contains multiple job profile records.
             stmt = stmt.join(JobProfile, Interview.job_profile_id == JobProfile.id, isouter=True).where(cat_condition)
         if start_date is not None:
             stmt = stmt.where(Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
         if end_date is not None:
             stmt = stmt.where(Interview.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc))
-        stmt = stmt.order_by(Interview.created_at.asc())
+        # Change: Added distinct() to ensure Interview rows are never duplicated by any table joins.
+        stmt = stmt.distinct().order_by(Interview.created_at.asc())
         result = await self._db.execute(stmt)
         return list(result.scalars().all())
 
