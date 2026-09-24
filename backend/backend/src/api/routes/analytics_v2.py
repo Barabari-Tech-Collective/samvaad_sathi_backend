@@ -4,11 +4,13 @@ import datetime
 import math
 import re
 from collections import defaultdict
-from typing import Any, Sequence
+from enum import Enum
+from typing import Annotated, Any, Sequence
 
 import fastapi
 import sqlalchemy
-from fastapi import Depends
+from fastapi import Depends, Query
+from pydantic import BeforeValidator
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
 from src.api.dependencies.admin import get_current_admin_user
@@ -75,6 +77,56 @@ router = fastapi.APIRouter(
 _DIFFICULTY_ORDER = {"easy": 0, "medium": 1, "hard": 2, "expert": 3}
 
 
+# Change: Replaced manual .strip().lower() sanitization with str Enums (DifficultyEnum, CategoryEnum).
+# Uses lowercase values and Pydantic BeforeValidator to guarantee robust case-insensitive validation
+# across Pydantic V2 while generating strict OpenAPI/Swagger documentation.
+class DifficultyEnum(str, Enum):
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+    EXPERT = "expert"
+
+    # Allow case-insensitive matching for direct Python instantiation.
+    @classmethod
+    def _missing_(cls, value: object):
+        if isinstance(value, str):
+            for member in cls:
+                if member.value.lower() == value.lower():
+                    return member
+        return None
+
+
+class CategoryEnum(str, Enum):
+    IT = "it"
+    DESIGN = "design"
+    SALES = "sales"
+    MARKETING = "marketing"
+    HR = "hr"
+    DATA = "data"
+    OPERATIONS = "operations"
+
+    # Allow case-insensitive matching for direct Python instantiation.
+    @classmethod
+    def _missing_(cls, value: object):
+        if isinstance(value, str):
+            for member in cls:
+                if member.value.lower() == value.lower():
+                    return member
+        return None
+
+
+def _to_lower_enum_str(v: object) -> object:
+    if isinstance(v, str):
+        return v.strip().lower()
+    return v
+
+
+# Case-insensitive annotated types using Pydantic BeforeValidator to safely sanitize
+# query parameters before Pydantic V2 performs strict Enum validation.
+CaseInsensitiveDifficulty = Annotated[DifficultyEnum, BeforeValidator(_to_lower_enum_str)]
+CaseInsensitiveCategory = Annotated[CategoryEnum, BeforeValidator(_to_lower_enum_str)]
+
+
 def _apply_interview_filters(
     stmt: sqlalchemy.sql.Select,
     *,
@@ -88,7 +140,6 @@ def _apply_interview_filters(
     if college:
         filtered_stmt = filtered_stmt.join(User, User.id == Interview.user_id).where(User.university == college)
     if role:
-        import re
         clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
         filtered_stmt = filtered_stmt.where(
             sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(Interview.track), '[^a-z0-9]', '', 'g') == clean_role
@@ -195,7 +246,7 @@ async def get_dashboard_overview(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -206,7 +257,7 @@ async def get_dashboard_overview(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     )
 
@@ -215,7 +266,7 @@ async def get_dashboard_overview(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     )
     total_interviews = int((await session.execute(interviews_count_stmt)).scalar() or 0)
@@ -224,7 +275,7 @@ async def get_dashboard_overview(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     )
     completed_interviews = int((await session.execute(completed_interviews_stmt)).scalar() or 0)
@@ -258,7 +309,7 @@ async def get_dashboard_interviews_per_day(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -271,7 +322,7 @@ async def get_dashboard_interviews_per_day(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     ).order_by(sqlalchemy.func.date(Interview.created_at).asc())
     rows = list((await session.execute(stmt)).all())
@@ -284,7 +335,7 @@ async def get_dashboard_active_users_trend(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -297,7 +348,7 @@ async def get_dashboard_active_users_trend(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     ).order_by(sqlalchemy.func.date(Interview.created_at).asc())
     rows = list((await session.execute(stmt)).all())
@@ -310,7 +361,7 @@ async def get_dashboard_new_students_trend(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -351,7 +402,7 @@ async def get_dashboard_top_roles(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -362,7 +413,7 @@ async def get_dashboard_top_roles(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     )
     
@@ -390,7 +441,7 @@ async def get_dashboard_top_colleges(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -401,7 +452,7 @@ async def get_dashboard_top_colleges(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     )
     return DashboardTopListResponse(table_type="top_colleges", items=_zero_fill_metric_nulls(items[:limit]))
@@ -420,7 +471,7 @@ async def get_dashboard_students_per_college(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -441,7 +492,7 @@ async def get_dashboard_students_per_college(
                 sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(Interview.track), '[^a-z0-9]', '', 'g') == clean_role
             )
         if difficulty:
-            stmt = stmt.where(Interview.difficulty == difficulty)
+            stmt = stmt.where(Interview.difficulty == difficulty.value)
         if start_date is not None:
             stmt = stmt.where(
                 Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
@@ -488,7 +539,7 @@ async def get_dashboard_score_distribution(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -499,7 +550,7 @@ async def get_dashboard_score_distribution(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     )
     buckets = _extract_distribution_buckets(scoring.get("score_distribution", []))
@@ -1090,7 +1141,7 @@ async def get_colleges_table(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -1100,7 +1151,7 @@ async def get_colleges_table(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
     )
     total = len(all_items)
     start_index = (page - 1) * limit
@@ -1217,7 +1268,7 @@ async def get_interviews_table(
     page: int = fastapi.Query(default=1, ge=1),
     limit: int = fastapi.Query(default=20, ge=1, le=100),
     role: str | None = None,
-    difficulty: str | None = None,
+    difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -1230,7 +1281,7 @@ async def get_interviews_table(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     )
     total = (await session.execute(sqlalchemy.select(sqlalchemy.func.count()).select_from(base_stmt.subquery()))).scalar() or 0
@@ -1244,7 +1295,7 @@ async def get_interviews_table(
         start_date=start_date,
         end_date=end_date,
         role=role,
-        difficulty=difficulty,
+        difficulty=difficulty.value if difficulty else None,
         college=college,
     ).order_by(Interview.created_at.desc()).offset(offset).limit(limit)
 
@@ -1796,12 +1847,21 @@ async def get_roles_summary(
 async def get_roles_performance(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    # Change: Using DifficultyEnum/CategoryEnum with Pydantic BeforeValidator and Query.
+    # Ensures case-insensitive input sanitization (e.g. "it", "IT", "It") across Pydantic V2 while generating strict OpenAPI docs.
+    difficulty: CaseInsensitiveDifficulty | None = Query(default=None, description="Filter by difficulty level"),
+    category: CaseInsensitiveCategory | None = Query(default=None, description="Filter by career category"),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
     service = AnalyticsService(session)
-    items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date)
+    items = await service.get_role_segment_analytics(
+        start_date=start_date,
+        end_date=end_date,
+        difficulty=difficulty.value if difficulty else None,
+        category=category.value if category else None,
+    )
     normalized_items = _zero_fill_metric_nulls(items)
     
     max_usage = max((i.get("interviews") or 0 for i in normalized_items), default=0)

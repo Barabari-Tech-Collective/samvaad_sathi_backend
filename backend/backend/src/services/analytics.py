@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 from collections import defaultdict
 from typing import Any, Sequence
 
@@ -18,6 +19,12 @@ from src.models.db.structure_practice import StructurePractice, StructurePractic
 from src.models.db.summary_report import SummaryReport
 from src.models.db.user import User
 from src.models.db.analytics_event import AnalyticsEvent
+from src.models.db.job_profile import JobProfile
+
+# Change made: Moved TRACK_TO_CATEGORY mapping dictionary to src.services.mappings.
+# Why it was made: Decouples static role/domain category mappings from core analytics logic, keeping
+# this service file focused strictly on business logic as requested during PR review.
+from src.services.mappings import TRACK_TO_CATEGORY
 
 
 class AnalyticsService:
@@ -370,8 +377,18 @@ class AnalyticsService:
         role: str | None = None,
         difficulty: str | None = None,
         college: str | None = None,
+        category: str | None = None,
     ) -> list[dict[str, Any]]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date, role=role, difficulty=difficulty, college=college)
+        # Change made: Added category parameter to get_role_segment_analytics and forwarded to _list_interviews_all.
+        # Why it was made: Allows callers (like /roles/performance) to filter role segments by domain category.
+        interviews = await self._list_interviews_all(
+            start_date=start_date,
+            end_date=end_date,
+            role=role,
+            difficulty=difficulty,
+            college=college,
+            category=category,
+        )
         if not interviews:
             return []
         reports = await self._reports_by_interview([i.id for i in interviews])
@@ -388,6 +405,18 @@ class AnalyticsService:
                 for i in role_interviews if i.status == "completed"
             ]
             scores_clean = [s for s in scores if s is not None]
+
+            # TODO: Tech Debt - Move these aggregations (distinct headcount, averages) to SQL queries to prevent memory bottlenecks at scale.
+            # Change made: Compute knowledge competence scores and unique student attendees for this role.
+            # Why it was made: To provide student headcount (students_attending) and domain technical competence
+            # (avg_knowledge_score) on the role performance dashboard.
+            knowledge_scores = [
+                _extract_knowledge_score(reports.get(i.id), summaries.get(i.id))
+                for i in role_interviews
+            ]
+            knowledge_clean = [k for k in knowledge_scores if k is not None]
+            students_attending = len({i.user_id for i in role_interviews if i.user_id is not None})
+
             completed = len([i for i in role_interviews if i.status == "completed"])
             avg_duration = await self._average_interview_duration_seconds([i.id for i in role_interviews])
 
@@ -397,8 +426,10 @@ class AnalyticsService:
                 {
                     "role": role_name,
                     "interviews": len(role_interviews),
+                    "total_students": students_attending,
                     "completed_interviews": completed,
                     "avg_score": _round_opt(_avg_non_null(scores_clean), 2) if scores_clean else None,
+                    "avg_knowledge_score": _round_opt(_avg_non_null(knowledge_clean), 2) if knowledge_clean else None,
                     "drop_off_rate": round((1 - (completed / len(role_interviews))) * 100.0, 2) if role_interviews else 0.0,
                     "common_weaknesses": weak_tags,
                     "avg_time_spent_seconds": avg_duration,
@@ -766,23 +797,46 @@ class AnalyticsService:
         role: str | None = None,
         difficulty: str | None = None,
         college: str | None = None,
+        category: str | None = None,
     ) -> list[Interview]:
         stmt = sqlalchemy.select(Interview)
         if college:
             stmt = stmt.join(User, User.id == Interview.user_id).where(User.university == college)
         if role:
-            import re
             clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
             stmt = stmt.where(
                 sqlalchemy.func.regexp_replace(sqlalchemy.func.lower(Interview.track), '[^a-z0-9]', '', 'g') == clean_role
             )
+        # Change: Optimized difficulty filtering to direct equality check (Interview.difficulty == difficulty).
+        # Why it was made: DifficultyEnum guarantees clean lowercase values ("easy", "medium", etc.), allowing
+        # the database to leverage the B-tree index on Interview.difficulty instead of performing a table scan with LOWER().
         if difficulty:
             stmt = stmt.where(Interview.difficulty == difficulty)
+        # Change made: Added category filtering using JobProfile.category with fallback to TRACK_TO_CATEGORY.
+        # Why it was made: Filters interviews by career domain (IT, Design, Sales, Marketing, HR, Data, Operations).
+        # Links to JobProfile where available, and falls back to track name mapping when job_profile_id is null.
+        if category and category.strip():
+            clean_category = category.strip().lower()
+            mapped_tracks = TRACK_TO_CATEGORY.get(clean_category, [])
+            cat_condition = sqlalchemy.func.lower(JobProfile.category) == clean_category
+            if mapped_tracks:
+                cat_condition = sqlalchemy.or_(
+                    cat_condition,
+                    sqlalchemy.and_(
+                        sqlalchemy.or_(Interview.job_profile_id.is_(None), JobProfile.category.is_(None)),
+                        # Change: Added trim() to handle dirty legacy data (e.g. trailing spaces in track names).
+                        sqlalchemy.func.trim(sqlalchemy.func.lower(Interview.track)).in_(mapped_tracks),
+                    ),
+                )
+            # Deduplication is handled by the blanket .distinct() below (line 838) to prevent
+            # interview row duplication if legacy data contains multiple job profile records.
+            stmt = stmt.join(JobProfile, Interview.job_profile_id == JobProfile.id, isouter=True).where(cat_condition)
         if start_date is not None:
             stmt = stmt.where(Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
         if end_date is not None:
             stmt = stmt.where(Interview.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc))
-        stmt = stmt.order_by(Interview.created_at.asc())
+        # Change: Added distinct() to ensure Interview rows are never duplicated by any table joins.
+        stmt = stmt.distinct().order_by(Interview.created_at.asc())
         result = await self._db.execute(stmt)
         return list(result.scalars().all())
 
@@ -1388,6 +1442,24 @@ def _extract_sub_scores(report: Report | None, summary_report: SummaryReport | N
         
         return _normalize_score(speech_pct), _normalize_score(knowledge_pct)
     return None, None
+
+
+# Change made: Added _extract_knowledge_score helper.
+# Why it was made: To extract the knowledge competence percentage score for interviews
+# from Report or SummaryReport to support average knowledge score reporting in role analytics.
+def _extract_knowledge_score(report: Report | None, summary_report: SummaryReport | None) -> float | None:
+    if report and isinstance(report.knowledge_competence, dict):
+        kc = report.knowledge_competence
+        score = _to_float(kc.get("averagePct") or kc.get("percentage") or kc.get("score"))
+        if score is not None:
+            return _normalize_score(score)
+    if summary_report and isinstance(summary_report.report_json, dict):
+        score_summary = summary_report.report_json.get("overallScoreSummary") or summary_report.report_json.get("scoreSummary") or {}
+        knowledge_comp = score_summary.get("knowledgeCompetence") or {}
+        knowledge_pct = _to_float(knowledge_comp.get("averagePct") or knowledge_comp.get("percentage"))
+        if knowledge_pct is not None:
+            return _normalize_score(knowledge_pct)
+    return None
 
 
 def _improvement_percent_from_interviews(
