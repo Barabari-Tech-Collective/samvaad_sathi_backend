@@ -24,10 +24,12 @@ students - they appear in neither list.
 """
 
 import fastapi
+from fastapi.security import HTTPAuthorizationCredentials
 
-from src.api.dependencies.auth import get_current_user
+from src.api.dependencies.auth import get_current_user, security
 from src.config.manager import settings
 from src.models.db.user import User
+from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTokenError
 
 
 def _allow_listed_emails() -> set[str]:
@@ -37,8 +39,10 @@ def _allow_listed_emails() -> set[str]:
     return {entry.strip().lower() for entry in raw.split(",") if entry.strip()}
 
 
-def is_admin_user(user: User) -> bool:
+def is_admin_user(user: User, token_role: str = "") -> bool:
     """True if `user` may read cross-student data."""
+    if token_role.upper() == "ADMIN":
+        return True
     if getattr(user, "is_admin", False):
         return True
     email = (getattr(user, "email", "") or "").strip().lower()
@@ -47,6 +51,7 @@ def is_admin_user(user: User) -> bool:
 
 async def get_current_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = fastapi.Depends(security),
 ) -> User:
     """Require an authenticated user authorised for cross-student data.
 
@@ -55,7 +60,15 @@ async def get_current_admin_user(
     provides no benefit here: the endpoints are already discoverable in the
     OpenAPI schema.
     """
-    if not is_admin_user(current_user):
+    token_role = ""
+    if credentials:
+        try:
+            claims = decode_sso_access_token(credentials.credentials)
+            token_role = str(claims.get("role") or "").strip()
+        except SsoTokenError:
+            pass
+
+    if not is_admin_user(current_user, token_role=token_role):
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_403_FORBIDDEN,
             detail="Administrator access required.",
