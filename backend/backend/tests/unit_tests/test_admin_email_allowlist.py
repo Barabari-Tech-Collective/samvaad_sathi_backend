@@ -18,7 +18,10 @@ from src.api.dependencies import admin as admin_module
 from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 
 
-class _User:
+from src.models.db.user import User
+
+
+class _User(User):
     def __init__(self, email: str = "", is_admin: bool = False, user_id: int = 1):
         self.id = user_id
         self.email = email
