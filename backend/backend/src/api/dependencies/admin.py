@@ -24,12 +24,9 @@ students - they appear in neither list.
 """
 
 import fastapi
-from fastapi.security import HTTPAuthorizationCredentials
-
-from src.api.dependencies.auth import get_current_user, security
+from src.api.dependencies.auth import get_current_user
 from src.config.manager import settings
 from src.models.db.user import User
-from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTokenError
 
 
 def _allow_listed_emails() -> set[str]:
@@ -51,7 +48,6 @@ def is_admin_user(user: User, token_role: str = "") -> bool:
 
 async def get_current_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
-    credentials: HTTPAuthorizationCredentials = fastapi.Depends(security),
 ) -> User:
     """Require an authenticated user authorised for cross-student data.
 
@@ -60,13 +56,7 @@ async def get_current_admin_user(
     provides no benefit here: the endpoints are already discoverable in the
     OpenAPI schema.
     """
-    token_role = ""
-    if credentials:
-        try:
-            claims = decode_sso_access_token(credentials.credentials)
-            token_role = str(claims.get("role") or "").strip()
-        except SsoTokenError:
-            pass
+    token_role = getattr(current_user, "token_role", "")
 
     if not is_admin_user(current_user, token_role=token_role):
         raise fastapi.HTTPException(

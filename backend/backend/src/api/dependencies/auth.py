@@ -17,9 +17,7 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = fastapi.Depends(security),
     user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
 ) -> User:
-    print(f"DEBUG - get_current_user CALLED! Token present: {credentials is not None}")
     if not credentials:
-        print("DEBUG - HTTPBearer received NO token from the frontend in the Authorization header!")
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated - Missing Bearer Token",
@@ -51,7 +49,6 @@ async def get_current_user(
                 detail="Access to Samvaad Saathi has been revoked",
             )
     except SsoTokenError as e:
-        print(f"SSO Token Error: {e}")
         try:
             _, email = jwt_generator.retrieve_details_from_token(token=token, secret_key=settings.JWT_SECRET_KEY)
         except Exception:
@@ -76,6 +73,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    setattr(user, "token_role", claims.get("role") or "")
     return user
 
 

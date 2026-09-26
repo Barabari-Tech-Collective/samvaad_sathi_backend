@@ -138,7 +138,7 @@ class BackendBaseSettings(BaseSettings):
     AUTH_SERVICE_JWT_SECRET: str = decouple.config(
         "AUTH_SERVICE_JWT_SECRET",
         cast=str,
-        default="QWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXphYmNkZWYxMjM0NTY3ODkwMTIz",
+        default="",
     )  # type: ignore
     AUTH_SERVICE_STAGING_JWT_SECRET: str = decouple.config(
         "AUTH_SERVICE_STAGING_JWT_SECRET",
@@ -161,7 +161,7 @@ class BackendBaseSettings(BaseSettings):
     # for another product, or for an ADMIN/OWNER of the admin panel, verifies here just
     # as well as a student's. Samvaad Saathi is a student-facing product, so it accepts
     # only this role. Empty disables the check.
-    SSO_REQUIRED_ROLE: str = decouple.config("SSO_REQUIRED_ROLE", cast=str, default="STUDENT")  # type: ignore
+    SSO_REQUIRED_ROLE: str = decouple.config("SSO_REQUIRED_ROLE", cast=str, default="STUDENT,ADMIN,SUPER_ADMIN")  # type: ignore
 
     # Trust X-Forwarded-Proto/-For from the reverse proxy in front of this app. Correct
     # for Render and for nginx on EC2, where the proxy is the only way in. Set False
