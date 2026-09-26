@@ -38,12 +38,19 @@ def _allow_listed_emails() -> set[str]:
 
 def is_admin_user(user: User, token_role: str = "") -> bool:
     """True if `user` may read cross-student data."""
-    if token_role.upper() in {"ADMIN", "SUPER_ADMIN"}:
-        return True
-    if getattr(user, "is_admin", False):
-        return True
+    is_local_admin = getattr(user, "is_admin", False)
     email = (getattr(user, "email", "") or "").strip().lower()
-    return bool(email) and email in _allow_listed_emails()
+    is_allowlisted = bool(email) and email in _allow_listed_emails()
+    is_known_admin = is_local_admin or is_allowlisted
+
+    if token_role:
+        # If authenticated via SSO, the token must grant the role AND the user must be known
+        # locally as an admin to prevent cross-product admin tokens from having a free pass.
+        has_admin_token = token_role.upper() in {"ADMIN", "SUPER_ADMIN"}
+        return has_admin_token and is_known_admin
+
+    # Legacy fallback for non-SSO logins
+    return is_known_admin
 
 
 async def get_current_admin_user(

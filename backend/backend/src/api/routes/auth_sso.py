@@ -174,7 +174,7 @@ async def sso_refresh(refresh_token: str = fastapi.Form(...)):
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.post(
-                f"{settings.AUTH_SERVICE_BASE_URL}/barabari-auth/api/auth/public/v1/refresh-token",
+                f"{settings.AUTH_SERVICE_BASE_URL}/barabari-auth/api/auth/public/v1/student-refresh-token",
                 json={"refreshToken": refresh_token},
             )
         except httpx.HTTPError as exc:
