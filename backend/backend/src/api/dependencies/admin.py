@@ -44,10 +44,10 @@ def is_admin_user(user: User, token_role: str = "") -> bool:
     is_known_admin = is_local_admin or is_allowlisted
 
     if token_role:
-        # If authenticated via SSO, the token must grant the role AND the user must be known
-        # locally as an admin to prevent cross-product admin tokens from having a free pass.
-        has_admin_token = token_role.upper() in {"ADMIN", "SUPER_ADMIN"}
-        return has_admin_token and is_known_admin
+        # A token role alone is never enough to grant access (prevents cross-product hole),
+        # but logging in with a STUDENT token must not revoke admin rights we already granted locally.
+        # We rely strictly on whether they are known to us as a local admin.
+        return is_known_admin
 
     # Legacy fallback for non-SSO logins
     return is_known_admin

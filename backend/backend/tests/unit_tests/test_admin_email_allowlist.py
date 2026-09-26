@@ -70,6 +70,17 @@ def test_db_flag_still_works_independently_of_the_allowlist(monkeypatch):
     assert is_admin_user(_User(email="someone@example.com", is_admin=True)) is True
 
 
+def test_sso_student_token_does_not_revoke_local_admin_rights(monkeypatch):
+    """An admin who logs in via SSO as a STUDENT is still an admin."""
+    _set_allowlist(monkeypatch, "admin@samvaad-sathi.com")
+    
+    # 1. Via allow-list
+    assert is_admin_user(_User(email="admin@samvaad-sathi.com"), token_role="STUDENT") is True
+    
+    # 2. Via is_admin DB column
+    assert is_admin_user(_User(email="student@example.com", is_admin=True), token_role="STUDENT") is True
+
+
 @pytest.mark.asyncio
 async def test_dependency_allows_allowlisted_user(monkeypatch):
     _set_allowlist(monkeypatch, "admin@samvaad-sathi.com")
