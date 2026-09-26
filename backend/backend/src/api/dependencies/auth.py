@@ -17,7 +17,7 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = fastapi.Depends(security),
     user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
 ) -> User:
-    print(f"DEBUG - get_current_user CALLED! Credentials: {credentials}")
+    print(f"DEBUG - get_current_user CALLED! Token present: {credentials is not None}")
     if not credentials:
         print("DEBUG - HTTPBearer received NO token from the frontend in the Authorization header!")
         raise fastapi.HTTPException(

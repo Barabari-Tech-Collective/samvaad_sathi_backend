@@ -140,6 +140,11 @@ class BackendBaseSettings(BaseSettings):
         cast=str,
         default="QWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXphYmNkZWYxMjM0NTY3ODkwMTIz",
     )  # type: ignore
+    AUTH_SERVICE_STAGING_JWT_SECRET: str = decouple.config(
+        "AUTH_SERVICE_STAGING_JWT_SECRET",
+        cast=str,
+        default="",
+    )  # type: ignore
     # This product's row in auth-service's `products` table (already seeded as SAMVAAD_SAATHI).
     SAMPARK_PRODUCT_UNIQUE_ID: str = decouple.config(
         "SAMPARK_PRODUCT_UNIQUE_ID", cast=str, default="81c53f68-35f4-4133-9e35-06f5c30354b785"

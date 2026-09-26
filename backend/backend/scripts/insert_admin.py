@@ -1,4 +1,5 @@
 import asyncio
+import secrets
 from src.repository.database import async_db
 from src.repository.crud.user import UserCRUDRepository
 
@@ -15,7 +16,7 @@ async def main():
             print("User not found, creating new admin account...")
             user = await repo.create_user(
                 email="admin@barabari.org", 
-                password="sso-managed-password-never-used", 
+                password=secrets.token_urlsafe(32), 
                 name="Central Admin"
             )
             await repo.set_admin_status(email="admin@barabari.org", is_admin=True)

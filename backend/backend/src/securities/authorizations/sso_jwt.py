@@ -6,8 +6,15 @@ from src.config.manager import settings
 
 # The Java Spring Boot auth service might use raw bytes instead of base64.
 # We will try both the base64 decoded bytes and the raw UTF-8 string bytes.
-_SECRET_KEY_BYTES_B64 = base64.b64decode(settings.AUTH_SERVICE_JWT_SECRET)
-_SECRET_KEY_BYTES_RAW = settings.AUTH_SERVICE_JWT_SECRET.encode("utf-8")
+_VALID_KEYS = [
+    base64.b64decode(settings.AUTH_SERVICE_JWT_SECRET),
+    settings.AUTH_SERVICE_JWT_SECRET.encode("utf-8")
+]
+if settings.AUTH_SERVICE_STAGING_JWT_SECRET:
+    _VALID_KEYS.extend([
+        base64.b64decode(settings.AUTH_SERVICE_STAGING_JWT_SECRET),
+        settings.AUTH_SERVICE_STAGING_JWT_SECRET.encode("utf-8")
+    ])
 
 
 class SsoTokenError(Exception):
@@ -27,26 +34,20 @@ def decode_sso_access_token(token: str) -> dict:
     equivalent guard on its own student refresh endpoint; this is the consuming side of
     that same rule.
     """
-    try:
-        unverified_header = jose_jwt.get_unverified_header(token)
-        unverified = jose_jwt.get_unverified_claims(token)
-        print(f"DEBUG - JWT Header: {unverified_header}")
-        print(f"DEBUG - Unverified Claims Payload: {unverified}")
-    except Exception as e:
-        print(f"DEBUG - Could not read unverified claims: {e}")
 
-    try:
-        # TEMP LOCAL BYPASS: We are turning off signature verification because the user's
-        # frontend is fetching Staging tokens, but we only have the Production secret.
-        claims = jose_jwt.decode(token=token, key="", options={"verify_signature": False})
-    except JoseJWTError as e1:
+
+    claims = None
+    last_error = None
+    for key in _VALID_KEYS:
         try:
-            # Fall back to the Java/Raw bytes assumption
-            claims = jose_jwt.decode(token=token, key=_SECRET_KEY_BYTES_RAW, algorithms=["HS256", "HS384", "HS512"])
-        except JoseJWTError as e2:
-            print(f"DEBUG - JWT Decode Error (b64): {repr(e1)}")
-            print(f"DEBUG - JWT Decode Error (raw): {repr(e2)}")
-            raise SsoTokenError(f"Unable to decode Sampark Saathi access token (b64:{repr(e1)} raw:{repr(e2)})") from e2
+            claims = jose_jwt.decode(token=token, key=key, algorithms=["HS256", "HS384", "HS512"])
+            break
+        except JoseJWTError as e:
+            last_error = e
+            continue
+            
+    if claims is None:
+        raise SsoTokenError(f"Unable to decode Sampark Saathi access token: {repr(last_error)}")
 
     required_role = (settings.SSO_REQUIRED_ROLE or "").strip()
     if required_role:

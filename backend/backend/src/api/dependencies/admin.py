@@ -41,7 +41,7 @@ def _allow_listed_emails() -> set[str]:
 
 def is_admin_user(user: User, token_role: str = "") -> bool:
     """True if `user` may read cross-student data."""
-    if token_role.upper() == "ADMIN":
+    if token_role.upper() in {"ADMIN", "SUPER_ADMIN"}:
         return True
     if getattr(user, "is_admin", False):
         return True
