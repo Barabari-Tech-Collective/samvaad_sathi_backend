@@ -10,6 +10,7 @@ from sqlalchemy.pool import NullPool as SQLAlchemyNullPool
 
 from src.repository.base import Base
 from src.repository.database import async_db
+from src.config.manager import settings
 
 config = context.config
 config.set_main_option(name="sqlalchemy.url", value=str(async_db.set_async_db_uri).replace('%', '%%'))
@@ -57,9 +58,12 @@ async def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
+    connect_args = {}
+    if settings.DB_SSL_ENABLED:
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        connect_args["ssl"] = ssl_context
 
     connectable = AsyncEngine(
         engine_from_config(
@@ -67,7 +71,7 @@ async def run_migrations_online() -> None:
             prefix="sqlalchemy.",
             poolclass=SQLAlchemyNullPool,
             future=True,
-            connect_args={"ssl": ssl_context},
+            connect_args=connect_args,
         )
     )
 
