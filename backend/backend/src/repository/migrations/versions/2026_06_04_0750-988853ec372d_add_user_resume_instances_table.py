@@ -30,10 +30,10 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_user_resume_instances_user_id'), 'user_resume_instances', ['user_id'], unique=False)
-    op.drop_index(op.f('ix_generated_resumes_analysis_id'), table_name='generated_resumes')
-    op.drop_index(op.f('ix_generated_resumes_generated_resume_id'), table_name='generated_resumes')
-    op.drop_index(op.f('ix_generated_resumes_user_id'), table_name='generated_resumes')
-    op.drop_table('generated_resumes')
+    # `generated_resumes` only existed on one development branch and is not
+    # present when the declared migration chain is replayed from scratch.
+    # PostgreSQL drops the table's indexes with the table when it does exist.
+    op.execute('DROP TABLE IF EXISTS generated_resumes CASCADE')
     # ### end Alembic commands ###
 
 

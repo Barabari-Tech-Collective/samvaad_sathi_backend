@@ -17,10 +17,14 @@ logger = logging.getLogger(__name__)
 
 class AsyncDatabase:
     def __init__(self):
-        # Create SSL context for asyncpg
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        connect_args = {}
+        if settings.DB_SSL_ENABLED:
+            # Existing managed Postgres deployments require encrypted
+            # connections. Local development can set DB_SSL_ENABLED=False.
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            connect_args["ssl"] = ssl_context
         # Log connection target without the password. The previous version
         # printed the full connection URI (including the password) on every
         # startup, which leaked the DB credential into application logs.
@@ -41,8 +45,7 @@ class AsyncDatabase:
             pool_pre_ping=True,  # Validate connections before use
             pool_recycle=3600,   # Recycle connections every hour
             # SSL configuration for asyncpg (Aiven/Supabase)
-            connect_args={"ssl": ssl_context},
-            # connect_args=connect_args,
+            connect_args=connect_args,
         )
         # Use session factory instead of single session for better concurrency
         self.async_session_factory: sqlalchemy_async_sessionmaker[SQLAlchemyAsyncSession] = sqlalchemy_async_sessionmaker(
