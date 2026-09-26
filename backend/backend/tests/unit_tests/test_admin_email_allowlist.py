@@ -18,7 +18,10 @@ from src.api.dependencies import admin as admin_module
 from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 
 
-class _User:
+from src.models.db.user import User
+
+
+class _User(User):
     def __init__(self, email: str = "", is_admin: bool = False, user_id: int = 1):
         self.id = user_id
         self.email = email
@@ -68,6 +71,17 @@ def test_db_flag_still_works_independently_of_the_allowlist(monkeypatch):
     """The column remains the primary mechanism; the env var is additive."""
     _set_allowlist(monkeypatch, "")
     assert is_admin_user(_User(email="someone@example.com", is_admin=True)) is True
+
+
+def test_sso_student_token_does_not_revoke_local_admin_rights(monkeypatch):
+    """An admin who logs in via SSO as a STUDENT is still an admin."""
+    _set_allowlist(monkeypatch, "admin@samvaad-sathi.com")
+    
+    # 1. Via allow-list
+    assert is_admin_user(_User(email="admin@samvaad-sathi.com"), token_role="STUDENT") is True
+    
+    # 2. Via is_admin DB column
+    assert is_admin_user(_User(email="student@example.com", is_admin=True), token_role="STUDENT") is True
 
 
 @pytest.mark.asyncio

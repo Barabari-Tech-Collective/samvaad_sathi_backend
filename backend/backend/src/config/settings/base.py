@@ -138,7 +138,12 @@ class BackendBaseSettings(BaseSettings):
     AUTH_SERVICE_JWT_SECRET: str = decouple.config(
         "AUTH_SERVICE_JWT_SECRET",
         cast=str,
-        default="QWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXphYmNkZWYxMjM0NTY3ODkwMTIz",
+        default="",
+    )  # type: ignore
+    AUTH_SERVICE_STAGING_JWT_SECRET: str = decouple.config(
+        "AUTH_SERVICE_STAGING_JWT_SECRET",
+        cast=str,
+        default="",
     )  # type: ignore
     # This product's row in auth-service's `products` table (already seeded as SAMVAAD_SAATHI).
     SAMPARK_PRODUCT_UNIQUE_ID: str = decouple.config(
@@ -152,11 +157,10 @@ class BackendBaseSettings(BaseSettings):
     # explicitly per environment; it falls back to url_for() only for local dev.
     SSO_REDIRECT_URI: str = decouple.config("SSO_REDIRECT_URI", cast=str, default="")  # type: ignore
     # auth-service issues one token type across every Barabari product using a shared
-    # JWT secret, and the token carries no audience/product claim - so a token minted
-    # for another product, or for an ADMIN/OWNER of the admin panel, verifies here just
-    # as well as a student's. Samvaad Saathi is a student-facing product, so it accepts
-    # only this role. Empty disables the check.
-    SSO_REQUIRED_ROLE: str = decouple.config("SSO_REQUIRED_ROLE", cast=str, default="STUDENT")  # type: ignore
+    # JWT secret, and the token carries no audience/product claim. Samvaad Saathi accepts
+    # a comma-separated list of roles to allow students in, as well as local admins 
+    # to access their respective endpoints. Empty disables the check.
+    SSO_REQUIRED_ROLE: str = decouple.config("SSO_REQUIRED_ROLE", cast=str, default="STUDENT,ADMIN,SUPER_ADMIN")  # type: ignore
 
     # Trust X-Forwarded-Proto/-For from the reverse proxy in front of this app. Correct
     # for Render and for nginx on EC2, where the proxy is the only way in. Set False

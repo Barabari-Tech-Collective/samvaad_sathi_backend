@@ -24,7 +24,6 @@ students - they appear in neither list.
 """
 
 import fastapi
-
 from src.api.dependencies.auth import get_current_user
 from src.config.manager import settings
 from src.models.db.user import User
@@ -37,12 +36,21 @@ def _allow_listed_emails() -> set[str]:
     return {entry.strip().lower() for entry in raw.split(",") if entry.strip()}
 
 
-def is_admin_user(user: User) -> bool:
+def is_admin_user(user: User, token_role: str = "") -> bool:
     """True if `user` may read cross-student data."""
-    if getattr(user, "is_admin", False):
-        return True
+    is_local_admin = getattr(user, "is_admin", False)
     email = (getattr(user, "email", "") or "").strip().lower()
-    return bool(email) and email in _allow_listed_emails()
+    is_allowlisted = bool(email) and email in _allow_listed_emails()
+    is_known_admin = is_local_admin or is_allowlisted
+
+    if token_role:
+        # A token role alone is never enough to grant access (prevents cross-product hole),
+        # but logging in with a STUDENT token must not revoke admin rights we already granted locally.
+        # We rely strictly on whether they are known to us as a local admin.
+        return is_known_admin
+
+    # Legacy fallback for non-SSO logins
+    return is_known_admin
 
 
 async def get_current_admin_user(
@@ -55,7 +63,9 @@ async def get_current_admin_user(
     provides no benefit here: the endpoints are already discoverable in the
     OpenAPI schema.
     """
-    if not is_admin_user(current_user):
+    token_role = getattr(current_user, "token_role", "")
+
+    if not is_admin_user(current_user, token_role=token_role):
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_403_FORBIDDEN,
             detail="Administrator access required.",

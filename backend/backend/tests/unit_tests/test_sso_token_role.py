@@ -38,9 +38,14 @@ def test_student_token_is_accepted():
     assert claims["sub"] == "student@example.com"
 
 
-def test_admin_token_from_the_admin_panel_is_rejected():
-    with pytest.raises(SsoTokenError):
-        decode_sso_access_token(_mint("ADMIN"))
+def test_admin_token_is_accepted():
+    claims = decode_sso_access_token(_mint("ADMIN"))
+    assert claims["sub"] == "student@example.com"
+
+
+def test_super_admin_token_is_accepted():
+    claims = decode_sso_access_token(_mint("SUPER_ADMIN"))
+    assert claims["sub"] == "student@example.com"
 
 
 def test_owner_token_is_rejected():

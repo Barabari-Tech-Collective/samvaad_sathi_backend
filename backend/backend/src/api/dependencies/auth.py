@@ -10,14 +10,21 @@ from src.securities.authorizations.access_revocation import is_access_revoked
 from src.api.dependencies.repository import get_repository
 
 # Create HTTPBearer security scheme for Swagger UI
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = fastapi.Depends(security),
     user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
 ) -> User:
+    if not credentials:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated - Missing Bearer Token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = credentials.credentials
+    claims = {}
 
     # Tokens now come from auth-service (student-login/SSO) rather than this service's own
     # Cognito/local-password flow. Tried first since that's the path all new logins take;
@@ -41,7 +48,7 @@ async def get_current_user(
                 status_code=fastapi.status.HTTP_403_FORBIDDEN,
                 detail="Access to Samvaad Saathi has been revoked",
             )
-    except SsoTokenError:
+    except SsoTokenError as e:
         try:
             _, email = jwt_generator.retrieve_details_from_token(token=token, secret_key=settings.JWT_SECRET_KEY)
         except Exception:
@@ -66,6 +73,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    setattr(user, "token_role", claims.get("role") or "")
     return user
 
 

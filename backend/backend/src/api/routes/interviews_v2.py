@@ -782,7 +782,7 @@ async def generate_non_tech_questions_v2(
             if resume_context:
                 questions_data[0]["text"] = f"Based on your background, {questions_data[0]['text']}"
 
-        _apply_follow_up_eligibility(questions_data)
+        _apply_follow_up_eligibility(questions_data)  # type: ignore
 
         # Pre-calculate predictable S3 URLs and enqueue background generation
         tasks_to_run = _prepare_audio_for_questions(questions_data)
