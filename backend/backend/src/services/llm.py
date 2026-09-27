@@ -1113,8 +1113,6 @@ class QuestionsItemLLM(BaseItemLLM):
     category: str | None = None  # tech | tech_allied | behavioral
     keywords: list[str] | None = None
     concepts_covered: list[str] | None = None
-    expected_answer: str | None = None
-    example_output: str | None = None
 
 
 class QuestionsResponseLLM(pydantic.BaseModel):
@@ -1483,7 +1481,8 @@ async def generate_interview_questions_with_llm(
         "1. The 'category' field for each item MUST strictly be set to one of: 'tech', 'tech_allied', or 'behavioral'.\n"
         "2. Ensure questions are suitable for spoken verbal answers (no coding or writing code).\n"
         "3. Ask deep, targeted technical and situational questions that require thoughtful answers.\n"
-        "4. Return ONLY valid JSON with key 'items' containing array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output."
+        "4. Return ONLY valid JSON with key 'items' containing array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered.\n"
+        "5. The 'keywords' array MUST contain at most 2 keywords."
     ).format(count=total, track=track)
         # "You are an expert interviewer. Generate concise, specific interview questions for a candidate. "
         # "Avoid open-ended prompts; ask targeted questions that require concrete answers, but keep in mind to ask deep questions that will take time to answer NOT one sentence or one word answers"
@@ -1500,7 +1499,7 @@ async def generate_interview_questions_with_llm(
             "Generate new related questions using the same topics/concepts.\n"
             "Keep the questions aligned with the job profile, skills, experience level, and requested difficulty level.\n"
             "Return the same structured output as before:\n"
-            "question, keywords, concepts_covered, expected_answer, example_output, level, difficulty, type."
+            "question, keywords, concepts_covered, level, difficulty, type."
         )
     # Prepare a sampled syllabus so we don't send the entire topic bank to the LLM
     topics = syllabus_topics or {}
@@ -1597,10 +1596,8 @@ async def generate_interview_questions_with_llm(
                         "topic": it.topic,
                         "difficulty": it.difficulty,
                         "category": it.category,
-                        "keywords": it.keywords or [],
+                        "keywords": (it.keywords or [])[:2],
                         "concepts_covered": it.concepts_covered or [],
-                        "expected_answer": it.expected_answer,
-                        "example_output": it.example_output,
                     }
                     for it in result.items
                 ]
