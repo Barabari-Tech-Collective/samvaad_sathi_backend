@@ -568,6 +568,9 @@ async def extract_skills(
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
 
 
+# Global semaphore to limit concurrent LLM requests across all users/levels
+GLOBAL_LLM_SEMAPHORE = asyncio.Semaphore(5)
+
 @router.post(
     path="/job-profiles/{job_profile_id}/questions/generate",
     name="job-profiles:generate-questions",
@@ -625,6 +628,39 @@ async def generate_questions_v2(
     track = profile.job_name
     context_text = profile.job_description
 
+    async def safe_fetch_batch(track, context_text, b_count, difficulty, topics, ratio, current_influence):
+        max_retries = 3
+        error = None
+        for attempt in range(max_retries):
+            questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
+                track=track,
+                context_text=context_text,
+                count=b_count,
+                difficulty=difficulty,
+                syllabus_topics=topics,
+                ratio=ratio,
+                influence=current_influence,
+            )
+            if not error and structured_items:
+                return structured_items
+            logger.warning(f"Batch failed on attempt {attempt+1}/{max_retries}: {error}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+        raise Exception(f"Failed after {max_retries} attempts. Last error: {error}")
+
+    async def fetch_batch_with_semaphore(b_count, batch_idx, l, difficulty, topics, ratio, current_influence):
+        logger.info(f"Batch {batch_idx} Level {l.level}: REQUESTING {b_count} questions.")
+        try:
+            async with GLOBAL_LLM_SEMAPHORE:
+                structured_items = await safe_fetch_batch(
+                    track, context_text, b_count, difficulty, topics, ratio, current_influence
+                )
+            logger.info(f"Batch {batch_idx} Level {l.level}: RECEIVED {len(structured_items)} questions.")
+            return structured_items
+        except Exception as e:
+            logger.error(f"Batch {batch_idx} Level {l.level}: FAILED after retries. Error: {e}")
+            return []
+
     async def process_level(l):
         if l.count == 0:
             return []
@@ -673,42 +709,40 @@ async def generate_questions_v2(
 
         remaining = l.count
         batch_size = 10
-        batches = []
-        while remaining > 0:
-            current_batch = min(remaining, batch_size)
-            batches.append(current_batch)
-            remaining -= current_batch
-
-        async def fetch_batch(b_count, batch_idx):
-            current_influence = dict(influence)
-            logger.info(
-                f"Generating parallel batch {batch_idx+1}/{len(batches)} ({b_count} questions) for Job Profile {job_profile_id} at Level {l.level} ({difficulty})"
-            )
-
-            questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
-                track=track,
-                context_text=context_text,
-                count=b_count,
-                difficulty=difficulty,
-                syllabus_topics=topics,
-                ratio=ratio,
-                influence=current_influence,
-            )
-
-            if error or not structured_items:
-                logger.error(f"Failed to generate questions batch for Level {l.level}: {error}")
-                raise fastapi.HTTPException(
-                    status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to generate questions for Level {l.level}: {error or 'No questions generated'}"
-                )
-            return structured_items
-
-        # Run all batches concurrently to prevent timeouts on Render
-        batch_results = await asyncio.gather(*[fetch_batch(b, i) for i, b in enumerate(batches)])
-        
         level_generated_items = []
-        for res in batch_results:
-            level_generated_items.extend(res)
+        batch_idx_offset = 0
+        
+        while remaining > 0:
+            # Plan batches for the current remaining count
+            batches = []
+            temp_remaining = remaining
+            while temp_remaining > 0:
+                batches.append(min(temp_remaining, batch_size))
+                temp_remaining -= batches[-1]
+            
+            # Fetch all planned batches concurrently for this pass
+            tasks = [
+                fetch_batch_with_semaphore(
+                    b_count, batch_idx_offset + i + 1, l, difficulty, topics, ratio, dict(influence)
+                )
+                for i, b_count in enumerate(batches)
+            ]
+            batch_results = await asyncio.gather(*tasks)
+            batch_idx_offset += len(batches)
+            
+            added_in_this_pass = 0
+            for structured_items in batch_results:
+                # Ensure we don't add more than remaining questions
+                if len(structured_items) > remaining:
+                    structured_items = structured_items[:remaining]
+                    
+                level_generated_items.extend(structured_items)
+                added_in_this_pass += len(structured_items)
+                remaining -= len(structured_items)
+                
+            if added_in_this_pass == 0:
+                logger.warning(f"Level {l.level}: Failed to gather more questions. Stopping early.")
+                break
 
         return [(l.level, difficulty, item) for item in level_generated_items]
 
