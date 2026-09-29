@@ -48,38 +48,23 @@ class JobProfile(Base):
 
     @property
     def easy_questions(self) -> int:
-        try:
-            return sum(1 for q in self.questions if getattr(q, 'level', 0) == 1)
-        except Exception:
-            return 0
+        return sum(1 for q in self.questions if getattr(q, 'level', 0) == 1)
 
     @property
     def medium_questions(self) -> int:
-        try:
-            return sum(1 for q in self.questions if getattr(q, 'level', 0) == 2)
-        except Exception:
-            return 0
+        return sum(1 for q in self.questions if getattr(q, 'level', 0) == 2)
 
     @property
     def hard_questions(self) -> int:
-        try:
-            return sum(1 for q in self.questions if getattr(q, 'level', 0) == 3)
-        except Exception:
-            return 0
+        return sum(1 for q in self.questions if getattr(q, 'level', 0) == 3)
 
     @property
     def expert_questions(self) -> int:
-        try:
-            return sum(1 for q in self.questions if getattr(q, 'level', 0) == 4)
-        except Exception:
-            return 0
+        return sum(1 for q in self.questions if getattr(q, 'level', 0) == 4)
 
     @property
     def total_questions(self) -> int:
-        try:
-            return len(self.questions)
-        except Exception:
-            return 0
+        return len(self.questions)
 
     @property
     def title(self) -> str:

@@ -5,8 +5,8 @@ import datetime
 from typing import Optional
 from decouple import config
 import boto3
-import sqlalchemy
-import sqlalchemy.exc
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
@@ -218,7 +218,7 @@ async def _background_upload_and_enforce_limit(
                     try:
                         session.add(new_resume)
                         await session.flush()
-                    except sqlalchemy.exc.IntegrityError:
+                    except IntegrityError:
                         # Raced with another upload of the same file. Treat as deduplication success.
                         await session.rollback()
                         logger.info(f"IntegrityError: Concurrent upload detected for user {user_id}. Using existing.")
@@ -235,7 +235,7 @@ async def _background_upload_and_enforce_limit(
                                 logger.error(f"Failed to cleanup S3 object {s3_key} after IntegrityError: {e}")
                         
                         # Query the existing file that caused the conflict and return its key
-                        dedup_stmt = sqlalchemy.select(UserResume).where(
+                        dedup_stmt = select(UserResume).where(
                             UserResume.user_id == user_id, 
                             UserResume.file_sha256 == file_sha256
                         )
