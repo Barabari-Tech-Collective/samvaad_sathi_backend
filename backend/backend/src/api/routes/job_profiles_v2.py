@@ -43,6 +43,10 @@ from src.services.skills_extractor import extract_skills_from_text
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.syllabus_service import syllabus_service
+from src.api.dependencies.admin import is_admin_user
+
+def check_is_admin_dep(current_user=fastapi.Depends(get_current_user)) -> bool:
+    return is_admin_user(current_user)
 
 logger = logging.getLogger(__name__)
 
@@ -97,14 +101,9 @@ async def get_job_profiles_summary(
 async def list_job_profiles(
     category: Optional[str] = fastapi.Query(None),
     limit: Optional[int] = fastapi.Query(None),
-    current_user=fastapi.Depends(get_current_user),
+    is_admin: bool = fastapi.Depends(check_is_admin_dep),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileListResponse:
-    is_admin = False
-    if current_user:
-        from src.api.dependencies.admin import is_admin_user
-        is_admin = is_admin_user(current_user)
-        
     profiles = await job_profile_repo.list_profiles(category=category, limit=limit, is_admin=is_admin)
     return JobProfileListResponse(items=profiles, total=len(profiles))
 

@@ -35,7 +35,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         *,
         category: Optional[str] = None,
         limit: Optional[int] = None,
-        is_admin: bool = True
+        is_admin: bool = False
     ) -> List[JobProfile]:
         from sqlalchemy.orm import selectinload
         query = select(JobProfile).options(selectinload(JobProfile.questions)).order_by(JobProfile.created_at.desc())
