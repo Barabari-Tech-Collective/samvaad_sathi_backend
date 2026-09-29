@@ -45,7 +45,7 @@ def upgrade() -> None:
                         type_=sa.String(length=32),
                         existing_nullable=False)
         existing_indexes = {
-            index['name'] for index in inspector.get_indexes('pronunciation_practice')
+            index['name'] for index in inspector.get_indexes('pronunciation_practice') if index.get('name') is not None
         }
 
     indexes = {
