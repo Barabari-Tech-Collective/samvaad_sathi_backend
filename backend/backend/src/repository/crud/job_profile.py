@@ -36,8 +36,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         category: Optional[str] = None,
         limit: Optional[int] = None
     ) -> List[JobProfile]:
-        from sqlalchemy.orm import selectinload
-        query = select(JobProfile).options(selectinload(JobProfile.questions)).order_by(JobProfile.created_at.desc())
+        query = select(JobProfile).order_by(JobProfile.created_at.desc())
         if category:
             query = query.where(JobProfile.category == category)
         if limit is not None:
@@ -144,30 +143,14 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         return profile
 
     async def list_all(self, *, limit: int = 1000) -> list[JobProfile]:
-        from sqlalchemy.orm import selectinload
-        stmt = sqlalchemy.select(JobProfile).options(selectinload(JobProfile.questions)).order_by(JobProfile.id.desc()).limit(limit)
+        stmt = sqlalchemy.select(JobProfile).order_by(JobProfile.id.desc()).limit(limit)
         query = await self.async_session.execute(statement=stmt)
         return list(query.scalars().all())
 
     async def get_by_id(self, *, job_profile_id: int) -> JobProfile | None:
-        from sqlalchemy.orm import selectinload
-        stmt = sqlalchemy.select(JobProfile).options(selectinload(JobProfile.questions)).where(JobProfile.id == job_profile_id)
+        stmt = sqlalchemy.select(JobProfile).where(JobProfile.id == job_profile_id)
         query = await self.async_session.execute(statement=stmt)
         return query.scalar_one_or_none()
-
-    async def update_review_status(self, profile_id: int, status: str, admin_comment: str | None) -> JobProfile | None:
-        from sqlalchemy.orm import selectinload
-        stmt = sqlalchemy.select(JobProfile).options(selectinload(JobProfile.questions)).where(JobProfile.id == profile_id)
-        query = await self.async_session.execute(statement=stmt)
-        profile = query.scalar_one_or_none()
-        if not profile:
-            return None
-            
-        profile.status = status
-        profile.admin_comment = admin_comment
-        await self.async_session.commit()
-        await self.async_session.refresh(profile)
-        return profile
 
     async def delete(self, *, job_profile_id: int) -> bool:
         stmt = sqlalchemy.select(JobProfile).where(JobProfile.id == job_profile_id)

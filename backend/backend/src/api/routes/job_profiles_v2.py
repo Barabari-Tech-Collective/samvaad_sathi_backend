@@ -4,7 +4,6 @@ from fastapi import File, UploadFile
 from typing import List, Optional
 import logging
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import get_current_admin_user
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.job_profile import (
     JobProfileSummaryResponse, 
@@ -35,8 +34,7 @@ from src.models.schemas.job_profile import (
     JobProfileReviewPreviewQuestion,
     JobProfileReviewLevelInfo,
     JobProfileReviewQuestionSummary,
-    JobProfileSubmitResponse,
-    JobProfileAdminReviewRequest
+    JobProfileSubmitResponse
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
@@ -156,31 +154,6 @@ async def update_job_profile(
         
     return JobProfileResponse.model_validate(updated_profile)
 
-
-@router.patch(
-    path="/job-profiles/{job_profile_id}/review",
-    name="job-profiles:update-review",
-    response_model=JobProfileResponse,
-    status_code=fastapi.status.HTTP_200_OK,
-    summary="Update Review Status (Admin Only)",
-)
-async def update_job_profile_review(
-    job_profile_id: int,
-    payload: JobProfileAdminReviewRequest,
-    current_admin=fastapi.Depends(get_current_admin_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
-) -> JobProfileResponse:
-    updated_profile = await job_profile_repo.update_review_status(
-        profile_id=job_profile_id,
-        status=payload.status,
-        admin_comment=payload.adminComment
-    )
-    if not updated_profile:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_404_NOT_FOUND,
-            detail=f"Job profile with ID {job_profile_id} not found"
-        )
-    return JobProfileResponse.model_validate(updated_profile)
 
 @router.get(
     path="/job-profiles/{job_profile_id}/review",
@@ -352,7 +325,7 @@ async def delete_job_profile(
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileDeleteResponse:
-    deleted = await job_profile_repo.delete(job_profile_id=job_profile_id)
+    deleted = await job_profile_repo.delete_profile(profile_id=job_profile_id)
     if not deleted:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,

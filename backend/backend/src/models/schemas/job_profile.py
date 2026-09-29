@@ -55,43 +55,7 @@ class JobProfileUpdateV2(BaseSchemaModel):
 
 class JobProfileResponse(JobProfileBase):
     id: int
-    jobProfileId: Optional[int] = pydantic.Field(
-        default=None,
-        alias="jobProfileId",
-        validation_alias=pydantic.AliasChoices("id", "jobProfileId"),
-        serialization_alias="jobProfileId"
-    )
     created_at: datetime.datetime
-    
-    status: str
-    easy_questions: int = 0
-    medium_questions: int = 0
-    hard_questions: int = 0
-    expert_questions: int = 0
-    advanced_questions: Optional[int] = pydantic.Field(
-        default=0,
-        alias="advanced_questions",
-        validation_alias=pydantic.AliasChoices("expert_questions", "advanced_questions"),
-        serialization_alias="advanced_questions"
-    )
-    totalQuestions: Optional[int] = pydantic.Field(
-        default=0,
-        alias="totalQuestions",
-        validation_alias=pydantic.AliasChoices("totalQuestions", "total_questions"),
-        serialization_alias="totalQuestions"
-    )
-    adminComment: Optional[str] = pydantic.Field(
-        default=None,
-        alias="adminComment",
-        validation_alias=pydantic.AliasChoices("adminComment", "admin_comment"),
-        serialization_alias="adminComment"
-    )
-    submittedAt: Optional[datetime.datetime] = pydantic.Field(
-        default=None,
-        alias="submittedAt",
-        validation_alias=pydantic.AliasChoices("submittedAt", "submitted_at"),
-        serialization_alias="submittedAt"
-    )
 
     @pydantic.computed_field
     @property
@@ -157,14 +121,6 @@ class JobProfileExtractSkillsRequest(BaseSchemaModel):
 
 class JobProfileExtractSkillsResponse(BaseSchemaModel):
     skills: List[str]
-
-class JobProfileAdminReviewRequest(BaseSchemaModel):
-    status: str
-    adminComment: Optional[str] = pydantic.Field(
-        default=None,
-        alias="adminComment",
-        validation_alias=pydantic.AliasChoices("adminComment", "admin_comment")
-    )
 
 # --- upstream/master schemas ---
 class JobProfileCreate(BaseSchemaModel):
