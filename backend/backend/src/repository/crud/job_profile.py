@@ -34,10 +34,14 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         self,
         *,
         category: Optional[str] = None,
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
+        is_admin: bool = False
     ) -> List[JobProfile]:
         from sqlalchemy.orm import selectinload
         query = select(JobProfile).options(selectinload(JobProfile.questions)).order_by(JobProfile.created_at.desc())
+        
+        if not is_admin:
+            query = query.where((JobProfile.status == 'published') | (JobProfile.status.is_(None)))
         if category:
             query = query.where(JobProfile.category == category)
         if limit is not None:
