@@ -100,7 +100,12 @@ async def list_job_profiles(
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileListResponse:
-    profiles = await job_profile_repo.list_profiles(category=category, limit=limit)
+    is_admin = False
+    if current_user:
+        from src.api.dependencies.admin import is_admin_user
+        is_admin = is_admin_user(current_user)
+        
+    profiles = await job_profile_repo.list_profiles(category=category, limit=limit, is_admin=is_admin)
     return JobProfileListResponse(items=profiles, total=len(profiles))
 
 @router.post(
