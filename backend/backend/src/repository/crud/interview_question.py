@@ -241,7 +241,7 @@ class InterviewQuestionCRUDRepository(BaseCRUDRepository):
             InterviewQuestion.interview_id == interview_id
         )
         current_order = await self.async_session.execute(order_stmt)
-        next_order = (current_order.scalar() or 0) + 1
+        next_order = int(current_order.scalar() or 0) + 1
 
         follow_up = InterviewQuestion(
             interview_id=interview_id,

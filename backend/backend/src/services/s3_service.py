@@ -5,8 +5,6 @@ import datetime
 from typing import Optional
 from decouple import config
 import boto3
-import sqlalchemy
-import sqlalchemy.exc
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
