@@ -556,11 +556,12 @@ async def get_dashboard_score_distribution(
         college=college,
     )
     
-    dist_key = "score_distribution"
-    if metric == "knowledge":
-        dist_key = "knowledge_distribution"
-    elif metric == "speech":
-        dist_key = "speech_distribution"
+    metric_map = {
+        "overall": "score_distribution",
+        "knowledge": "knowledge_distribution",
+        "speech": "speech_distribution"
+    }
+    dist_key = metric_map.get(metric, "score_distribution")
         
     buckets = _extract_distribution_buckets(scoring.get(dist_key, []))
     return DistributionResponse(chart_type="histogram", buckets=buckets)
@@ -576,10 +577,9 @@ async def get_dashboard_score_distribution(
 async def get_roles_performance_summary_endpoint(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
     service = AnalyticsService(session)
     results = await service.get_roles_performance_summary(start_date=start_date, end_date=end_date)
     return RolePerformanceSummaryResponse(roles=results)
@@ -595,10 +595,9 @@ async def get_roles_performance_summary_endpoint(
 )
 async def get_dashboard_recent_interviews(
     limit: int = fastapi.Query(default=10, ge=1, le=100),
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
     stmt = (
         sqlalchemy.select(Interview, User.name, User.university, Report, SummaryReport)
         .join(User, User.id == Interview.user_id)

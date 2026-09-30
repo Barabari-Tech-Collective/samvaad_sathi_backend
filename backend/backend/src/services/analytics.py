@@ -697,20 +697,33 @@ class AnalyticsService:
         start_date: datetime.date | None = None,
         end_date: datetime.date | None = None,
     ) -> list[dict[str, Any]]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date)
-        reports = await self._reports_by_interview([i.id for i in interviews])
-        summaries = await self._summary_reports_by_interview([i.id for i in interviews])
+        # Using load_only prevents loading heavy fields (e.g. transcriptions) into RAM.
+        # We process aggregation in python because the JSON-based scores have highly complex fallbacks 
+        # (Report vs SummaryReport, different json keys) which make a pure GROUP BY in SQL too fragile.
+        stmt = (
+            sqlalchemy.select(Interview, Report, SummaryReport)
+            .outerjoin(Report, Report.interview_id == Interview.id)
+            .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
+            .options(
+                sqlalchemy.orm.load_only(Interview.id, Interview.track),
+                sqlalchemy.orm.load_only(Report.speech_structure_fluency, Report.knowledge_competence, Report.overall_score),
+                sqlalchemy.orm.load_only(SummaryReport.report_json)
+            )
+        )
+        if start_date:
+            stmt = stmt.where(Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
+        if end_date:
+            stmt = stmt.where(Interview.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc))
+            
+        rows = list((await self._db.execute(stmt)).all())
 
         roles_data = {}
         role_counts = {}
-        for interview in interviews:
+        for interview, report, summary in rows:
             role = interview.track or "Unknown"
             role_counts[role] = role_counts.get(role, 0) + 1
             if role not in roles_data:
                 roles_data[role] = {"overall": [], "knowledge": [], "speech": []}
-
-            report = reports.get(interview.id)
-            summary = summaries.get(interview.id)
             
             s = _extract_speech_score(report, summary)
             k = _extract_knowledge_score(report, summary)

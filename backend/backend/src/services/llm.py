@@ -1478,6 +1478,11 @@ async def generate_interview_questions_with_llm(
             "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n"
         )
         cat_options = "'Data Engineering & Querying', 'Analysis & Insights', or 'Behavioral'"
+        definitions = {
+            "Data Engineering & Querying": "Core data questions",
+            "Analysis & Insights": "Analytics questions",
+            "Behavioral": "Behavioral questions from the provided list"
+        }
     elif "design" in track_lower or "ui" in track_lower or "ux" in track_lower:
         cat_mix = (
             "- Core design: 2 questions\n"
@@ -1485,6 +1490,11 @@ async def generate_interview_questions_with_llm(
             "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n"
         )
         cat_options = "'Core design', 'Design Strategy', or 'Behavioral'"
+        definitions = {
+            "Core design": "Core design questions",
+            "Design Strategy": "Design Strategy questions",
+            "Behavioral": "Behavioral questions from the provided list"
+        }
     else:
         cat_mix = (
             "- Tech (core domain technical questions): 2 questions\n"
@@ -1492,6 +1502,11 @@ async def generate_interview_questions_with_llm(
             "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n"
         )
         cat_options = "'tech', 'tech_allied', or 'behavioral'"
+        definitions = {
+            "tech": "Core technical questions for the target role",
+            "tech_allied": "Technical questions allied to the candidate's background/experience",
+            "behavioral": "Behavioral questions from the provided list"
+        }
 
     sys_prompt = (
         "You are an expert technical interviewer generating a set of exactly {count} interview questions for a candidate in the {track} role.\n\n"
