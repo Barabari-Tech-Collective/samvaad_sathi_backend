@@ -2,11 +2,17 @@
 
 Every Barabari product shares one JWT secret, and auth-service puts no
 audience/product claim in the token. Signature validity therefore proves
-only "some Barabari account" - not "a student entitled to this product".
-Without the role check, a token minted for another product, or an
-ADMIN/OWNER token from the admin panel, authenticates here as an ordinary
-user. auth-service enforces the equivalent rule on its own student
-refresh endpoint; this is the consuming side of it.
+only "some Barabari account" - not "an account entitled to this product".
+Without the role check, a token minted for another product authenticates
+here as an ordinary user. auth-service enforces the equivalent rule on its
+own student refresh endpoint; this is the consuming side of it.
+
+The allow-list is no longer STUDENT-only. The /v2/analytics dashboard is
+embedded in the Sampark Saathi admin console and arrives with a staff
+token, so gating on STUDENT made those endpoints unreachable by anyone:
+get_current_admin_user demanded an admin while this check refused every
+admin token. Admitting a role here only means "authenticated" - reading
+cross-student data still requires get_current_admin_user.
 """
 
 import base64
@@ -38,14 +44,29 @@ def test_student_token_is_accepted():
     assert claims["sub"] == "student@example.com"
 
 
-def test_admin_token_from_the_admin_panel_is_rejected():
-    with pytest.raises(SsoTokenError):
-        decode_sso_access_token(_mint("ADMIN"))
+def test_admin_token_is_accepted():
+    """Reversed from the original STUDENT-only rule: the analytics dashboard is
+    driven from the admin console, so an ADMIN token has to get past this check.
+    Authorization for cross-student data is get_current_admin_user's job."""
+    assert decode_sso_access_token(_mint("ADMIN", "admin@example.com"))["sub"] == "admin@example.com"
+
+
+def test_super_admin_token_is_accepted():
+    claims = decode_sso_access_token(_mint("SUPER_ADMIN", "super@example.com"))
+    assert claims["sub"] == "super@example.com"
 
 
 def test_owner_token_is_rejected():
+    """OWNER is not a Sampark role code and appears in no allow-list."""
     with pytest.raises(SsoTokenError):
         decode_sso_access_token(_mint("OWNER"))
+
+
+def test_unlisted_staff_role_is_rejected():
+    """Widening to admins must not widen to every staff role. FACILITATOR has no
+    Samvaad surface, so it stays out until someone adds it to SSO_ALLOWED_ROLES."""
+    with pytest.raises(SsoTokenError):
+        decode_sso_access_token(_mint("FACILITATOR"))
 
 
 def test_token_with_no_role_claim_is_rejected():
@@ -79,7 +100,27 @@ def test_expired_token_is_rejected():
         decode_sso_access_token(expired)
 
 
-def test_role_check_can_be_disabled(monkeypatch):
-    """Escape hatch if another role legitimately needs access later."""
+def test_legacy_required_role_still_narrows(monkeypatch):
+    """An environment still setting only the old single-value variable keeps the
+    behaviour it has today - it must not silently widen to the new default."""
+    monkeypatch.setattr(sso_jwt.settings, "SSO_ALLOWED_ROLES", "")
+    monkeypatch.setattr(sso_jwt.settings, "SSO_REQUIRED_ROLE", "STUDENT")
+    assert decode_sso_access_token(_mint("STUDENT"))["sub"] == "student@example.com"
+    with pytest.raises(SsoTokenError):
+        decode_sso_access_token(_mint("ADMIN"))
+
+
+def test_allowed_roles_takes_precedence_over_legacy(monkeypatch):
+    monkeypatch.setattr(sso_jwt.settings, "SSO_ALLOWED_ROLES", "STUDENT,ADMIN")
+    monkeypatch.setattr(sso_jwt.settings, "SSO_REQUIRED_ROLE", "STUDENT")
+    assert decode_sso_access_token(_mint("ADMIN", "admin@example.com"))["sub"] == "admin@example.com"
+
+
+def test_blank_configuration_falls_back_rather_than_admitting_everything(monkeypatch):
+    """There is no 'disable' value. A blank or comma-only setting must fall back to
+    the default allow-list, so a typo cannot quietly remove the entitlement guard."""
+    monkeypatch.setattr(sso_jwt.settings, "SSO_ALLOWED_ROLES", " , , ")
     monkeypatch.setattr(sso_jwt.settings, "SSO_REQUIRED_ROLE", "")
-    assert decode_sso_access_token(_mint("ADMIN"))["sub"] == "student@example.com"
+    assert decode_sso_access_token(_mint("STUDENT"))["sub"] == "student@example.com"
+    with pytest.raises(SsoTokenError):
+        decode_sso_access_token(_mint("FACILITATOR"))

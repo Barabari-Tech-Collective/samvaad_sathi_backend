@@ -148,15 +148,24 @@ async def sso_callback(
         ) or email.split("@")[0]
         user = await user_repo.create_user(email=email, password=random_password, name=name)
 
+    synced_degree = central_profile.get("ugProgramType")
+    synced_university = central_profile.get("institutionName")
     await user_repo.sync_central_identity(
         user_id=user.id,
         central_user_id=str(central_user_id),
         name=" ".join(
             part for part in [central_profile.get("firstName"), central_profile.get("lastName")] if part
         ) or None,
-        degree=central_profile.get("programType"),
-        university=central_profile.get("institutionName"),
+        degree=synced_degree,
+        university=synced_university,
     )
+    # The central profile is the canonical source now (collect once, reuse everywhere) -
+    # if it already has what Samvaad's own onboarding form would otherwise ask for, treat
+    # onboarding as already done rather than making the student re-enter it here. A student
+    # who reached SAMVAAD_SAATHI access before finishing Sampark Saathi's own profile step
+    # still falls through to Samvaad's local onboarding as a fallback.
+    if synced_degree and synced_university and not user.is_onboarded:
+        await user_repo.set_onboarded(user_id=user.id, value=True)
 
     return RedirectResponse(url=f"{target}?token={quote(access_token)}&refresh_token={quote(refresh_token)}")
 
