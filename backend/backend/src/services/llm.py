@@ -1473,33 +1473,35 @@ async def generate_interview_questions_with_llm(
     track_lower = track.lower()
     if "data" in track_lower:
         cat_mix = (
-            "- Data Engineering & Querying: 2 questions\n"
-            "- Analysis & Insights: 2 questions\n"
-            "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n"
+            "- Data Engineering & Querying (data_engineering_querying): 2 questions\n"
+            "- Analysis & Insights (analysis_insights): 2 questions\n"
+            "- Behavioral (behavioral): 1 question\n"
         )
-        cat_options = "'Data Engineering & Querying', 'Analysis & Insights', or 'Behavioral'"
+        cat_options = "'data_engineering_querying', 'analysis_insights', or 'behavioral'"
         definitions = {
-            "Data Engineering & Querying": "Core data questions",
-            "Analysis & Insights": "Analytics questions",
-            "Behavioral": "Behavioral questions from the provided list"
+            "data_engineering_querying": "Core data questions",
+            "analysis_insights": "Analytics questions",
+            "behavioral": "Behavioral questions from the provided list"
         }
+        default_ratio = {"data_engineering_querying": 2, "analysis_insights": 2, "behavioral": 1}
     elif "design" in track_lower or "ui" in track_lower or "ux" in track_lower:
         cat_mix = (
-            "- Core design: 2 questions\n"
-            "- Design Strategy: 2 questions\n"
-            "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n"
+            "- Core design (core_design): 2 questions\n"
+            "- Design Strategy (design_strategy): 2 questions\n"
+            "- Behavioral (behavioral): 1 question\n"
         )
-        cat_options = "'Core design', 'Design Strategy', or 'Behavioral'"
+        cat_options = "'core_design', 'design_strategy', or 'behavioral'"
         definitions = {
-            "Core design": "Core design questions",
-            "Design Strategy": "Design Strategy questions",
-            "Behavioral": "Behavioral questions from the provided list"
+            "core_design": "Core design questions",
+            "design_strategy": "Design Strategy questions",
+            "behavioral": "Behavioral questions from the provided list"
         }
+        default_ratio = {"core_design": 2, "design_strategy": 2, "behavioral": 1}
     else:
         cat_mix = (
-            "- Tech (core domain technical questions): 2 questions\n"
-            "- Tech Allied (related tools, architecture, databases, or workflow): 2 questions\n"
-            "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n"
+            "- Tech (tech): 2 questions\n"
+            "- Tech Allied (tech_allied): 2 questions\n"
+            "- Behavioral (behavioral): 1 question\n"
         )
         cat_options = "'tech', 'tech_allied', or 'behavioral'"
         definitions = {
@@ -1507,6 +1509,7 @@ async def generate_interview_questions_with_llm(
             "tech_allied": "Technical questions allied to the candidate's background/experience",
             "behavioral": "Behavioral questions from the provided list"
         }
+        default_ratio = {"tech": 2, "tech_allied": 2, "behavioral": 1}
 
     sys_prompt = (
         "You are an expert technical interviewer generating a set of exactly {count} interview questions for a candidate in the {track} role.\n\n"
@@ -1592,7 +1595,7 @@ async def generate_interview_questions_with_llm(
         # Category mix and topics per product requirements
         "categories": {
             "definitions": definitions,
-            "ratio": ratio or {"tech": 2, "tech_allied": 2, "behavioral": 1},
+            "ratio": ratio or default_ratio,
         },
         # Only pass a random subset of topics so the model focuses and varies questions over runs
         "syllabus": sampled_syllabus,

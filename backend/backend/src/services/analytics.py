@@ -700,14 +700,15 @@ class AnalyticsService:
         # Using load_only prevents loading heavy fields (e.g. transcriptions) into RAM.
         # We process aggregation in python because the JSON-based scores have highly complex fallbacks 
         # (Report vs SummaryReport, different json keys) which make a pure GROUP BY in SQL too fragile.
+        from sqlalchemy.orm import Load
         stmt = (
             sqlalchemy.select(Interview, Report, SummaryReport)
             .outerjoin(Report, Report.interview_id == Interview.id)
             .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
             .options(
-                sqlalchemy.orm.load_only(Interview.id, Interview.track),
-                sqlalchemy.orm.load_only(Report.speech_structure_fluency, Report.knowledge_competence, Report.overall_score),
-                sqlalchemy.orm.load_only(SummaryReport.report_json)
+                Load(Interview).load_only(Interview.id, Interview.track),
+                Load(Report).load_only(Report.speech_structure_fluency, Report.knowledge_competence, Report.overall_score),
+                Load(SummaryReport).load_only(SummaryReport.report_json)
             )
         )
         if start_date:
