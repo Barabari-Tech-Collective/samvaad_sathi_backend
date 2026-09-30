@@ -25,6 +25,7 @@ from src.models.db.user import User
 from src.models.db.analytics_event import AnalyticsEvent
 from src.models.schemas.analytics_v2 import (
     CollegesFilterResponse,
+    RolesFilterResponse,
     CollegesSummaryResponse,
     DashboardOverviewResponse,
     DashboardTopListResponse,
@@ -34,6 +35,7 @@ from src.models.schemas.analytics_v2 import (
     ForecastResponse,
     FunnelResponse,
     FunnelStage,
+    RolePerformanceSummaryResponse,
     GlobalSearchResponse,
     HeatmapCell,
     HeatmapResponse,
@@ -541,6 +543,7 @@ async def get_dashboard_score_distribution(
     role: str | None = None,
     difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
+    metric: str = fastapi.Query("overall", description="Metric to view: overall, knowledge, or speech"),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -553,8 +556,34 @@ async def get_dashboard_score_distribution(
         difficulty=difficulty.value if difficulty else None,
         college=college,
     )
-    buckets = _extract_distribution_buckets(scoring.get("score_distribution", []))
+    
+    metric_map = {
+        "overall": "score_distribution",
+        "knowledge": "knowledge_distribution",
+        "speech": "speech_distribution"
+    }
+    dist_key = metric_map.get(metric, "score_distribution")
+        
+    buckets = _extract_distribution_buckets(scoring.get(dist_key, []))
     return DistributionResponse(chart_type="histogram", buckets=buckets)
+
+
+@router.get(
+    "/roles/performance-summary",
+    response_model=RolePerformanceSummaryResponse,
+    status_code=200,
+    summary="Get role performance summary",
+    description="Returns aggregated scores (overall, knowledge, speech) broken down by job role.",
+)
+async def get_roles_performance_summary_endpoint(
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
+    _current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    service = AnalyticsService(session)
+    results = await service.get_roles_performance_summary(start_date=start_date, end_date=end_date)
+    return RolePerformanceSummaryResponse(roles=results)
 
 
 @router.get(
@@ -567,10 +596,9 @@ async def get_dashboard_score_distribution(
 )
 async def get_dashboard_recent_interviews(
     limit: int = fastapi.Query(default=10, ge=1, le=100),
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
     stmt = (
         sqlalchemy.select(Interview, User.name, User.university, Report, SummaryReport)
         .join(User, User.id == Interview.user_id)
@@ -840,6 +868,16 @@ async def get_student_college_filters(
     stmt = sqlalchemy.select(User.university).where(User.university.is_not(None)).distinct().order_by(User.university.asc())
     colleges = [row[0] for row in (await session.execute(stmt)).all() if row[0]]
     return CollegesFilterResponse(colleges=colleges)
+
+
+@router.get("/roles/filters", response_model=RolesFilterResponse, status_code=200, summary="List available role filters", description="Reasoning: ensures UI uses both static and dynamic role filter options. Output: distinct role list.")
+async def get_analytics_role_filters(
+    _current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    service = AnalyticsService(session)
+    roles = await service.get_role_filters()
+    return RolesFilterResponse(roles=roles)
 
 
 @router.get(

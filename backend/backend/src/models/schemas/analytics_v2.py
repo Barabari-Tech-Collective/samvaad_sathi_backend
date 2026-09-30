@@ -58,6 +58,17 @@ class FunnelResponse(BaseSchemaModel):
     stages: list[FunnelStage]
 
 
+class RolePerformanceSummaryRow(BaseSchemaModel):
+    role: str
+    total_interviews: int
+    avg_knowledge_score: float | None
+    avg_speech_score: float | None
+    avg_overall_score: float | None
+
+
+class RolePerformanceSummaryResponse(BaseSchemaModel):
+    roles: list[RolePerformanceSummaryRow]
+
 class HeatmapCell(BaseSchemaModel):
     x: str
     y: str
@@ -155,6 +166,10 @@ class InterviewsSummaryResponse(BaseSchemaModel):
 
 class CollegesFilterResponse(BaseSchemaModel):
     colleges: list[str]
+
+
+class RolesFilterResponse(BaseSchemaModel):
+    roles: list[str]
 
 
 class GlobalSearchResponse(BaseSchemaModel):

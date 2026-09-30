@@ -674,6 +674,8 @@ class AnalyticsService:
 
         correlation = _pearson(speech, knowledge)
         distribution = _histogram(overall, bins=[0, 20, 40, 60, 80, 100])
+        knowledge_distribution = _histogram(knowledge, bins=[0, 20, 40, 60, 80, 100])
+        speech_distribution = _histogram(speech, bins=[0, 20, 40, 60, 80, 100])
         suspicious_range = _is_distribution_too_narrow(overall)
 
         return {
@@ -681,12 +683,84 @@ class AnalyticsService:
                 "speech_vs_knowledge": round(correlation, 4) if correlation is not None else None,
             },
             "score_distribution": distribution,
+            "knowledge_distribution": knowledge_distribution,
+            "speech_distribution": speech_distribution,
             "scoring_health": {
                 "n_samples": len(overall),
                 "is_too_narrow": suspicious_range,
                 "note": "If most scores cluster in a narrow range (for example 70-80), scoring calibration may need review.",
             },
         }
+
+    async def get_roles_performance_summary(
+        self,
+        start_date: datetime.date | None = None,
+        end_date: datetime.date | None = None,
+    ) -> list[dict[str, Any]]:
+        # Using load_only prevents loading heavy fields (e.g. transcriptions) into RAM.
+        # We process aggregation in python because the JSON-based scores have highly complex fallbacks 
+        # (Report vs SummaryReport, different json keys) which make a pure GROUP BY in SQL too fragile.
+        from sqlalchemy.orm import Load
+        stmt = (
+            sqlalchemy.select(Interview, Report, SummaryReport)
+            .outerjoin(Report, Report.interview_id == Interview.id)
+            .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
+            .options(
+                Load(Interview).load_only(Interview.id, Interview.track),
+                Load(Report).load_only(Report.speech_structure_fluency, Report.knowledge_competence, Report.overall_score),
+                Load(SummaryReport).load_only(SummaryReport.report_json)
+            )
+        )
+        if start_date:
+            stmt = stmt.where(Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
+        if end_date:
+            stmt = stmt.where(Interview.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc))
+            
+        rows = list((await self._db.execute(stmt)).all())
+
+        roles_data = {}
+        role_counts = {}
+        for interview, report, summary in rows:
+            role = interview.track or "Unknown"
+            role_counts[role] = role_counts.get(role, 0) + 1
+            if role not in roles_data:
+                roles_data[role] = {"overall": [], "knowledge": [], "speech": []}
+            
+            s = _extract_speech_score(report, summary)
+            k = _extract_knowledge_score(report, summary)
+            o = _extract_overall_score(report, summary)
+            
+            if s is not None:
+                roles_data[role]["speech"].append(s)
+            if k is not None:
+                roles_data[role]["knowledge"].append(k)
+            if o is not None:
+                roles_data[role]["overall"].append(o)
+
+        results = []
+        for role, data in roles_data.items():
+            avg_overall = sum(data["overall"]) / len(data["overall"]) if data["overall"] else None
+            avg_knowledge = sum(data["knowledge"]) / len(data["knowledge"]) if data["knowledge"] else None
+            avg_speech = sum(data["speech"]) / len(data["speech"]) if data["speech"] else None
+            
+            results.append({
+                "role": role,
+                "total_interviews": role_counts.get(role, 0),
+                "avg_overall_score": round(avg_overall, 2) if avg_overall is not None else None,
+                "avg_knowledge_score": round(avg_knowledge, 2) if avg_knowledge is not None else None,
+                "avg_speech_score": round(avg_speech, 2) if avg_speech is not None else None,
+            })
+            
+        return results
+
+    async def get_role_filters(self) -> list[str]:
+        # The frontend filter should only display roles that have actual interview data.
+        # This inherently covers both static roles (from legacy system) and dynamic 
+        # job_profile roles, as long as a student has interviewed for them.
+        stmt = sqlalchemy.select(Interview.track).where(Interview.track.is_not(None)).distinct()
+        roles = list((await self._db.execute(stmt)).scalars().all())
+        
+        return sorted([r for r in roles if r])
 
     async def get_alerts(
         self,
