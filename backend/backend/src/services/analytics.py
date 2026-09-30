@@ -674,6 +674,8 @@ class AnalyticsService:
 
         correlation = _pearson(speech, knowledge)
         distribution = _histogram(overall, bins=[0, 20, 40, 60, 80, 100])
+        knowledge_distribution = _histogram(knowledge, bins=[0, 20, 40, 60, 80, 100])
+        speech_distribution = _histogram(speech, bins=[0, 20, 40, 60, 80, 100])
         suspicious_range = _is_distribution_too_narrow(overall)
 
         return {
@@ -681,12 +683,61 @@ class AnalyticsService:
                 "speech_vs_knowledge": round(correlation, 4) if correlation is not None else None,
             },
             "score_distribution": distribution,
+            "knowledge_distribution": knowledge_distribution,
+            "speech_distribution": speech_distribution,
             "scoring_health": {
                 "n_samples": len(overall),
                 "is_too_narrow": suspicious_range,
                 "note": "If most scores cluster in a narrow range (for example 70-80), scoring calibration may need review.",
             },
         }
+
+    async def get_roles_performance_summary(
+        self,
+        start_date: datetime.date | None = None,
+        end_date: datetime.date | None = None,
+    ) -> list[dict[str, Any]]:
+        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date)
+        reports = await self._reports_by_interview([i.id for i in interviews])
+        summaries = await self._summary_reports_by_interview([i.id for i in interviews])
+
+        roles_data = {}
+        role_counts = {}
+        for interview in interviews:
+            role = interview.track or "Unknown"
+            role_counts[role] = role_counts.get(role, 0) + 1
+            if role not in roles_data:
+                roles_data[role] = {"overall": [], "knowledge": [], "speech": []}
+
+            report = reports.get(interview.id)
+            summary = summaries.get(interview.id)
+            
+            s = _extract_speech_score(report, summary)
+            k = _extract_knowledge_score(report, summary)
+            o = _extract_overall_score(report, summary)
+            
+            if s is not None:
+                roles_data[role]["speech"].append(s)
+            if k is not None:
+                roles_data[role]["knowledge"].append(k)
+            if o is not None:
+                roles_data[role]["overall"].append(o)
+
+        results = []
+        for role, data in roles_data.items():
+            avg_overall = sum(data["overall"]) / len(data["overall"]) if data["overall"] else None
+            avg_knowledge = sum(data["knowledge"]) / len(data["knowledge"]) if data["knowledge"] else None
+            avg_speech = sum(data["speech"]) / len(data["speech"]) if data["speech"] else None
+            
+            results.append({
+                "role": role,
+                "total_interviews": role_counts.get(role, 0),
+                "avg_overall_score": round(avg_overall, 2) if avg_overall is not None else None,
+                "avg_knowledge_score": round(avg_knowledge, 2) if avg_knowledge is not None else None,
+                "avg_speech_score": round(avg_speech, 2) if avg_speech is not None else None,
+            })
+            
+        return results
 
     async def get_alerts(
         self,

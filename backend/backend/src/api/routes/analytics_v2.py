@@ -34,6 +34,7 @@ from src.models.schemas.analytics_v2 import (
     ForecastResponse,
     FunnelResponse,
     FunnelStage,
+    RolePerformanceSummaryResponse,
     GlobalSearchResponse,
     HeatmapCell,
     HeatmapResponse,
@@ -541,6 +542,7 @@ async def get_dashboard_score_distribution(
     role: str | None = None,
     difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
+    metric: str = fastapi.Query("overall", description="Metric to view: overall, knowledge, or speech"),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -553,8 +555,34 @@ async def get_dashboard_score_distribution(
         difficulty=difficulty.value if difficulty else None,
         college=college,
     )
-    buckets = _extract_distribution_buckets(scoring.get("score_distribution", []))
+    
+    dist_key = "score_distribution"
+    if metric == "knowledge":
+        dist_key = "knowledge_distribution"
+    elif metric == "speech":
+        dist_key = "speech_distribution"
+        
+    buckets = _extract_distribution_buckets(scoring.get(dist_key, []))
     return DistributionResponse(chart_type="histogram", buckets=buckets)
+
+
+@router.get(
+    "/roles/performance-summary",
+    response_model=RolePerformanceSummaryResponse,
+    status_code=200,
+    summary="Get role performance summary",
+    description="Returns aggregated scores (overall, knowledge, speech) broken down by job role.",
+)
+async def get_roles_performance_summary_endpoint(
+    start_date: datetime.date | None = None,
+    end_date: datetime.date | None = None,
+    current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    del current_user
+    service = AnalyticsService(session)
+    results = await service.get_roles_performance_summary(start_date=start_date, end_date=end_date)
+    return RolePerformanceSummaryResponse(roles=results)
 
 
 @router.get(

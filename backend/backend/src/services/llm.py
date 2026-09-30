@@ -1470,15 +1470,36 @@ async def generate_interview_questions_with_llm(
     structured_items: list[dict[str, Any]] | None = None
     total = max(1, min(50, count or 3))
 
+    track_lower = track.lower()
+    if "data" in track_lower:
+        cat_mix = (
+            "- Data Engineering & Querying: 2 questions\n"
+            "- Analysis & Insights: 2 questions\n"
+            "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n"
+        )
+        cat_options = "'Data Engineering & Querying', 'Analysis & Insights', or 'Behavioral'"
+    elif "design" in track_lower or "ui" in track_lower or "ux" in track_lower:
+        cat_mix = (
+            "- Core design: 2 questions\n"
+            "- Design Strategy: 2 questions\n"
+            "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n"
+        )
+        cat_options = "'Core design', 'Design Strategy', or 'Behavioral'"
+    else:
+        cat_mix = (
+            "- Tech (core domain technical questions): 2 questions\n"
+            "- Tech Allied (related tools, architecture, databases, or workflow): 2 questions\n"
+            "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n"
+        )
+        cat_options = "'tech', 'tech_allied', or 'behavioral'"
+
     sys_prompt = (
         "You are an expert technical interviewer generating a set of exactly {count} interview questions for a candidate in the {track} role.\n\n"
         "STRICT CATEGORY DISTRIBUTION MANDATE:\n"
         "You MUST generate the questions following this EXACT category mix:\n"
-        "- Tech (core domain technical questions): 2 questions\n"
-        "- Tech Allied (related tools, architecture, databases, or workflow): 2 questions\n"
-        "- Behavioral (soft skills, past conflict, team collaboration, STAR method): 1 question\n\n"
+        f"{cat_mix}\n"
         "RULES FOR QUESTION GENERATION:\n"
-        "1. The 'category' field for each item MUST strictly be set to one of: 'tech', 'tech_allied', or 'behavioral'.\n"
+        f"1. The 'category' field for each item MUST strictly be set to one of: {cat_options}.\n"
         "2. Ensure questions are suitable for spoken verbal answers (no coding or writing code).\n"
         "3. Ask deep, targeted technical and situational questions that require thoughtful answers.\n"
         "4. Return ONLY valid JSON with key 'items' containing array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered.\n"
@@ -1535,14 +1556,16 @@ async def generate_interview_questions_with_llm(
         "No preambles, no numbering in the JSON itself",
         "Questions should be single sentences when possible",
         "Avoid duplicate or trivial questions",
-        "Each item must include a 'category' of tech | tech_allied | behavioral",
+        f"Each item must include a 'category' of {cat_options}",
         "Behavioral questions must come from the provided behavioral topics and probe for specific actions/decisions",
-        "Tech-allied questions should be related to the candidate's experience/skills when available",
         "Vary topics and ensure depth appropriate to difficulty; do not ask purely opinion-based questions",
         "Use a mix of the provided archetypes to ensure variety (e.g., concept, trade-offs, debug, design)",
         "Follow the depth guidelines for the given difficulty",
         "Ask deep questions but make sure they have a clear, specific answer"
     ]
+    if not ("data" in track_lower or "design" in track_lower or "ui" in track_lower or "ux" in track_lower):
+        constraints.insert(5, "Tech-allied questions should be related to the candidate's experience/skills when available")
+
     if exclude_list:
         constraints.append(f"Do NOT generate any questions similar or identical to these existing questions: {exclude_list}")
 
@@ -1553,11 +1576,7 @@ async def generate_interview_questions_with_llm(
         "difficulty": (difficulty or "medium"),
         # Category mix and topics per product requirements
         "categories": {
-            "definitions": {
-                "tech": "Core technical questions for the target role",
-                "tech_allied": "Technical questions allied to the candidate's background/experience",
-                "behavioral": "Behavioral questions from the provided list",
-            },
+            "definitions": definitions,
             "ratio": ratio or {"tech": 2, "tech_allied": 2, "behavioral": 1},
         },
         # Only pass a random subset of topics so the model focuses and varies questions over runs
