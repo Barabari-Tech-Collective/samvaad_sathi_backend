@@ -154,9 +154,23 @@ class BackendBaseSettings(BaseSettings):
     # auth-service issues one token type across every Barabari product using a shared
     # JWT secret, and the token carries no audience/product claim - so a token minted
     # for another product, or for an ADMIN/OWNER of the admin panel, verifies here just
-    # as well as a student's. Samvaad Saathi is a student-facing product, so it accepts
-    # only this role. Empty disables the check.
-    SSO_REQUIRED_ROLE: str = decouple.config("SSO_REQUIRED_ROLE", cast=str, default="STUDENT")  # type: ignore
+    # as well as a student's. This is the allow-list of roles that may authenticate.
+    #
+    # STUDENT alone is not enough: the /v2/analytics dashboard is embedded in the
+    # Sampark Saathi admin console and called with a staff token, so gating on STUDENT
+    # made those endpoints unreachable by anyone - get_current_admin_user demands an
+    # admin while this check refused every admin token. Admins are admitted here and
+    # then still have to satisfy get_current_admin_user (is_admin / ADMIN_EMAILS) to
+    # read cross-student data; student-level routes keep their own ownership checks.
+    #
+    # Comma-separated, case-insensitive. Both this and SSO_REQUIRED_ROLE default to
+    # empty so that _allowed_roles() can tell "unset" from "deliberately set", and
+    # falls back to DEFAULT_SSO_ALLOWED_ROLES when neither is configured.
+    SSO_ALLOWED_ROLES: str = decouple.config("SSO_ALLOWED_ROLES", cast=str, default="")  # type: ignore
+    # Superseded by SSO_ALLOWED_ROLES. Retained so an environment still setting the old
+    # single-value variable keeps the behaviour it has today: it is consulted only when
+    # SSO_ALLOWED_ROLES is unset. New deployments should set SSO_ALLOWED_ROLES.
+    SSO_REQUIRED_ROLE: str = decouple.config("SSO_REQUIRED_ROLE", cast=str, default="")  # type: ignore
 
     # Trust X-Forwarded-Proto/-For from the reverse proxy in front of this app. Correct
     # for Render and for nginx on EC2, where the proxy is the only way in. Set False
