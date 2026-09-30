@@ -168,6 +168,10 @@ class CollegesFilterResponse(BaseSchemaModel):
     colleges: list[str]
 
 
+class RolesFilterResponse(BaseSchemaModel):
+    roles: list[str]
+
+
 class GlobalSearchResponse(BaseSchemaModel):
     students: list[dict]
     colleges: list[dict]

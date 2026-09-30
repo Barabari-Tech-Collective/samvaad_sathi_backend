@@ -752,6 +752,15 @@ class AnalyticsService:
             
         return results
 
+    async def get_role_filters(self) -> list[str]:
+        # The frontend filter should only display roles that have actual interview data.
+        # This inherently covers both static roles (from legacy system) and dynamic 
+        # job_profile roles, as long as a student has interviewed for them.
+        stmt = sqlalchemy.select(Interview.track).where(Interview.track.is_not(None)).distinct()
+        roles = list((await self._db.execute(stmt)).scalars().all())
+        
+        return sorted([r for r in roles if r])
+
     async def get_alerts(
         self,
         *,

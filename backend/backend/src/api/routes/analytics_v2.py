@@ -25,6 +25,7 @@ from src.models.db.user import User
 from src.models.db.analytics_event import AnalyticsEvent
 from src.models.schemas.analytics_v2 import (
     CollegesFilterResponse,
+    RolesFilterResponse,
     CollegesSummaryResponse,
     DashboardOverviewResponse,
     DashboardTopListResponse,
@@ -867,6 +868,16 @@ async def get_student_college_filters(
     stmt = sqlalchemy.select(User.university).where(User.university.is_not(None)).distinct().order_by(User.university.asc())
     colleges = [row[0] for row in (await session.execute(stmt)).all() if row[0]]
     return CollegesFilterResponse(colleges=colleges)
+
+
+@router.get("/roles/filters", response_model=RolesFilterResponse, status_code=200, summary="List available role filters", description="Reasoning: ensures UI uses both static and dynamic role filter options. Output: distinct role list.")
+async def get_analytics_role_filters(
+    _current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    service = AnalyticsService(session)
+    roles = await service.get_role_filters()
+    return RolesFilterResponse(roles=roles)
 
 
 @router.get(
