@@ -5,7 +5,14 @@ import sqlalchemy.orm
 from sqlalchemy.orm import Mapped as SQLAlchemyMapped, mapped_column as sqlalchemy_mapped_column
 from sqlalchemy.sql import functions as sqlalchemy_functions
 from sqlalchemy.dialects.postgresql import JSONB
+from enum import Enum as _Enum
 from src.repository.table import Base
+
+class JobProfileStatus(str, _Enum):
+    DRAFT = "draft"
+    UNDER_REVIEW = "under_review"
+    PUBLISHED = "published"
+    CHANGES_REQUESTED = "changes_requested"
 
 class JobProfile(Base):
     __tablename__ = "job_profile"

@@ -298,7 +298,7 @@ async def delete_job_profile(
     current_user=fastapi.Depends(_fake_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
 ) -> JobProfileDeleteResponse:
-    deleted = await job_profile_repo.delete_profile(profile_id=job_profile_id)
+    deleted = await job_profile_repo.delete(job_profile_id=job_profile_id)
     if not deleted:
         raise fastapi.HTTPException(
             status_code=404,
@@ -1120,7 +1120,7 @@ client = TestClient(_app)
 
 # Mock model helper representing ORM
 class MockJobProfileModel:
-    def __init__(self, id, job_name, job_description, created_at=None, skills=None, experience_level=None):
+    def __init__(self, id, job_name, job_description, created_at=None, skills=None, experience_level=None, status="draft"):
         self.id = id
         self.job_name = job_name
         self.job_description = job_description or ""
@@ -1128,6 +1128,11 @@ class MockJobProfileModel:
         self.experience_level = experience_level
         self.created_at = created_at or datetime.datetime.now(datetime.timezone.utc)
         self.updated_at = self.created_at
+        self.status = status
+        self.company_name = None
+        self.additional_context = None
+        self.category = None
+        self.employment_type = None
 
     @property
     def title(self) -> str:
@@ -1957,21 +1962,21 @@ def test_delete_question_not_found():
 
 # 9. DELETE /api/v2/job-profiles/{id}
 def test_delete_job_profile_success():
-    _mock_repo.delete_profile = AsyncMock(return_value=True)
+    _mock_repo.delete = AsyncMock(return_value=True)
     response = client.delete("/api/v2/job-profiles/123")
     assert response.status_code == 200
     data = response.json()
     assert data["deleted"] is True
     assert data["jobProfileId"] == 123
-    _mock_repo.delete_profile.assert_called_once_with(profile_id=123)
+    _mock_repo.delete.assert_called_once_with(job_profile_id=123)
 
 
 def test_delete_job_profile_not_found():
-    _mock_repo.delete_profile = AsyncMock(return_value=False)
+    _mock_repo.delete = AsyncMock(return_value=False)
     response = client.delete("/api/v2/job-profiles/999")
     assert response.status_code == 404
     assert "not found" in response.json()["detail"]
-    _mock_repo.delete_profile.assert_called_once_with(profile_id=999)
+    _mock_repo.delete.assert_called_once_with(job_profile_id=999)
 
 
 

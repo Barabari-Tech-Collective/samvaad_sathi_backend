@@ -1113,6 +1113,8 @@ class QuestionsItemLLM(BaseItemLLM):
     category: str | None = None  # tech | tech_allied | behavioral
     keywords: list[str] | None = None
     concepts_covered: list[str] | None = None
+    expected_answer: str | None = None
+    example_output: str | None = None
 
 
 class QuestionsResponseLLM(pydantic.BaseModel):
@@ -1470,8 +1472,10 @@ async def generate_interview_questions_with_llm(
     structured_items: list[dict[str, Any]] | None = None
     total = max(1, min(50, count or 3))
 
-    track_lower = track.lower()
-    if "data" in track_lower:
+    track_words = set(track.lower().replace("-", " ").replace("_", " ").split())
+    job_category = (influence.get("category") or "").lower() if influence else ""
+
+    if job_category == "data" or "data" in track_words:
         cat_mix = (
             "- Data Engineering & Querying (data_engineering_querying): 2 questions\n"
             "- Analysis & Insights (analysis_insights): 2 questions\n"
@@ -1484,7 +1488,7 @@ async def generate_interview_questions_with_llm(
             "behavioral": "Behavioral questions from the provided list"
         }
         default_ratio = {"data_engineering_querying": 2, "analysis_insights": 2, "behavioral": 1}
-    elif "design" in track_lower or "ui" in track_lower or "ux" in track_lower:
+    elif job_category == "design" or "design" in track_words or "ui" in track_words or "ux" in track_words:
         cat_mix = (
             "- Core design (core_design): 2 questions\n"
             "- Design Strategy (design_strategy): 2 questions\n"
@@ -1520,7 +1524,7 @@ async def generate_interview_questions_with_llm(
         f"1. The 'category' field for each item MUST strictly be set to one of: {cat_options}.\n"
         "2. Ensure questions are suitable for spoken verbal answers (no coding or writing code).\n"
         "3. Ask deep, targeted technical and situational questions that require thoughtful answers.\n"
-        "4. Return ONLY valid JSON with key 'items' containing array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered.\n"
+        "4. Return ONLY valid JSON with key 'items' containing array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output.\n"
         "5. The 'keywords' array MUST contain at most 2 keywords."
     ).format(count=total, track=track)
         # "You are an expert interviewer. Generate concise, specific interview questions for a candidate. "
@@ -1581,8 +1585,8 @@ async def generate_interview_questions_with_llm(
         "Follow the depth guidelines for the given difficulty",
         "Ask deep questions but make sure they have a clear, specific answer"
     ]
-    if not ("data" in track_lower or "design" in track_lower or "ui" in track_lower or "ux" in track_lower):
-        constraints.insert(5, "Tech-allied questions should be related to the candidate's experience/skills when available")
+    if not (job_category == "data" or "data" in track_words or job_category == "design" or "design" in track_words or "ui" in track_words or "ux" in track_words):
+        constraints.append("Tech-allied questions should be related to the candidate's experience/skills when available")
 
     if exclude_list:
         constraints.append(f"Do NOT generate any questions similar or identical to these existing questions: {exclude_list}")
@@ -1635,6 +1639,8 @@ async def generate_interview_questions_with_llm(
                         "category": it.category,
                         "keywords": (it.keywords or [])[:2],
                         "concepts_covered": it.concepts_covered or [],
+                        "expected_answer": it.expected_answer,
+                        "example_output": it.example_output,
                     }
                     for it in result.items
                 ]

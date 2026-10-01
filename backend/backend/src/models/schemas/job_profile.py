@@ -1,8 +1,9 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Literal
 import datetime
 import pydantic
 from src.models.schemas.base import BaseSchemaModel
+from src.models.db.job_profile import JobProfileStatus
 
 # --- feature/roles-page-api schemas ---
 class JobProfileBase(BaseSchemaModel):
@@ -63,7 +64,7 @@ class JobProfileResponse(JobProfileBase):
     )
     created_at: datetime.datetime
     
-    status: str
+    status: JobProfileStatus
     easy_questions: int = 0
     medium_questions: int = 0
     hard_questions: int = 0
@@ -159,7 +160,7 @@ class JobProfileExtractSkillsResponse(BaseSchemaModel):
     skills: List[str]
 
 class JobProfileAdminReviewRequest(BaseSchemaModel):
-    status: str
+    status: JobProfileStatus
     adminComment: Optional[str] = pydantic.Field(
         default=None,
         alias="adminComment",
@@ -222,6 +223,8 @@ class JobProfileGeneratedQuestionItem(BaseSchemaModel):
 class JobProfileGenerateQuestionsResponse(BaseSchemaModel):
     job_profile_id: str
     total_questions: int
+    requested_total: int = 0
+    warning: Optional[str] = None
     questions: List[JobProfileGeneratedQuestionItem]
 
 

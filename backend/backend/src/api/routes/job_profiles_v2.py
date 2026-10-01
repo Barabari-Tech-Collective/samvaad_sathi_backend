@@ -599,7 +599,9 @@ async def extract_skills(
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
 
 
-# Global semaphore to limit concurrent LLM requests across all users/levels
+# Global semaphore to limit concurrent LLM requests across all users/levels.
+# Note: This is a per-process cap. If running with multiple uvicorn workers,
+# the real cap is 5 * workers.
 GLOBAL_LLM_SEMAPHORE = asyncio.Semaphore(5)
 
 @router.post(
@@ -663,15 +665,16 @@ async def generate_questions_v2(
         max_retries = 3
         error = None
         for attempt in range(max_retries):
-            questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
-                track=track,
-                context_text=context_text,
-                count=b_count,
-                difficulty=difficulty,
-                syllabus_topics=topics,
-                ratio=ratio,
-                influence=current_influence,
-            )
+            async with GLOBAL_LLM_SEMAPHORE:
+                questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
+                    track=track,
+                    context_text=context_text,
+                    count=b_count,
+                    difficulty=difficulty,
+                    syllabus_topics=topics,
+                    ratio=ratio,
+                    influence=current_influence,
+                )
             if not error and structured_items:
                 return structured_items
             logger.warning(f"Batch failed on attempt {attempt+1}/{max_retries}: {error}")
@@ -682,10 +685,9 @@ async def generate_questions_v2(
     async def fetch_batch_with_semaphore(b_count, batch_idx, l, difficulty, topics, ratio, current_influence):
         logger.info(f"Batch {batch_idx} Level {l.level}: REQUESTING {b_count} questions.")
         try:
-            async with GLOBAL_LLM_SEMAPHORE:
-                structured_items = await safe_fetch_batch(
-                    track, context_text, b_count, difficulty, topics, ratio, current_influence
-                )
+            structured_items = await safe_fetch_batch(
+                track, context_text, b_count, difficulty, topics, ratio, current_influence
+            )
             logger.info(f"Batch {batch_idx} Level {l.level}: RECEIVED {len(structured_items)} questions.")
             return structured_items
         except Exception as e:
@@ -731,6 +733,7 @@ async def generate_questions_v2(
         
         influence = {
             "target_role": role,
+            "category": profile.category,
             "difficulty": difficulty,
             "skills": skills_list,
             "experience_level": profile.experience_level,
@@ -743,7 +746,11 @@ async def generate_questions_v2(
         level_generated_items = []
         batch_idx_offset = 0
         
-        while remaining > 0:
+        max_passes = 3
+        passes = 0
+        
+        while remaining > 0 and passes < max_passes:
+            passes += 1
             # Plan batches for the current remaining count
             batches = []
             temp_remaining = remaining
@@ -815,9 +822,15 @@ async def generate_questions_v2(
         for q in db_questions
     ]
 
+    warning = None
+    if len(response_items) < total_requested:
+        warning = f"Requested {total_requested} questions, but only generated {len(response_items)}. The AI model may be returning partial results."
+
     return JobProfileGenerateQuestionsResponse(
         job_profile_id=str(profile.id),
         total_questions=len(response_items),
+        requested_total=total_requested,
+        warning=warning,
         questions=response_items
     )
 
