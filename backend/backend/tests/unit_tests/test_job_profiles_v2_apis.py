@@ -2587,9 +2587,87 @@ def test_submit_job_profile_admin_review_comment_only():
     )
 
 
+# --- Repository-level: update_review_status partial-update semantics ---------
+# These exercise JobProfileCRUDRepository.update_review_status directly rather than
+# through the route, because the route-level test mocks the repository out entirely
+# and so never runs the field-guard logic below.
+
+def _review_repo_with(profile):
+    """Minimal stand-in for AsyncSession: enough for update_review_status."""
+    from src.repository.crud.job_profile import JobProfileCRUDRepository
+
+    result = MagicMock()
+    result.scalar_one_or_none = MagicMock(return_value=profile)
+
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    session.commit = AsyncMock()
+    session.refresh = AsyncMock()
+
+    return JobProfileCRUDRepository(session)
 
 
+def _review_profile(**overrides):
+    from src.models.db.job_profile import JobProfile
+
+    fields = dict(
+        id=123,
+        job_name="Test",
+        job_description="Desc",
+        created_at=datetime.datetime.now(datetime.timezone.utc),
+        updated_at=datetime.datetime.now(datetime.timezone.utc),
+        status="under_review",
+        admin_comment=None,
+    )
+    fields.update(overrides)
+    return JobProfile(**fields)
 
 
+@pytest.mark.asyncio
+async def test_update_review_status_keeps_existing_comment_when_only_status_sent():
+    """Publishing without re-sending the comment must not erase the admin's concerns."""
+    from src.models.db.job_profile import JobProfileStatus
 
+    profile = _review_profile(admin_comment="Needs clearer scoring rubric")
+    repo = _review_repo_with(profile)
+
+    updated = await repo.update_review_status(
+        profile_id=123,
+        status=JobProfileStatus.PUBLISHED,
+        admin_comment=None,
+    )
+
+    assert updated.status == JobProfileStatus.PUBLISHED
+    assert updated.admin_comment == "Needs clearer scoring rubric"
+
+
+@pytest.mark.asyncio
+async def test_update_review_status_keeps_existing_status_when_only_comment_sent():
+    """The comment-only path must leave the role where it is."""
+    profile = _review_profile(status="under_review")
+    repo = _review_repo_with(profile)
+
+    updated = await repo.update_review_status(
+        profile_id=123,
+        status=None,
+        admin_comment="Adding concerns",
+    )
+
+    assert updated.status == "under_review"
+    assert updated.admin_comment == "Adding concerns"
+
+
+@pytest.mark.asyncio
+async def test_update_review_status_empty_comment_clears_it():
+    """An explicit empty string is how a caller removes a comment."""
+    profile = _review_profile(admin_comment="Old note")
+    repo = _review_repo_with(profile)
+
+    updated = await repo.update_review_status(
+        profile_id=123,
+        status=None,
+        admin_comment="",
+    )
+
+    assert updated.admin_comment == ""
 
