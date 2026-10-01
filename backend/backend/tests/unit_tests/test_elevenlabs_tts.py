@@ -31,7 +31,7 @@ class _FakeAsyncElevenLabs:
 
 
 @pytest.mark.asyncio
-async def test_generate_tts_audio_joins_async_chunks(monkeypatch):
+async def test_generate_tts_audio_joins_async_chunks(monkeypatch, monkeypatch):
     monkeypatch.setattr(elevenlabs_tts.settings, "ELEVENLABS_API_KEY", "fake-key")
     monkeypatch.setattr(elevenlabs_tts.settings, "ELEVENLABS_VOICE_ID", "fake-voice")
 
@@ -50,7 +50,7 @@ async def test_generate_tts_audio_joins_async_chunks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_tts_audio_missing_api_key():
+async def test_generate_tts_audio_missing_api_key(monkeypatch, ):
     monkeypatch_value = elevenlabs_tts.settings.ELEVENLABS_API_KEY
     elevenlabs_tts.settings.ELEVENLABS_API_KEY = ""
     try:
