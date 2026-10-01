@@ -581,6 +581,10 @@ async def get_roles_performance_summary_endpoint(
     _current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    if start_date is None and end_date is None:
+        end_date = datetime.date.today()
+        start_date = end_date - datetime.timedelta(days=90)
+        
     service = AnalyticsService(session)
     results = await service.get_roles_performance_summary(start_date=start_date, end_date=end_date)
     return RolePerformanceSummaryResponse(roles=results)

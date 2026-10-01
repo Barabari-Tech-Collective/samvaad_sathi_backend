@@ -69,7 +69,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             additional_context=additional_context,
             category=category,
             employment_type=employment_type,
-            status="draft",
+            status=JobProfileStatus.DRAFT,
         )
         self.async_session.add(new_profile)
         await self.async_session.commit()
@@ -131,7 +131,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             skills=skills,
             additional_context=additional_context,
             created_by=created_by,
-            status="draft",
+            status=JobProfileStatus.DRAFT,
         )
         self.async_session.add(profile)
         await self.async_session.commit()
@@ -150,7 +150,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         query = await self.async_session.execute(statement=stmt)
         return query.scalar_one_or_none()
 
-    async def update_review_status(self, profile_id: int, status: str, admin_comment: str | None) -> JobProfile | None:
+    async def update_review_status(self, profile_id: int, status: JobProfileStatus | None, admin_comment: str | None) -> JobProfile | None:
         from sqlalchemy.orm import selectinload
         stmt = sqlalchemy.select(JobProfile).options(selectinload(JobProfile.questions)).where(JobProfile.id == profile_id)
         query = await self.async_session.execute(statement=stmt)
@@ -158,7 +158,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         if not profile:
             return None
             
-        profile.status = status
+        if status is not None:
+            profile.status = status
         profile.admin_comment = admin_comment
         await self.async_session.commit()
         await self.async_session.refresh(profile)
@@ -266,7 +267,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         if not profile:
             return None
         
-        profile.status = "under_review"
+        profile.status = JobProfileStatus.UNDER_REVIEW
         profile.submitted_at = datetime.datetime.now(datetime.timezone.utc)
         self.async_session.add(profile)
         await self.async_session.commit()

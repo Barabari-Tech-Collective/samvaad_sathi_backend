@@ -58,6 +58,7 @@ class UserWithToken(BaseSchemaModel):
     name: str
     created_at: datetime.datetime
     is_onboarded: bool
+    is_admin: bool = False
     degree: str | None
     university: str | None
     target_position: str | None

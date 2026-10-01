@@ -147,28 +147,6 @@ async def get_session_jwt(request: Request):
     return {"token": token}
 
 
-@router.post("/refresh")
-async def refresh_access_token(
-    refresh_token: str = fastapi.Form(...),
-    user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
-    session_repo: SessionCRUDRepository = fastapi.Depends(get_repository(repo_type=SessionCRUDRepository)),
-):
-    # Validate refresh token exists and is not expired
-    session = await session_repo.get_session_by_token(token=refresh_token)
-    if not session or session.expiry < datetime.datetime.now(datetime.timezone.utc):
-        raise fastapi.HTTPException(status_code=401, detail="Invalid or expired refresh token")
 
-    user = await user_repo.get_user_by_id(user_id=session.user_id)
-    if not user:
-        raise fastapi.HTTPException(status_code=401, detail="User not found")
-
-    # Rotate refresh token: create a new one and delete the previous session
-    new_refresh = await session_repo.create_session(
-        user_id=user.id, expiry_minutes=settings.REFRESH_TOKEN_EXPIRY_MINUTES
-    )
-    await session_repo.delete_session_by_token(token=refresh_token)
-
-    new_access = jwt_generator.generate_access_token_for_user(user=user)
-    return {"token": new_access, "refresh_token": new_refresh.token}
 
 

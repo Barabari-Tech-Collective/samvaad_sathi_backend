@@ -160,7 +160,7 @@ class JobProfileExtractSkillsResponse(BaseSchemaModel):
     skills: List[str]
 
 class JobProfileAdminReviewRequest(BaseSchemaModel):
-    status: JobProfileStatus
+    status: Optional[JobProfileStatus] = None
     adminComment: Optional[str] = pydantic.Field(
         default=None,
         alias="adminComment",
@@ -201,11 +201,11 @@ class JobProfileDeleteResponse(BaseSchemaModel):
 
 # --- Generate Questions Schemas ---
 class JobProfileQuestionLevelRequest(BaseSchemaModel):
-    level: int
-    count: int
+    level: int = pydantic.Field(ge=1, le=4)
+    count: int = pydantic.Field(ge=1, le=50)
 
 class JobProfileGenerateQuestionsRequest(BaseSchemaModel):
-    levels: List[JobProfileQuestionLevelRequest]
+    levels: List[JobProfileQuestionLevelRequest] = pydantic.Field(max_length=4)
     knowledge_reference_context: Optional[str] = None
 
 class JobProfileGeneratedQuestionItem(BaseSchemaModel):

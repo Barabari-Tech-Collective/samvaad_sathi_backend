@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # Import schemas and repository
 from src.models.schemas.job_profile import (
+    JobProfileAdminReviewRequest,
     JobProfileSummaryResponse, 
     JobProfileResponse, 
     JobProfileCreateV2,
@@ -237,6 +238,69 @@ async def get_job_profile_review(
         question_summary=question_summary,
         status="draft"
     )
+
+
+@_app.patch(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileResponse,
+    status_code=200,
+)
+async def update_job_profile_review(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileResponse:
+    updated_profile = await job_profile_repo.update_review_status(
+        profile_id=job_profile_id,
+        status=payload.status,
+        admin_comment=payload.adminComment
+    )
+    if not updated_profile:
+        raise fastapi.HTTPException(status_code=404, detail="Not found")
+    return JobProfileResponse.model_validate(updated_profile)
+
+
+
+@_app.patch(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileResponse,
+    status_code=200,
+)
+async def update_job_profile_review(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileResponse:
+    updated_profile = await job_profile_repo.update_review_status(
+        profile_id=job_profile_id,
+        status=payload.status,
+        admin_comment=payload.adminComment
+    )
+    if not updated_profile:
+        raise fastapi.HTTPException(status_code=404, detail="Not found")
+    return JobProfileResponse.model_validate(updated_profile)
+
+
+
+@_app.patch(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileResponse,
+    status_code=200,
+)
+async def update_job_profile_review(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileResponse:
+    updated_profile = await job_profile_repo.update_review_status(
+        profile_id=job_profile_id,
+        status=payload.status,
+        admin_comment=payload.adminComment
+    )
+    if not updated_profile:
+        raise fastapi.HTTPException(status_code=404, detail="Not found")
+    return JobProfileResponse.model_validate(updated_profile)
+
 
 
 @_app.post(
@@ -1573,8 +1637,7 @@ def test_generate_questions_invalid_level():
         ]
     }
     response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
-    assert response.status_code == 400
-    assert "Invalid level" in response.json()["detail"]
+    assert response.status_code == 422
 
 
 def test_generate_questions_negative_count():
@@ -1586,8 +1649,7 @@ def test_generate_questions_negative_count():
         ]
     }
     response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
-    assert response.status_code == 400
-    assert "Count cannot be negative" in response.json()["detail"]
+    assert response.status_code == 422
 
 
 def test_get_questions_success():
@@ -2477,6 +2539,31 @@ async def test_generate_interview_questions_llm_prompt_with_knowledge_base():
     finally:
         settings.OPENAI_API_KEY = orig_key
 
+def test_submit_job_profile_admin_review_comment_only():
+    from src.models.db.job_profile import JobProfile
+    import datetime
+    profile = JobProfile(
+        id=123,
+        job_name="Test",
+        job_description="Desc",
+        created_at=datetime.datetime.now(datetime.timezone.utc),
+        updated_at=datetime.datetime.now(datetime.timezone.utc),
+        status="under_review"
+    )
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.update_review_status = AsyncMock(return_value=profile)
+    
+    response = client.patch(
+        "/api/v2/job-profiles/123/review",
+        json={"adminComment": "Looks good, just minor edits"}
+    )
+    
+    assert response.status_code == 200
+    _mock_repo.update_review_status.assert_called_once_with(
+        profile_id=123,
+        status=None,
+        admin_comment="Looks good, just minor edits"
+    )
 
 
 
