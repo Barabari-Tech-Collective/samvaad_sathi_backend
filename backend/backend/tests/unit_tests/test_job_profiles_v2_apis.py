@@ -303,6 +303,27 @@ async def update_job_profile_review(
 
 
 
+@_app.patch(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileResponse,
+    status_code=200,
+)
+async def update_job_profile_review(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileResponse:
+    updated_profile = await job_profile_repo.update_review_status(
+        profile_id=job_profile_id,
+        status=payload.status,
+        admin_comment=payload.adminComment
+    )
+    if not updated_profile:
+        raise fastapi.HTTPException(status_code=404, detail="Not found")
+    return JobProfileResponse.model_validate(updated_profile)
+
+
+
 @_app.post(
     path="/api/v2/job-profiles/{job_profile_id}/submit",
     response_model=JobProfileSubmitResponse,
