@@ -50,7 +50,7 @@ async def test_generate_tts_audio_joins_async_chunks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_tts_audio_missing_api_key():
+async def test_generate_tts_audio_missing_api_key(monkeypatch, ):
     monkeypatch_value = elevenlabs_tts.settings.ELEVENLABS_API_KEY
     elevenlabs_tts.settings.ELEVENLABS_API_KEY = ""
     try:

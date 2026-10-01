@@ -1,8 +1,11 @@
+import datetime
 import fastapi
+import pydantic
 import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
+from src.api.dependencies.admin import is_admin_user
 from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
@@ -76,6 +79,7 @@ async def register_user(
                                     name=user_name,
                                     created_at=user_created_at,
                                     is_onboarded=user_is_onboarded,
+                                    is_admin=is_admin_user(user),
                                     degree=None,
                                     university=None,
                                     target_position=None,
@@ -127,6 +131,7 @@ async def login_user(
                                     name=user_name,
                                     created_at=user_created_at,
                                     is_onboarded=user_is_onboarded,
+                                    is_admin=is_admin_user(user),
                                     degree=None,
                                     university=None,
                                     target_position=None,
@@ -136,6 +141,56 @@ async def login_user(
                                     skills=user.skills.get("items", []) if isinstance(getattr(user, "skills", None), dict) else [],
                                     company=None),
     )
+
+# How long a refresh token stays usable after being rotated away. Long enough to cover
+# a page that fires several requests at once and refreshes more than once; short enough
+# that a leaked token is not useful for long.
+REFRESH_ROTATION_GRACE_SECONDS = 15
+
+
+class TokenRefreshResponse(pydantic.BaseModel):
+    accessToken: str
+    refreshToken: str
+
+@router.post(
+    path="/refresh",
+    name="users:refresh",
+    response_model=TokenRefreshResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+)
+async def refresh_access_token(
+    refresh_token: str = fastapi.Form(...),
+    user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
+    session_repo: SessionCRUDRepository = fastapi.Depends(get_repository(repo_type=SessionCRUDRepository)),
+    _rate_limit: None = fastapi.Depends(
+        anonymous_rate_limiter(
+            key_prefix="refresh",
+            limit=settings.RATE_LIMIT_LOGIN_PER_MINUTE,
+            window_seconds=60,
+        )
+    ),
+):
+    # Validate refresh token exists and is not expired
+    session = await session_repo.get_session_by_token(token=refresh_token)
+    if not session or session.expiry < datetime.datetime.now(datetime.timezone.utc):
+        raise fastapi.HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    user = await user_repo.get_user_by_id(user_id=session.user_id)
+    if not user:
+        raise fastapi.HTTPException(status_code=401, detail="User not found")
+
+    # Rotate the refresh token, leaving the replaced one briefly valid so that requests
+    # already in flight with it still succeed rather than racing into a logout.
+    new_refresh = await session_repo.create_session(
+        user_id=user.id, expiry_minutes=settings.REFRESH_TOKEN_EXPIRY_MINUTES
+    )
+    await session_repo.expire_session_soon(session=session, grace_seconds=REFRESH_ROTATION_GRACE_SECONDS)
+    # Superseded tokens are expired rather than deleted, so without this the table only
+    # ever grows - and get_session_by_token above pays for it on every refresh.
+    await session_repo.delete_expired_sessions(user_id=user.id)
+
+    new_access = jwt_generator.generate_access_token_for_user(user=user)
+    return {"accessToken": new_access, "refreshToken": new_refresh.token}
 
 
 @router.get(
@@ -176,6 +231,7 @@ async def get_me(
             break
 
     token = jwt_generator.generate_access_token_for_user(user=current_user)
+    is_admin_flag = is_admin_user(current_user)
     return UserInResponse(
         user_id=current_user.id,
         authorized_user=UserWithToken(
@@ -185,6 +241,7 @@ async def get_me(
             name=current_user.name,
             created_at=current_user.created_at,
             is_onboarded=getattr(current_user, 'is_onboarded', False),
+            is_admin=is_admin_flag,
             degree=current_user.degree,
             university=current_user.university,
             target_position=current_user.target_position,

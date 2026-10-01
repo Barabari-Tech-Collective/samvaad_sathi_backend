@@ -1,0 +1,74 @@
+services:
+  - type: web
+    name: samvaad-sathi-backend-staging
+    env: python
+    region: oregon
+    plan: free
+    branch: staging
+    rootDir: backend/backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.main:backend_app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: STAGING
+      - key: PYTHON_VERSION
+        value: 3.13.0
+      - key: BACKEND_SERVER_HOST
+        sync: false
+      - key: BACKEND_SERVER_PORT
+        sync: false
+      - key: BACKEND_SERVER_WORKERS
+        sync: false
+      - key: POSTGRES_HOST
+        sync: false
+      - key: POSTGRES_DB
+        sync: false
+      - key: POSTGRES_PASSWORD
+        sync: false
+      - key: POSTGRES_USER
+        sync: false
+      - key: POSTGRES_USERNAME
+        sync: false
+      - key: DB_MAX_POOL_CON
+        sync: false
+      - key: DB_POOL_SIZE
+        sync: false
+      - key: DB_POOL_OVERFLOW
+        sync: false
+      - key: POSTGRES_PORT
+        sync: false
+      - key: POSTGRES_SCHEMA
+        sync: false
+      - key: DB_TIMEOUT
+        sync: false
+      - key: IS_DB_ECHO_LOG
+        sync: false
+      - key: IS_DB_FORCE_ROLLBACK
+        sync: false
+      - key: IS_DB_EXPIRE_ON_COMMIT
+        sync: false
+      - key: API_TOKEN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: BARABARI_AUTH_SERVICE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ASSEMBLYAI_API_KEY
+        sync: false
+      - key: JWT_MIN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: AUTH_SERVICE_JWT_SECRET
+        sync: false

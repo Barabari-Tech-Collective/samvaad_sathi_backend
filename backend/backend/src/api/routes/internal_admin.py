@@ -49,7 +49,7 @@ async def set_admin_status(
     except EntityDoesNotExist:
         raise fastapi.HTTPException(status_code=404, detail=f"No Samvaad Saathi account found for {payload.email}")
 
-    return {"email": user.email, "is_admin": user.is_admin}
+    return {"email": user.email, "is_admin": is_admin_user(user)}
 
 
 @router.get("/admins", dependencies=[fastapi.Depends(require_internal_super_admin_key)])

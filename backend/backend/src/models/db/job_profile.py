@@ -1,10 +1,18 @@
 from __future__ import annotations
 import datetime
 import sqlalchemy
+import sqlalchemy.orm
 from sqlalchemy.orm import Mapped as SQLAlchemyMapped, mapped_column as sqlalchemy_mapped_column
 from sqlalchemy.sql import functions as sqlalchemy_functions
 from sqlalchemy.dialects.postgresql import JSONB
+from enum import Enum as _Enum
 from src.repository.table import Base
+
+class JobProfileStatus(str, _Enum):
+    DRAFT = "draft"
+    UNDER_REVIEW = "under_review"
+    PUBLISHED = "published"
+    CHANGES_REQUESTED = "changes_requested"
 
 class JobProfile(Base):
     __tablename__ = "job_profile"
@@ -19,6 +27,7 @@ class JobProfile(Base):
     category: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(length=160), nullable=True)
     employment_type: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(length=64), nullable=True)
     status: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(length=32), nullable=False, server_default="draft")
+    admin_comment: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
     submitted_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True), nullable=True)
     
     created_by: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
@@ -35,6 +44,34 @@ class JobProfile(Base):
     )
 
     __mapper_args__ = {"eager_defaults": True}
+
+    questions = sqlalchemy.orm.relationship(
+        "JobProfileQuestion", 
+        primaryjoin="JobProfile.id == foreign(JobProfileQuestion.job_profile_id)",
+        lazy="selectin",
+        cascade="all, delete",
+        passive_deletes=True
+    )
+
+    @property
+    def easy_questions(self) -> int:
+        return sum(1 for q in self.questions if getattr(q, 'level', 0) == 1)
+
+    @property
+    def medium_questions(self) -> int:
+        return sum(1 for q in self.questions if getattr(q, 'level', 0) == 2)
+
+    @property
+    def hard_questions(self) -> int:
+        return sum(1 for q in self.questions if getattr(q, 'level', 0) == 3)
+
+    @property
+    def expert_questions(self) -> int:
+        return sum(1 for q in self.questions if getattr(q, 'level', 0) == 4)
+
+    @property
+    def total_questions(self) -> int:
+        return len(self.questions)
 
     @property
     def title(self) -> str:

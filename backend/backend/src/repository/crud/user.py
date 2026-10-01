@@ -158,7 +158,7 @@ class UserCRUDRepository(BaseCRUDRepository):
             raise EntityDoesNotExist("User does not exist!")
         # If column exists, set; otherwise ignore to be backward compatible
         if hasattr(user, "is_onboarded"):
-            user.is_onboarded = bool(value)
+            user.is_onboarded = value
             await self.async_session.commit()
             await self.async_session.refresh(user)
         return user  # type: ignore

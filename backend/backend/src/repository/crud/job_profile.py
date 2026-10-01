@@ -2,7 +2,7 @@ from src.models.db import JobProfileQuestion
 from typing import List, Optional
 import sqlalchemy
 from sqlalchemy import select, func
-from src.models.db.job_profile import JobProfile
+from src.models.db.job_profile import JobProfile, JobProfileStatus
 from src.repository.crud.base import BaseCRUDRepository
 
 class JobProfileCRUDRepository(BaseCRUDRepository):
@@ -14,13 +14,13 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         total_stmt = select(func.count()).select_from(JobProfile)
         total_count = (await self.async_session.execute(total_stmt)).scalar() or 0
         
-        pending_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == "under_review")
+        pending_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.UNDER_REVIEW)
         pending_count = (await self.async_session.execute(pending_stmt)).scalar() or 0
 
-        approved_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == "approved")
+        approved_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.PUBLISHED)
         approved_count = (await self.async_session.execute(approved_stmt)).scalar() or 0
 
-        rejected_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == "rejected")
+        rejected_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.CHANGES_REQUESTED)
         rejected_count = (await self.async_session.execute(rejected_stmt)).scalar() or 0
 
         return {
@@ -34,9 +34,14 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         self,
         *,
         category: Optional[str] = None,
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
+        is_admin: bool = False
     ) -> List[JobProfile]:
-        query = select(JobProfile).order_by(JobProfile.created_at.desc())
+        from sqlalchemy.orm import selectinload
+        query = select(JobProfile).options(selectinload(JobProfile.questions)).order_by(JobProfile.created_at.desc())
+        
+        if not is_admin:
+            query = query.where(JobProfile.status == JobProfileStatus.PUBLISHED)
         if category:
             query = query.where(JobProfile.category == category)
         if limit is not None:
@@ -64,22 +69,13 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             additional_context=additional_context,
             category=category,
             employment_type=employment_type,
-            status="draft",
+            status=JobProfileStatus.DRAFT,
         )
         self.async_session.add(new_profile)
         await self.async_session.commit()
         await self.async_session.refresh(new_profile)
         return new_profile
 
-    async def delete_profile(self, profile_id: int) -> bool:
-        query = select(JobProfile).where(JobProfile.id == profile_id)
-        result = await self.async_session.execute(query)
-        profile = result.scalar_one_or_none()
-        if profile:
-            await self.async_session.delete(profile)
-            await self.async_session.commit()
-            return True
-        return False
 
     async def update_profile(self, profile_id: int, update_data: dict) -> Optional[JobProfile]:
         profile = await self.get_by_id(job_profile_id=profile_id)
@@ -135,7 +131,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             skills=skills,
             additional_context=additional_context,
             created_by=created_by,
-            status="draft",
+            status=JobProfileStatus.DRAFT,
         )
         self.async_session.add(profile)
         await self.async_session.commit()
@@ -143,14 +139,36 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         return profile
 
     async def list_all(self, *, limit: int = 1000) -> list[JobProfile]:
-        stmt = sqlalchemy.select(JobProfile).order_by(JobProfile.id.desc()).limit(limit)
+        from sqlalchemy.orm import selectinload
+        stmt = sqlalchemy.select(JobProfile).options(selectinload(JobProfile.questions)).order_by(JobProfile.id.desc()).limit(limit)
         query = await self.async_session.execute(statement=stmt)
         return list(query.scalars().all())
 
     async def get_by_id(self, *, job_profile_id: int) -> JobProfile | None:
-        stmt = sqlalchemy.select(JobProfile).where(JobProfile.id == job_profile_id)
+        from sqlalchemy.orm import selectinload
+        stmt = sqlalchemy.select(JobProfile).options(selectinload(JobProfile.questions)).where(JobProfile.id == job_profile_id)
         query = await self.async_session.execute(statement=stmt)
         return query.scalar_one_or_none()
+
+    async def update_review_status(self, profile_id: int, status: JobProfileStatus | None, admin_comment: str | None) -> JobProfile | None:
+        from sqlalchemy.orm import selectinload
+        stmt = sqlalchemy.select(JobProfile).options(selectinload(JobProfile.questions)).where(JobProfile.id == profile_id)
+        query = await self.async_session.execute(statement=stmt)
+        profile = query.scalar_one_or_none()
+        if not profile:
+            return None
+            
+        # Both fields are optional so this stays a true partial update: omitting one must
+        # leave the stored value alone. Without the admin_comment guard, publishing a role
+        # without re-sending the comment wipes the concerns an admin recorded earlier.
+        # Passing an empty string is still how a caller clears it.
+        if status is not None:
+            profile.status = status
+        if admin_comment is not None:
+            profile.admin_comment = admin_comment
+        await self.async_session.commit()
+        await self.async_session.refresh(profile)
+        return profile
 
     async def delete(self, *, job_profile_id: int) -> bool:
         stmt = sqlalchemy.select(JobProfile).where(JobProfile.id == job_profile_id)
@@ -254,7 +272,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         if not profile:
             return None
         
-        profile.status = "under_review"
+        profile.status = JobProfileStatus.UNDER_REVIEW
         profile.submitted_at = datetime.datetime.now(datetime.timezone.utc)
         self.async_session.add(profile)
         await self.async_session.commit()

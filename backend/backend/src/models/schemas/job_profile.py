@@ -1,8 +1,9 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Literal
 import datetime
 import pydantic
 from src.models.schemas.base import BaseSchemaModel
+from src.models.db.job_profile import JobProfileStatus
 
 # --- feature/roles-page-api schemas ---
 class JobProfileBase(BaseSchemaModel):
@@ -55,7 +56,43 @@ class JobProfileUpdateV2(BaseSchemaModel):
 
 class JobProfileResponse(JobProfileBase):
     id: int
+    jobProfileId: Optional[int] = pydantic.Field(
+        default=None,
+        alias="jobProfileId",
+        validation_alias=pydantic.AliasChoices("id", "jobProfileId"),
+        serialization_alias="jobProfileId"
+    )
     created_at: datetime.datetime
+    
+    status: JobProfileStatus
+    easy_questions: int = 0
+    medium_questions: int = 0
+    hard_questions: int = 0
+    expert_questions: int = 0
+    advanced_questions: Optional[int] = pydantic.Field(
+        default=0,
+        alias="advanced_questions",
+        validation_alias=pydantic.AliasChoices("expert_questions", "advanced_questions"),
+        serialization_alias="advanced_questions"
+    )
+    totalQuestions: Optional[int] = pydantic.Field(
+        default=0,
+        alias="totalQuestions",
+        validation_alias=pydantic.AliasChoices("totalQuestions", "total_questions"),
+        serialization_alias="totalQuestions"
+    )
+    adminComment: Optional[str] = pydantic.Field(
+        default=None,
+        alias="adminComment",
+        validation_alias=pydantic.AliasChoices("adminComment", "admin_comment"),
+        serialization_alias="adminComment"
+    )
+    submittedAt: Optional[datetime.datetime] = pydantic.Field(
+        default=None,
+        alias="submittedAt",
+        validation_alias=pydantic.AliasChoices("submittedAt", "submitted_at"),
+        serialization_alias="submittedAt"
+    )
 
     @pydantic.computed_field
     @property
@@ -122,6 +159,14 @@ class JobProfileExtractSkillsRequest(BaseSchemaModel):
 class JobProfileExtractSkillsResponse(BaseSchemaModel):
     skills: List[str]
 
+class JobProfileAdminReviewRequest(BaseSchemaModel):
+    status: Optional[JobProfileStatus] = None
+    adminComment: Optional[str] = pydantic.Field(
+        default=None,
+        alias="adminComment",
+        validation_alias=pydantic.AliasChoices("adminComment", "admin_comment")
+    )
+
 # --- upstream/master schemas ---
 class JobProfileCreate(BaseSchemaModel):
     job_name: str = pydantic.Field(min_length=2, max_length=160)
@@ -156,11 +201,11 @@ class JobProfileDeleteResponse(BaseSchemaModel):
 
 # --- Generate Questions Schemas ---
 class JobProfileQuestionLevelRequest(BaseSchemaModel):
-    level: int
-    count: int
+    level: int = pydantic.Field(ge=1, le=4)
+    count: int = pydantic.Field(ge=1, le=50)
 
 class JobProfileGenerateQuestionsRequest(BaseSchemaModel):
-    levels: List[JobProfileQuestionLevelRequest]
+    levels: List[JobProfileQuestionLevelRequest] = pydantic.Field(max_length=4)
     knowledge_reference_context: Optional[str] = None
 
 class JobProfileGeneratedQuestionItem(BaseSchemaModel):
@@ -178,6 +223,8 @@ class JobProfileGeneratedQuestionItem(BaseSchemaModel):
 class JobProfileGenerateQuestionsResponse(BaseSchemaModel):
     job_profile_id: str
     total_questions: int
+    requested_total: int = 0
+    warning: Optional[str] = None
     questions: List[JobProfileGeneratedQuestionItem]
 
 

@@ -4,6 +4,7 @@ from fastapi import File, UploadFile
 from typing import List, Optional
 import logging
 from src.api.dependencies.auth import get_current_user
+from src.api.dependencies.admin import get_current_admin_user
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.job_profile import (
     JobProfileSummaryResponse, 
@@ -34,13 +35,18 @@ from src.models.schemas.job_profile import (
     JobProfileReviewPreviewQuestion,
     JobProfileReviewLevelInfo,
     JobProfileReviewQuestionSummary,
-    JobProfileSubmitResponse
+    JobProfileSubmitResponse,
+    JobProfileAdminReviewRequest
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.syllabus_service import syllabus_service
+from src.api.dependencies.admin import is_admin_user
+
+def check_is_admin_dep(current_user=fastapi.Depends(get_current_user)) -> bool:
+    return is_admin_user(current_user)
 
 logger = logging.getLogger(__name__)
 
@@ -95,10 +101,10 @@ async def get_job_profiles_summary(
 async def list_job_profiles(
     category: Optional[str] = fastapi.Query(None),
     limit: Optional[int] = fastapi.Query(None),
-    current_user=fastapi.Depends(get_current_user),
+    is_admin: bool = fastapi.Depends(check_is_admin_dep),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileListResponse:
-    profiles = await job_profile_repo.list_profiles(category=category, limit=limit)
+    profiles = await job_profile_repo.list_profiles(category=category, limit=limit, is_admin=is_admin)
     return JobProfileListResponse(items=profiles, total=len(profiles))
 
 @router.post(
@@ -154,6 +160,31 @@ async def update_job_profile(
         
     return JobProfileResponse.model_validate(updated_profile)
 
+
+@router.patch(
+    path="/job-profiles/{job_profile_id}/review",
+    name="job-profiles:update-review",
+    response_model=JobProfileResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Update Review Status (Admin Only)",
+)
+async def update_job_profile_review(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    current_admin=fastapi.Depends(get_current_admin_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileResponse:
+    updated_profile = await job_profile_repo.update_review_status(
+        profile_id=job_profile_id,
+        status=payload.status,
+        admin_comment=payload.adminComment
+    )
+    if not updated_profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found"
+        )
+    return JobProfileResponse.model_validate(updated_profile)
 
 @router.get(
     path="/job-profiles/{job_profile_id}/review",
@@ -325,7 +356,7 @@ async def delete_job_profile(
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileDeleteResponse:
-    deleted = await job_profile_repo.delete_profile(profile_id=job_profile_id)
+    deleted = await job_profile_repo.delete(job_profile_id=job_profile_id)
     if not deleted:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
@@ -568,6 +599,11 @@ async def extract_skills(
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
 
 
+# Global semaphore to limit concurrent LLM requests across all users/levels.
+# Note: This is a per-process cap. If running with multiple uvicorn workers,
+# the real cap is 5 * workers.
+GLOBAL_LLM_SEMAPHORE = asyncio.Semaphore(5)
+
 @router.post(
     path="/job-profiles/{job_profile_id}/questions/generate",
     name="job-profiles:generate-questions",
@@ -625,6 +661,39 @@ async def generate_questions_v2(
     track = profile.job_name
     context_text = profile.job_description
 
+    async def safe_fetch_batch(track, context_text, b_count, difficulty, topics, ratio, current_influence):
+        max_retries = 3
+        error = None
+        for attempt in range(max_retries):
+            async with GLOBAL_LLM_SEMAPHORE:
+                questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
+                    track=track,
+                    context_text=context_text,
+                    count=b_count,
+                    difficulty=difficulty,
+                    syllabus_topics=topics,
+                    ratio=ratio,
+                    influence=current_influence,
+                )
+            if not error and structured_items:
+                return structured_items
+            logger.warning(f"Batch failed on attempt {attempt+1}/{max_retries}: {error}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+        raise Exception(f"Failed after {max_retries} attempts. Last error: {error}")
+
+    async def fetch_batch_with_semaphore(b_count, batch_idx, l, difficulty, topics, ratio, current_influence):
+        logger.info(f"Batch {batch_idx} Level {l.level}: REQUESTING {b_count} questions.")
+        try:
+            structured_items = await safe_fetch_batch(
+                track, context_text, b_count, difficulty, topics, ratio, current_influence
+            )
+            logger.info(f"Batch {batch_idx} Level {l.level}: RECEIVED {len(structured_items)} questions.")
+            return structured_items
+        except Exception as e:
+            logger.error(f"Batch {batch_idx} Level {l.level}: FAILED after retries. Error: {e}")
+            return []
+
     async def process_level(l):
         if l.count == 0:
             return []
@@ -664,6 +733,7 @@ async def generate_questions_v2(
         
         influence = {
             "target_role": role,
+            "category": profile.category,
             "difficulty": difficulty,
             "skills": skills_list,
             "experience_level": profile.experience_level,
@@ -673,42 +743,44 @@ async def generate_questions_v2(
 
         remaining = l.count
         batch_size = 10
-        batches = []
-        while remaining > 0:
-            current_batch = min(remaining, batch_size)
-            batches.append(current_batch)
-            remaining -= current_batch
-
-        async def fetch_batch(b_count, batch_idx):
-            current_influence = dict(influence)
-            logger.info(
-                f"Generating parallel batch {batch_idx+1}/{len(batches)} ({b_count} questions) for Job Profile {job_profile_id} at Level {l.level} ({difficulty})"
-            )
-
-            questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
-                track=track,
-                context_text=context_text,
-                count=b_count,
-                difficulty=difficulty,
-                syllabus_topics=topics,
-                ratio=ratio,
-                influence=current_influence,
-            )
-
-            if error or not structured_items:
-                logger.error(f"Failed to generate questions batch for Level {l.level}: {error}")
-                raise fastapi.HTTPException(
-                    status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to generate questions for Level {l.level}: {error or 'No questions generated'}"
-                )
-            return structured_items
-
-        # Run all batches concurrently to prevent timeouts on Render
-        batch_results = await asyncio.gather(*[fetch_batch(b, i) for i, b in enumerate(batches)])
-        
         level_generated_items = []
-        for res in batch_results:
-            level_generated_items.extend(res)
+        batch_idx_offset = 0
+        
+        max_passes = 3
+        passes = 0
+        
+        while remaining > 0 and passes < max_passes:
+            passes += 1
+            # Plan batches for the current remaining count
+            batches = []
+            temp_remaining = remaining
+            while temp_remaining > 0:
+                batches.append(min(temp_remaining, batch_size))
+                temp_remaining -= batches[-1]
+            
+            # Fetch all planned batches concurrently for this pass
+            tasks = [
+                fetch_batch_with_semaphore(
+                    b_count, batch_idx_offset + i + 1, l, difficulty, topics, ratio, dict(influence)
+                )
+                for i, b_count in enumerate(batches)
+            ]
+            batch_results = await asyncio.gather(*tasks)
+            batch_idx_offset += len(batches)
+            
+            added_in_this_pass = 0
+            for structured_items in batch_results:
+                # Ensure we don't add more than remaining questions
+                if len(structured_items) > remaining:
+                    structured_items = structured_items[:remaining]
+                    
+                level_generated_items.extend(structured_items)
+                added_in_this_pass += len(structured_items)
+                remaining -= len(structured_items)
+                
+            if added_in_this_pass == 0:
+                logger.warning(f"Level {l.level}: Failed to gather more questions. Stopping early.")
+                break
 
         return [(l.level, difficulty, item) for item in level_generated_items]
 
@@ -750,9 +822,15 @@ async def generate_questions_v2(
         for q in db_questions
     ]
 
+    warning = None
+    if len(response_items) < total_requested:
+        warning = f"Requested {total_requested} questions, but only generated {len(response_items)}. The AI model may be returning partial results."
+
     return JobProfileGenerateQuestionsResponse(
         job_profile_id=str(profile.id),
         total_questions=len(response_items),
+        requested_total=total_requested,
+        warning=warning,
         questions=response_items
     )
 

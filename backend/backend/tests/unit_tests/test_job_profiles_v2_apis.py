@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # Import schemas and repository
 from src.models.schemas.job_profile import (
+    JobProfileAdminReviewRequest,
     JobProfileSummaryResponse, 
     JobProfileResponse, 
     JobProfileCreateV2,
@@ -239,6 +240,90 @@ async def get_job_profile_review(
     )
 
 
+@_app.patch(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileResponse,
+    status_code=200,
+)
+async def update_job_profile_review(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileResponse:
+    updated_profile = await job_profile_repo.update_review_status(
+        profile_id=job_profile_id,
+        status=payload.status,
+        admin_comment=payload.adminComment
+    )
+    if not updated_profile:
+        raise fastapi.HTTPException(status_code=404, detail="Not found")
+    return JobProfileResponse.model_validate(updated_profile)
+
+
+
+@_app.patch(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileResponse,
+    status_code=200,
+)
+async def update_job_profile_review(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileResponse:
+    updated_profile = await job_profile_repo.update_review_status(
+        profile_id=job_profile_id,
+        status=payload.status,
+        admin_comment=payload.adminComment
+    )
+    if not updated_profile:
+        raise fastapi.HTTPException(status_code=404, detail="Not found")
+    return JobProfileResponse.model_validate(updated_profile)
+
+
+
+@_app.patch(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileResponse,
+    status_code=200,
+)
+async def update_job_profile_review(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileResponse:
+    updated_profile = await job_profile_repo.update_review_status(
+        profile_id=job_profile_id,
+        status=payload.status,
+        admin_comment=payload.adminComment
+    )
+    if not updated_profile:
+        raise fastapi.HTTPException(status_code=404, detail="Not found")
+    return JobProfileResponse.model_validate(updated_profile)
+
+
+
+@_app.patch(
+    path="/api/v2/job-profiles/{job_profile_id}/review",
+    response_model=JobProfileResponse,
+    status_code=200,
+)
+async def update_job_profile_review(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
+) -> JobProfileResponse:
+    updated_profile = await job_profile_repo.update_review_status(
+        profile_id=job_profile_id,
+        status=payload.status,
+        admin_comment=payload.adminComment
+    )
+    if not updated_profile:
+        raise fastapi.HTTPException(status_code=404, detail="Not found")
+    return JobProfileResponse.model_validate(updated_profile)
+
+
+
 @_app.post(
     path="/api/v2/job-profiles/{job_profile_id}/submit",
     response_model=JobProfileSubmitResponse,
@@ -298,7 +383,7 @@ async def delete_job_profile(
     current_user=fastapi.Depends(_fake_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(_get_mock_repo),
 ) -> JobProfileDeleteResponse:
-    deleted = await job_profile_repo.delete_profile(profile_id=job_profile_id)
+    deleted = await job_profile_repo.delete(job_profile_id=job_profile_id)
     if not deleted:
         raise fastapi.HTTPException(
             status_code=404,
@@ -1120,7 +1205,7 @@ client = TestClient(_app)
 
 # Mock model helper representing ORM
 class MockJobProfileModel:
-    def __init__(self, id, job_name, job_description, created_at=None, skills=None, experience_level=None):
+    def __init__(self, id, job_name, job_description, created_at=None, skills=None, experience_level=None, status="draft"):
         self.id = id
         self.job_name = job_name
         self.job_description = job_description or ""
@@ -1128,6 +1213,11 @@ class MockJobProfileModel:
         self.experience_level = experience_level
         self.created_at = created_at or datetime.datetime.now(datetime.timezone.utc)
         self.updated_at = self.created_at
+        self.status = status
+        self.company_name = None
+        self.additional_context = None
+        self.category = None
+        self.employment_type = None
 
     @property
     def title(self) -> str:
@@ -1568,8 +1658,7 @@ def test_generate_questions_invalid_level():
         ]
     }
     response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
-    assert response.status_code == 400
-    assert "Invalid level" in response.json()["detail"]
+    assert response.status_code == 422
 
 
 def test_generate_questions_negative_count():
@@ -1581,8 +1670,7 @@ def test_generate_questions_negative_count():
         ]
     }
     response = client.post("/api/v2/job-profiles/123/questions/generate", json=payload)
-    assert response.status_code == 400
-    assert "Count cannot be negative" in response.json()["detail"]
+    assert response.status_code == 422
 
 
 def test_get_questions_success():
@@ -1957,21 +2045,21 @@ def test_delete_question_not_found():
 
 # 9. DELETE /api/v2/job-profiles/{id}
 def test_delete_job_profile_success():
-    _mock_repo.delete_profile = AsyncMock(return_value=True)
+    _mock_repo.delete = AsyncMock(return_value=True)
     response = client.delete("/api/v2/job-profiles/123")
     assert response.status_code == 200
     data = response.json()
     assert data["deleted"] is True
     assert data["jobProfileId"] == 123
-    _mock_repo.delete_profile.assert_called_once_with(profile_id=123)
+    _mock_repo.delete.assert_called_once_with(job_profile_id=123)
 
 
 def test_delete_job_profile_not_found():
-    _mock_repo.delete_profile = AsyncMock(return_value=False)
+    _mock_repo.delete = AsyncMock(return_value=False)
     response = client.delete("/api/v2/job-profiles/999")
     assert response.status_code == 404
     assert "not found" in response.json()["detail"]
-    _mock_repo.delete_profile.assert_called_once_with(profile_id=999)
+    _mock_repo.delete.assert_called_once_with(job_profile_id=999)
 
 
 
@@ -2472,11 +2560,114 @@ async def test_generate_interview_questions_llm_prompt_with_knowledge_base():
     finally:
         settings.OPENAI_API_KEY = orig_key
 
+def test_submit_job_profile_admin_review_comment_only():
+    from src.models.db.job_profile import JobProfile
+    import datetime
+    profile = JobProfile(
+        id=123,
+        job_name="Test",
+        job_description="Desc",
+        created_at=datetime.datetime.now(datetime.timezone.utc),
+        updated_at=datetime.datetime.now(datetime.timezone.utc),
+        status="under_review"
+    )
+    _mock_repo.get_by_id = AsyncMock(return_value=profile)
+    _mock_repo.update_review_status = AsyncMock(return_value=profile)
+    
+    response = client.patch(
+        "/api/v2/job-profiles/123/review",
+        json={"adminComment": "Looks good, just minor edits"}
+    )
+    
+    assert response.status_code == 200
+    _mock_repo.update_review_status.assert_called_once_with(
+        profile_id=123,
+        status=None,
+        admin_comment="Looks good, just minor edits"
+    )
 
 
+# --- Repository-level: update_review_status partial-update semantics ---------
+# These exercise JobProfileCRUDRepository.update_review_status directly rather than
+# through the route, because the route-level test mocks the repository out entirely
+# and so never runs the field-guard logic below.
+
+def _review_repo_with(profile):
+    """Minimal stand-in for AsyncSession: enough for update_review_status."""
+    from src.repository.crud.job_profile import JobProfileCRUDRepository
+
+    result = MagicMock()
+    result.scalar_one_or_none = MagicMock(return_value=profile)
+
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+    session.commit = AsyncMock()
+    session.refresh = AsyncMock()
+
+    return JobProfileCRUDRepository(session)
 
 
+def _review_profile(**overrides):
+    from src.models.db.job_profile import JobProfile
+
+    fields = dict(
+        id=123,
+        job_name="Test",
+        job_description="Desc",
+        created_at=datetime.datetime.now(datetime.timezone.utc),
+        updated_at=datetime.datetime.now(datetime.timezone.utc),
+        status="under_review",
+        admin_comment=None,
+    )
+    fields.update(overrides)
+    return JobProfile(**fields)
 
 
+@pytest.mark.asyncio
+async def test_update_review_status_keeps_existing_comment_when_only_status_sent():
+    """Publishing without re-sending the comment must not erase the admin's concerns."""
+    from src.models.db.job_profile import JobProfileStatus
 
+    profile = _review_profile(admin_comment="Needs clearer scoring rubric")
+    repo = _review_repo_with(profile)
+
+    updated = await repo.update_review_status(
+        profile_id=123,
+        status=JobProfileStatus.PUBLISHED,
+        admin_comment=None,
+    )
+
+    assert updated.status == JobProfileStatus.PUBLISHED
+    assert updated.admin_comment == "Needs clearer scoring rubric"
+
+
+@pytest.mark.asyncio
+async def test_update_review_status_keeps_existing_status_when_only_comment_sent():
+    """The comment-only path must leave the role where it is."""
+    profile = _review_profile(status="under_review")
+    repo = _review_repo_with(profile)
+
+    updated = await repo.update_review_status(
+        profile_id=123,
+        status=None,
+        admin_comment="Adding concerns",
+    )
+
+    assert updated.status == "under_review"
+    assert updated.admin_comment == "Adding concerns"
+
+
+@pytest.mark.asyncio
+async def test_update_review_status_empty_comment_clears_it():
+    """An explicit empty string is how a caller removes a comment."""
+    profile = _review_profile(admin_comment="Old note")
+    repo = _review_repo_with(profile)
+
+    updated = await repo.update_review_status(
+        profile_id=123,
+        status=None,
+        admin_comment="",
+    )
+
+    assert updated.admin_comment == ""
 
