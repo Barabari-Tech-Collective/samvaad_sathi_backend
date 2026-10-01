@@ -1,4 +1,6 @@
+import datetime
 import fastapi
+import pydantic
 import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
@@ -77,8 +79,7 @@ async def register_user(
                                     name=user_name,
                                     created_at=user_created_at,
                                     is_onboarded=user_is_onboarded,
-                                    is_admin=False,
-                                    role="USER",
+                                    is_admin=is_admin_user(user),
                                     degree=None,
                                     university=None,
                                     target_position=None,
@@ -130,8 +131,7 @@ async def login_user(
                                     name=user_name,
                                     created_at=user_created_at,
                                     is_onboarded=user_is_onboarded,
-                                    is_admin=False,
-                                    role="USER",
+                                    is_admin=is_admin_user(user),
                                     degree=None,
                                     university=None,
                                     target_position=None,
@@ -142,13 +142,28 @@ async def login_user(
                                     company=None),
     )
 
-@router.post("/refresh")
+class TokenRefreshResponse(pydantic.BaseModel):
+    accessToken: str
+    refreshToken: str
+
+@router.post(
+    path="/refresh",
+    name="users:refresh",
+    response_model=TokenRefreshResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+)
 async def refresh_access_token(
     refresh_token: str = fastapi.Form(...),
     user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
     session_repo: SessionCRUDRepository = fastapi.Depends(get_repository(repo_type=SessionCRUDRepository)),
+    _rate_limit: None = fastapi.Depends(
+        anonymous_rate_limiter(
+            key_prefix="refresh",
+            limit=settings.RATE_LIMIT_LOGIN_PER_MINUTE,
+            window_seconds=60,
+        )
+    ),
 ):
-    import datetime
     # Validate refresh token exists and is not expired
     session = await session_repo.get_session_by_token(token=refresh_token)
     if not session or session.expiry < datetime.datetime.now(datetime.timezone.utc):
@@ -158,11 +173,14 @@ async def refresh_access_token(
     if not user:
         raise fastapi.HTTPException(status_code=401, detail="User not found")
 
-    # Rotate refresh token: create a new one and delete the previous session
+    # Rotate refresh token: create a new one and delay deletion of the old one
     new_refresh = await session_repo.create_session(
         user_id=user.id, expiry_minutes=settings.REFRESH_TOKEN_EXPIRY_MINUTES
     )
-    await session_repo.delete_session_by_token(token=refresh_token)
+    # Give the old token a 15 second grace period to allow concurrent requests to succeed
+    session.expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=15)
+    session_repo.async_session.add(session)
+    await session_repo.async_session.commit()
 
     new_access = jwt_generator.generate_access_token_for_user(user=user)
     return {"accessToken": new_access, "refreshToken": new_refresh.token}
@@ -206,6 +224,7 @@ async def get_me(
             break
 
     token = jwt_generator.generate_access_token_for_user(user=current_user)
+    is_admin_flag = is_admin_user(current_user)
     return UserInResponse(
         user_id=current_user.id,
         authorized_user=UserWithToken(
@@ -215,8 +234,7 @@ async def get_me(
             name=current_user.name,
             created_at=current_user.created_at,
             is_onboarded=getattr(current_user, 'is_onboarded', False),
-            is_admin=is_admin_user(current_user),
-                                    role="SUPER_ADMIN" if getattr(current_user, "email", "") == "superadmin@barabari.org" else "ADMIN" if is_admin_user(current_user) else "USER",
+            is_admin=is_admin_flag,
             degree=current_user.degree,
             university=current_user.university,
             target_position=current_user.target_position,
