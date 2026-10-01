@@ -2,7 +2,7 @@ from src.models.db import JobProfileQuestion
 from typing import List, Optional
 import sqlalchemy
 from sqlalchemy import select, func
-from src.models.db.job_profile import JobProfile
+from src.models.db.job_profile import JobProfile, JobProfileStatus
 from src.repository.crud.base import BaseCRUDRepository
 
 class JobProfileCRUDRepository(BaseCRUDRepository):
@@ -14,13 +14,13 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         total_stmt = select(func.count()).select_from(JobProfile)
         total_count = (await self.async_session.execute(total_stmt)).scalar() or 0
         
-        pending_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == "under_review")
+        pending_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.UNDER_REVIEW)
         pending_count = (await self.async_session.execute(pending_stmt)).scalar() or 0
 
-        approved_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == "approved")
+        approved_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.PUBLISHED)
         approved_count = (await self.async_session.execute(approved_stmt)).scalar() or 0
 
-        rejected_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == "rejected")
+        rejected_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.CHANGES_REQUESTED)
         rejected_count = (await self.async_session.execute(rejected_stmt)).scalar() or 0
 
         return {
@@ -41,7 +41,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         query = select(JobProfile).options(selectinload(JobProfile.questions)).order_by(JobProfile.created_at.desc())
         
         if not is_admin:
-            query = query.where((JobProfile.status == 'published') | (JobProfile.status.is_(None)))
+            query = query.where(JobProfile.status == JobProfileStatus.PUBLISHED)
         if category:
             query = query.where(JobProfile.category == category)
         if limit is not None:
@@ -76,15 +76,6 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(new_profile)
         return new_profile
 
-    async def delete_profile(self, profile_id: int) -> bool:
-        query = select(JobProfile).where(JobProfile.id == profile_id)
-        result = await self.async_session.execute(query)
-        profile = result.scalar_one_or_none()
-        if profile:
-            await self.async_session.delete(profile)
-            await self.async_session.commit()
-            return True
-        return False
 
     async def update_profile(self, profile_id: int, update_data: dict) -> Optional[JobProfile]:
         profile = await self.get_by_id(job_profile_id=profile_id)
