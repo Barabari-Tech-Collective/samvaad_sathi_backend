@@ -158,9 +158,14 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         if not profile:
             return None
             
+        # Both fields are optional so this stays a true partial update: omitting one must
+        # leave the stored value alone. Without the admin_comment guard, publishing a role
+        # without re-sending the comment wipes the concerns an admin recorded earlier.
+        # Passing an empty string is still how a caller clears it.
         if status is not None:
             profile.status = status
-        profile.admin_comment = admin_comment
+        if admin_comment is not None:
+            profile.admin_comment = admin_comment
         await self.async_session.commit()
         await self.async_session.refresh(profile)
         return profile
