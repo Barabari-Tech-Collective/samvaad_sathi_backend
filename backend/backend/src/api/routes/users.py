@@ -142,6 +142,12 @@ async def login_user(
                                     company=None),
     )
 
+# How long a refresh token stays usable after being rotated away. Long enough to cover
+# a page that fires several requests at once and refreshes more than once; short enough
+# that a leaked token is not useful for long.
+REFRESH_ROTATION_GRACE_SECONDS = 15
+
+
 class TokenRefreshResponse(pydantic.BaseModel):
     accessToken: str
     refreshToken: str
@@ -173,14 +179,15 @@ async def refresh_access_token(
     if not user:
         raise fastapi.HTTPException(status_code=401, detail="User not found")
 
-    # Rotate refresh token: create a new one and delay deletion of the old one
+    # Rotate the refresh token, leaving the replaced one briefly valid so that requests
+    # already in flight with it still succeed rather than racing into a logout.
     new_refresh = await session_repo.create_session(
         user_id=user.id, expiry_minutes=settings.REFRESH_TOKEN_EXPIRY_MINUTES
     )
-    # Give the old token a 15 second grace period to allow concurrent requests to succeed
-    session.expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=15)
-    session_repo.async_session.add(session)
-    await session_repo.async_session.commit()
+    await session_repo.expire_session_soon(session=session, grace_seconds=REFRESH_ROTATION_GRACE_SECONDS)
+    # Superseded tokens are expired rather than deleted, so without this the table only
+    # ever grows - and get_session_by_token above pays for it on every refresh.
+    await session_repo.delete_expired_sessions(user_id=user.id)
 
     new_access = jwt_generator.generate_access_token_for_user(user=user)
     return {"accessToken": new_access, "refreshToken": new_refresh.token}
