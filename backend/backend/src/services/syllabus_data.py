@@ -27,6 +27,8 @@ ROLE_ALIASES: Dict[str, str] = {
     "js": "JavaScript Developer",
     "mern": "MERN Stack Developer",
     "fullstack": "MERN Stack Developer",
+    "full stack": "MERN Stack Developer",
+    "full-stack": "MERN Stack Developer",
     "node": "Node JS Developer",
     "express": "Express JS Developer",
 }
@@ -85,6 +87,8 @@ DEPTH_GUIDELINES: Dict[str, str] = {
 
 # Tech keywords for resume parsing
 TECH_KEYWORDS: List[str] = [
+    # Languages & Backend Frameworks
+    "python", "django", "fastapi", "flask", "java", "spring", "springboot", "c++", "c#", ".net", "dotnet", "golang", "go", "ruby", "rails", "sql",
     # Frontend/UI
     "react", "redux", "next.js", "nextjs", "vite", "webpack", "babel", "typescript", 
     "tailwind", "mui", "ant design", "sass", "styled-components", "rtl", "jest", 

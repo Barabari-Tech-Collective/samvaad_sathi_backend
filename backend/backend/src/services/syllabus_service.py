@@ -7,7 +7,7 @@ interview question topics, roles, and difficulty levels.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 import logging
 
 from .syllabus_data import (
@@ -62,15 +62,16 @@ class RoleManager:
         self._canonical_roles: Set[str] = set(CANONICAL_ROLES)
         self._aliases: Dict[str, str] = ROLE_ALIASES.copy()
     
-    def derive_role(self, track: str) -> str:
+    def derive_role(self, track: str, fallback_to_default: bool = True) -> Optional[str]:
         """
         Derive canonical role from track string.
         
         Args:
             track: Input track string (e.g., "react", "frontend")
+            fallback_to_default: Whether to fall back to 'JavaScript Developer' if no match.
             
         Returns:
-            Canonical role name
+            Canonical role name or None if fallback_to_default is False and no match found
             
         Raises:
             ValueError: If track is invalid
@@ -102,6 +103,10 @@ class RoleManager:
                     return role
             
             # Default fallback
+            if not fallback_to_default:
+                logger.info(f"No role match found for track '{track}', returning None")
+                return None
+
             logger.warning(f"No role match found for track '{track}', using default 'JavaScript Developer'")
             return "JavaScript Developer"
             
@@ -167,27 +172,52 @@ class SyllabusService:
     
     def get_topics_for_role(
         self, 
-        role: str, 
-        difficulty: Optional[str] = None
+        role: Optional[str], 
+        difficulty: Optional[str] = None,
+        fallback_to_default: bool = False
     ) -> TopicBank:
         """
         Get topic bank for a specific role and difficulty.
         
         Args:
-            role: Role name (can be alias or canonical)
-            difficulty: Difficulty level ("easy", "medium", "hard")
+            role: Role name (can be alias, canonical, or None)
+            difficulty: Difficulty level ("easy", "medium", "hard", "expert")
+            fallback_to_default: Whether to fall back to 'JavaScript Developer' if no match.
             
         Returns:
             TopicBank containing all relevant topics
-            
-        Raises:
-            ValueError: If role or difficulty is invalid
         """
         try:
-            # Normalize inputs
-            canonical_role = self._role_manager.derive_role(role)
             normalized_difficulty = self._difficulty_manager.normalize_difficulty(difficulty)
-            
+
+            if not role:
+                return TopicBank(
+                    tech=[],
+                    tech_allied=[],
+                    behavioral=list(BEHAVIORAL_TOPICS),
+                    archetypes=(
+                        ARCHETYPES.get("tech", []) + 
+                        ARCHETYPES.get("tech_allied", []) + 
+                        ARCHETYPES.get("behavioral", [])
+                    ),
+                    depth_guidelines=[DEPTH_GUIDELINES.get(normalized_difficulty, DEPTH_GUIDELINES["medium"])],
+                )
+
+            # Normalize inputs
+            canonical_role = self._role_manager.derive_role(role, fallback_to_default=fallback_to_default)
+            if not canonical_role:
+                return TopicBank(
+                    tech=[],
+                    tech_allied=[],
+                    behavioral=list(BEHAVIORAL_TOPICS),
+                    archetypes=(
+                        ARCHETYPES.get("tech", []) + 
+                        ARCHETYPES.get("tech_allied", []) + 
+                        ARCHETYPES.get("behavioral", [])
+                    ),
+                    depth_guidelines=[DEPTH_GUIDELINES.get(normalized_difficulty, DEPTH_GUIDELINES["medium"])],
+                )
+
             # Check cache first for performance
             cache_key = f"{canonical_role}:{normalized_difficulty}"
             if cache_key in self._topic_cache:
@@ -199,10 +229,22 @@ class SyllabusService:
             # Get role data
             role_data = self._syllabus.get(canonical_role)
             if not role_data:
-                logger.warning(f"No syllabus data found for role '{canonical_role}', falling back to 'JavaScript Developer'")
-                role_data = self._syllabus.get("JavaScript Developer", {})
-                if not role_data:
-                    raise ValueError(f"No syllabus data available for role '{canonical_role}' or fallback")
+                if fallback_to_default:
+                    logger.warning(f"No syllabus data found for role '{canonical_role}', falling back to 'JavaScript Developer'")
+                    role_data = self._syllabus.get("JavaScript Developer", {})
+                else:
+                    logger.info(f"No syllabus data found for role '{canonical_role}', returning empty tech topic bank")
+                    return TopicBank(
+                        tech=[],
+                        tech_allied=[],
+                        behavioral=list(BEHAVIORAL_TOPICS),
+                        archetypes=(
+                            ARCHETYPES.get("tech", []) + 
+                            ARCHETYPES.get("tech_allied", []) + 
+                            ARCHETYPES.get("behavioral", [])
+                        ),
+                        depth_guidelines=[DEPTH_GUIDELINES.get(normalized_difficulty, DEPTH_GUIDELINES["medium"])],
+                    )
             
             # Get difficulty data
             difficulty_data = role_data.get(normalized_difficulty, {})
@@ -335,6 +377,162 @@ class SyllabusService:
         """Get all available canonical roles."""
         return self._role_manager.get_all_roles()
     
+    def derive_canonical_role(self, track: str, skills: Optional[List[str]] = None) -> Optional[str]:
+        """Derive canonical role if known, returning None if unknown."""
+        track_str = track or ""
+        track_lower = track_str.strip().lower()
+        skills_text = " ".join(skills or []).lower()
+        combined_text = f"{track_lower} {skills_text}"
+
+        # If explicit other backend/language stack is detected, do not alias to MERN or JavaScript
+        other_stacks = [
+            "python", "django", "fastapi", "flask", "java", "spring", "springboot",
+            "c++", "c#", ".net", "dotnet", "golang", "go", "ruby", "rails", "php", "rust"
+        ]
+        if any(stack in combined_text for stack in other_stacks):
+            return None
+
+        return self._role_manager.derive_role(track, fallback_to_default=False)
+
+    def resolve_generation_context(
+        self,
+        track: str,
+        category: Optional[str] = None,
+        difficulty: str = "easy",
+        context_text: str = "",
+        skills_list: Optional[List[str]] = None,
+        experience_level: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Resolve syllabus topics, category ratios, and influence settings
+        tailored for the candidate's exact track and role category.
+        """
+        skills = list(skills_list or [])
+        track_str = track or ""
+        track_lower = track_str.strip().lower()
+        track_words = set(track_lower.replace("-", " ").replace("_", " ").split())
+        cat_lower = (category or "").strip().lower()
+        normalized_difficulty = self._difficulty_manager.normalize_difficulty(difficulty)
+
+        is_hr = (
+            cat_lower in ["hr", "human resources", "human_resources", "talent", "recruitment", "people"]
+            or "hr" in track_words
+            or "human resources" in track_lower
+            or "recruiter" in track_words
+            or "recruitment" in track_words
+            or "talent" in track_words
+        )
+        is_sales = cat_lower in ["sales", "business development", "bde"] or "sales" in track_words or "bde" in track_words
+        is_marketing = cat_lower in ["marketing", "growth"] or "marketing" in track_words
+        is_data = cat_lower == "data" or "data" in track_words
+        is_design = cat_lower == "design" or "design" in track_words or "ui" in track_words or "ux" in track_words
+        is_general_non_tech = (
+            cat_lower in ["operations", "finance", "business", "legal", "non-tech", "non_tech"]
+            or track_lower.startswith("non-tech:")
+        )
+
+        is_non_tech = is_hr or is_sales or is_marketing or is_general_non_tech
+
+        if is_non_tech:
+            target_role = track_str
+            topic_bank = self.get_topics_for_role(role=None, difficulty=normalized_difficulty, fallback_to_default=False)
+            topics = {
+                "tech": [],
+                "tech_allied": skills,
+                "behavioral": list(topic_bank.behavioral),
+                "archetypes": [],
+                "depth_guidelines": topic_bank.depth_guidelines,
+            }
+            if is_hr:
+                ratio = {"hr_operations": 2, "talent_acquisition": 2, "behavioral": 1}
+            elif is_sales:
+                ratio = {"sales_strategy": 2, "client_management": 2, "behavioral": 1}
+            elif is_marketing:
+                ratio = {"marketing_strategy": 2, "analytics_execution": 2, "behavioral": 1}
+            else:
+                ratio = {"core_domain": 2, "practical_scenario": 2, "behavioral": 1}
+
+            influence = {
+                "target_role": target_role,
+                "category": category,
+                "difficulty": normalized_difficulty,
+                "skills": skills,
+                "experience_level": experience_level,
+                "is_non_tech": True,
+            }
+            return {
+                "target_role": target_role,
+                "topics": topics,
+                "ratio": ratio,
+                "influence": influence,
+                "is_non_tech": True,
+            }
+
+        # For Technical Roles:
+        canonical_role = self.derive_canonical_role(track_str, skills=skills)
+        if canonical_role:
+            target_role = canonical_role
+            topic_bank = self.get_topics_for_role(role=canonical_role, difficulty=normalized_difficulty, fallback_to_default=False)
+            tech_topics = list(topic_bank.tech)
+            tech_allied = self.extract_tech_allied_from_resume(
+                resume_text=context_text,
+                skills=skills,
+                fallback_topics=topic_bank.tech_allied,
+            )
+        else:
+            target_role = track_str
+            topic_bank = self.get_topics_for_role(role=None, difficulty=normalized_difficulty, fallback_to_default=False)
+            # Use candidate's skills as the primary tech topics
+            tech_topics = [s for s in skills if s]
+            if not tech_topics:
+                tech_topics = [track_str]
+            tech_allied = self.extract_tech_allied_from_resume(
+                resume_text=context_text,
+                skills=skills,
+                fallback_topics=[],
+            )
+
+        topics = {
+            "tech": tech_topics,
+            "tech_allied": tech_allied,
+            "behavioral": list(topic_bank.behavioral),
+            "archetypes": topic_bank.archetypes,
+            "depth_guidelines": topic_bank.depth_guidelines,
+        }
+
+        if is_data:
+            ratio = {"data_engineering_querying": 2, "analysis_insights": 2, "behavioral": 1}
+        elif is_design:
+            ratio = {"core_design": 2, "design_strategy": 2, "behavioral": 1}
+        else:
+            question_ratio = self.compute_question_ratio(
+                years_experience=None,
+                has_resume_text=bool(context_text),
+                has_skills=bool(skills),
+            )
+            ratio = {
+                "tech": question_ratio.tech,
+                "tech_allied": question_ratio.tech_allied,
+                "behavioral": question_ratio.behavioral,
+            }
+
+        influence = {
+            "target_role": target_role,
+            "category": category,
+            "difficulty": normalized_difficulty,
+            "skills": skills,
+            "experience_level": experience_level,
+            "is_non_tech": False,
+        }
+
+        return {
+            "target_role": target_role,
+            "topics": topics,
+            "ratio": ratio,
+            "influence": influence,
+            "is_non_tech": False,
+        }
+
     def is_valid_role(self, role: str) -> bool:
         """Check if role is valid."""
         return self._role_manager.is_valid_role(role)
