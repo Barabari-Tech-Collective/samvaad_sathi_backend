@@ -662,6 +662,8 @@ async def generate_questions_v2(
     context_text = profile.job_description
 
     async def safe_fetch_batch(track, context_text, b_count, difficulty, topics, ratio, current_influence):
+        # TODO(architecture): Lift operational parameters (max_retries, backoff bounds, and max_passes)
+        # to .env / BackendBaseSettings in future configuration refactoring.
         max_retries = 4
         error = None
         for attempt in range(max_retries):

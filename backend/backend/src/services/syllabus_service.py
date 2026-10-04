@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 import logging
+import re
 
 from .syllabus_data import (
     ARCHETYPES,
@@ -21,6 +22,30 @@ from .syllabus_data import (
 from .syllabus_content import SYLLABUS
 
 logger = logging.getLogger(__name__)
+
+# Boundary-safe regex patterns to detect non-JS / other language backend stacks as whole words.
+# Avoids naive substring matching bugs like "java" in "javascript", "go" in "mongodb", etc.
+OTHER_STACK_PATTERNS = [
+    r"\bpython\b",
+    r"\bdjango\b",
+    r"\bfastapi\b",
+    r"\bflask\b",
+    r"\bjava\b",
+    r"\bspring\b",
+    r"\bspringboot\b",
+    r"(?:^|\b)c\+\+(?!\w)",
+    r"(?:^|\b)c#(?!\w)",
+    r"(?:^|[\s/])\.net(?!\w)",
+    r"\basp\.net(?!\w)",
+    r"\bdotnet\b",
+    r"\bgolang\b",
+    r"\bgo\b",
+    r"\bruby\b",
+    r"\brails\b",
+    r"\bphp\b",
+    r"\brust\b",
+]
+OTHER_STACKS_REGEX = re.compile("|".join(OTHER_STACK_PATTERNS), re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -384,15 +409,25 @@ class SyllabusService:
         skills_text = " ".join(skills or []).lower()
         combined_text = f"{track_lower} {skills_text}"
 
-        # If explicit other backend/language stack is detected, do not alias to MERN or JavaScript
-        other_stacks = [
-            "python", "django", "fastapi", "flask", "java", "spring", "springboot",
-            "c++", "c#", ".net", "dotnet", "golang", "go", "ruby", "rails", "php", "rust"
-        ]
-        if any(stack in combined_text for stack in other_stacks):
+        direct_match = self._role_manager.derive_role(track, fallback_to_default=False)
+
+        # If explicit other backend/language stack is detected as a discrete word/token,
+        # avoid incorrectly aliasing generic titles (e.g. "Full Stack Developer") to MERN.
+        if OTHER_STACKS_REGEX.search(combined_text):
+            # If the user explicitly requested a canonical role by name (e.g. "React Developer",
+            # "JavaScript Developer", "Node JS Developer"), keep the canonical role.
+            if direct_match and track_lower in {
+                "react", "react developer",
+                "javascript", "javascript developer", "js",
+                "node", "node js developer", "node developer", "node.js developer",
+                "express", "express js developer", "express developer",
+                "mern", "mern stack developer",
+                "ui", "ui developer", "frontend", "frontend developer",
+            }:
+                return direct_match
             return None
 
-        return self._role_manager.derive_role(track, fallback_to_default=False)
+        return direct_match
 
     def resolve_generation_context(
         self,

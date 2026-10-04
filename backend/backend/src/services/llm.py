@@ -1613,18 +1613,25 @@ async def generate_interview_questions_with_llm(
     active_ratio = ratio or spec["ratio"]
     default_ratio = spec["ratio"]
 
-    # Compute category counts proportional to total requested questions
+    # Compute category counts proportional to total requested questions using Largest Remainder Method (Hare-Niemeyer)
+    # to prevent trailing categories (such as behavioral) from being zeroed out due to integer truncation or greedy rounding.
     total_weight = sum(active_ratio.values()) or 1
-    cat_counts: dict[str, int] = {}
-    allocated = 0
-    ratio_items = list(active_ratio.items())
-    for idx, (cat, weight) in enumerate(ratio_items):
-        if idx == len(ratio_items) - 1:
-            cat_counts[cat] = max(0, total - allocated)
-        else:
-            cnt = round((weight / total_weight) * total)
-            cat_counts[cat] = cnt
-            allocated += cnt
+    if not active_ratio:
+        cat_counts = {}
+    else:
+        exact_shares = {cat: (weight / total_weight) * total for cat, weight in active_ratio.items()}
+        cat_counts = {cat: int(share) for cat, share in exact_shares.items()}
+
+        # Sort categories by descending fractional remainder; tie-break by category weight
+        remainders = [
+            (share - cat_counts[cat], active_ratio[cat], cat)
+            for cat, share in exact_shares.items()
+        ]
+        remainders.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+        remaining_slots = total - sum(cat_counts.values())
+        for i in range(remaining_slots):
+            cat_counts[remainders[i % len(remainders)][2]] += 1
 
     cat_mix_lines = [
         f"- {spec['labels'].get(cat, cat)}: {cnt} question{'s' if cnt != 1 else ''}"
@@ -1687,8 +1694,8 @@ async def generate_interview_questions_with_llm(
 
     if is_non_tech:
         skills_from_inf = (influence.get("skills") if influence else []) or []
-        allied_source = list(topics.get("tech_allied") or []) + list(skills_from_inf)
-        allied_pool = _pick(allied_source, 4)
+        allied_source = list(topics.get("tech_allied") or skills_from_inf or [])
+        allied_pool = _pick(list(dict.fromkeys(allied_source)), 4)
         beh_pool_full = list(topics.get("behavioral", []))
         beh_pool = _pick(beh_pool_full, 3)
         sampled_syllabus = {
