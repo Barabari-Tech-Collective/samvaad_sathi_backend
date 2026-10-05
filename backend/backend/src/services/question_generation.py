@@ -80,26 +80,64 @@ async def generate_questions_for_level(
     sem = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
 
     async def fetch_batch(b_count: int, batch_idx: int) -> list[dict]:
+        """Call the LLM until we have exactly b_count items for this batch.
+
+        On each attempt we ask for only the *remaining* shortfall so the LLM
+        is given a realistic count and doesn't hallucinate extras. Up to 3
+        attempts total; raises RuntimeError only if we get zero items from
+        every attempt.
+        """
         async with sem:
-            logger.info(
-                "Generating batch %d/%d (%d questions) for level %d (%s)",
-                batch_idx + 1, len(batches), b_count, level, difficulty,
-            )
-            _, error, _, _, structured_items = await generate_interview_questions_with_llm(
-                track=track,
-                context_text=context_text,
-                count=b_count,
-                difficulty=difficulty,
-                syllabus_topics=topics,
-                ratio=ratio,
-                influence=dict(influence),
-            )
-            if error or not structured_items:
+            collected: list[dict] = []
+            last_error: str | None = None
+
+            for attempt in range(3):
+                needed = b_count - len(collected)
+                if needed <= 0:
+                    break
+
+                logger.info(
+                    "Batch %d/%d — level %d (%s): attempt %d, requesting %d/%d",
+                    batch_idx + 1, len(batches), level, difficulty,
+                    attempt + 1, needed, b_count,
+                )
+                _, error, _, _, items = await generate_interview_questions_with_llm(
+                    track=track,
+                    context_text=context_text,
+                    count=needed,
+                    difficulty=difficulty,
+                    syllabus_topics=topics,
+                    ratio=ratio,
+                    influence=dict(influence),
+                )
+                if error or not items:
+                    last_error = error or "no items returned"
+                    logger.warning(
+                        "Batch %d/%d attempt %d error: %s",
+                        batch_idx + 1, len(batches), attempt + 1, last_error,
+                    )
+                    continue
+
+                collected.extend(items)
+                if len(collected) < b_count:
+                    logger.warning(
+                        "Batch %d/%d: LLM returned %d, still need %d more — retrying",
+                        batch_idx + 1, len(batches), len(items), b_count - len(collected),
+                    )
+
+            if not collected:
                 raise RuntimeError(
                     f"LLM batch {batch_idx + 1} failed for level {level} ({difficulty}): "
-                    f"{error or 'no items returned'}"
+                    f"{last_error or 'no items returned after 3 attempts'}"
                 )
-            return structured_items[:b_count]
+
+            if len(collected) < b_count:
+                logger.warning(
+                    "Batch %d/%d: delivered %d/%d after 3 attempts — proceeding with partial",
+                    batch_idx + 1, len(batches), len(collected), b_count,
+                )
+
+            return collected[:b_count]
 
     batch_results = await asyncio.gather(*[fetch_batch(b, i) for i, b in enumerate(batches)])
 
@@ -107,27 +145,10 @@ async def generate_questions_for_level(
     for res in batch_results:
         all_raw.extend(res)
 
-    # LLMs don't always return exactly the requested count — top up if short.
-    shortfall = count - len(all_raw)
-    if 0 < shortfall <= 15:
+    if len(all_raw) != count:
         logger.warning(
-            "Level %d (%s): got %d/%d questions — topping up %d",
-            level, difficulty, len(all_raw), count, shortfall,
+            "Level %d (%s): final count %d does not match requested %d",
+            level, difficulty, len(all_raw), count,
         )
-        try:
-            _, fill_error, _, _, fill_items = await generate_interview_questions_with_llm(
-                track=track,
-                context_text=context_text,
-                count=shortfall + 3,  # slight over-ask so we definitely get enough
-                difficulty=difficulty,
-                syllabus_topics=topics,
-                ratio=ratio,
-                influence=dict(influence),
-            )
-            if fill_items and not fill_error:
-                all_raw.extend(fill_items[:shortfall])
-                logger.info("Top-up succeeded: now have %d/%d for level %d", len(all_raw), count, level)
-        except Exception as fill_exc:
-            logger.warning("Top-up call failed for level %d (%s): %s", level, difficulty, fill_exc)
 
     return [(level, difficulty, item) for item in all_raw[:count]]
