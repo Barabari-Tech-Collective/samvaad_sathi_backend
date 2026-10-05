@@ -99,7 +99,7 @@ async def generate_questions_for_level(
                     f"LLM batch {batch_idx + 1} failed for level {level} ({difficulty}): "
                     f"{error or 'no items returned'}"
                 )
-            return structured_items
+            return structured_items[:b_count]
 
     batch_results = await asyncio.gather(*[fetch_batch(b, i) for i, b in enumerate(batches)])
 
