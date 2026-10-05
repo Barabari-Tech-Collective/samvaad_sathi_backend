@@ -340,6 +340,12 @@ class JobProfileDeleteQuestionResponse(BaseSchemaModel):
     question_id: str
 
 
+class JobProfileDeleteAllQuestionsResponse(BaseSchemaModel):
+    deleted: bool
+    job_profile_id: int
+    deleted_count: int
+
+
 # --- Review Summary Schemas ---
 class JobProfileReviewRoleDetails(BaseSchemaModel):
     role_name: str

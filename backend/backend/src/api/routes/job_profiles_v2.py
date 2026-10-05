@@ -38,7 +38,8 @@ from src.models.schemas.job_profile import (
     JobProfileReviewLevelInfo,
     JobProfileReviewQuestionSummary,
     JobProfileSubmitResponse,
-    JobProfileAdminReviewRequest
+    JobProfileAdminReviewRequest,
+    JobProfileDeleteAllQuestionsResponse,
 )
 from src.services.file_processor import validate_file
 from src.services.skills_extractor import extract_skills_from_text
@@ -695,7 +696,18 @@ async def get_generate_questions_status(
     job_profile_id: int,
     job_id: str,
     current_user=fastapi.Depends(get_current_admin_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileGenerateJobStatusResponse:
+    # Verify the profile exists so callers can't poll arbitrary arq job IDs.
+    # Full IDOR prevention (verifying the job was enqueued for this specific profile)
+    # requires a durable generation_job table — tracked as a future improvement.
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if profile is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+
     status_info = await get_job_status(job_id)
     status = status_info.get("status", "unknown")
 
@@ -1060,6 +1072,37 @@ async def delete_job_profile_question_v2(
     )
 
 
+@router.delete(
+    path="/job-profiles/{job_profile_id}/questions",
+    name="job-profiles:delete-all-questions",
+    response_model=JobProfileDeleteAllQuestionsResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Delete all questions for a job profile (admin only)",
+)
+async def delete_all_job_profile_questions(
+    job_profile_id: int,
+    current_user=fastapi.Depends(get_current_admin_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+) -> JobProfileDeleteAllQuestionsResponse:
+    """Delete every question attached to a job profile.
+
+    Required before re-running generation on a profile that already has
+    questions (the generate endpoint returns 409 on non-empty profiles to
+    prevent accidental double-generation).
+    """
+    profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
+    if not profile:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+
+    deleted_count = await job_profile_repo.delete_all_job_profile_questions(job_profile_id=job_profile_id)
+    return JobProfileDeleteAllQuestionsResponse(
+        deleted=True,
+        job_profile_id=job_profile_id,
+        deleted_count=deleted_count,
+    )
 
 
 
