@@ -7,6 +7,7 @@ services:
     branch: staging
     rootDir: backend/backend
     buildCommand: pip install -r requirements.txt
+    preDeployCommand: alembic upgrade head
     startCommand: uvicorn src.main:backend_app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:

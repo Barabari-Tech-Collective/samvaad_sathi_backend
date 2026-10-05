@@ -1,5 +1,4 @@
 import fastapi
-import asyncio
 from fastapi import File, UploadFile
 from typing import List, Optional
 import logging
@@ -603,11 +602,6 @@ async def extract_skills(
 
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
 
-
-# Global semaphore to limit concurrent LLM requests across all users/levels.
-# Note: This is a per-process cap. If running with multiple uvicorn workers,
-# the real cap is 5 * workers.
-GLOBAL_LLM_SEMAPHORE = asyncio.Semaphore(5)
 
 @router.post(
     path="/job-profiles/{job_profile_id}/questions/generate",
