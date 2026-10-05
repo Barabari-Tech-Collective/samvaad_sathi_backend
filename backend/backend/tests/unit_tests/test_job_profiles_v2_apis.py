@@ -741,43 +741,18 @@ async def generate_questions_v2(
 
         difficulty = level_map[l.level]
         
-        # Prepare syllabus and question ratio using existing syllabus service
-        role = syllabus_service._role_manager.derive_role(track)
-        topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
-        
-        topics = {
-            "tech": topic_bank.tech,
-            "tech_allied": topic_bank.tech_allied,
-            "behavioral": topic_bank.behavioral,
-            "archetypes": topic_bank.archetypes,
-            "depth_guidelines": topic_bank.depth_guidelines,
-        }
-        
-        # Extract tech-allied topics from job description
-        topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
-            resume_text=context_text,
-            skills=skills_list,
-            fallback_topics=topics.get("tech_allied", []),
+        # Prepare syllabus and question ratio using syllabus service
+        gen_ctx = syllabus_service.resolve_generation_context(
+            track=track,
+            category=getattr(profile, "category", None),
+            difficulty=difficulty,
+            context_text=context_text,
+            skills_list=skills_list,
+            experience_level=profile.experience_level,
         )
-        
-        question_ratio = syllabus_service.compute_question_ratio(
-            years_experience=None,
-            has_resume_text=bool(context_text),
-            has_skills=bool(skills_list),
-        )
-        
-        ratio = {
-            "tech": question_ratio.tech,
-            "tech_allied": question_ratio.tech_allied,
-            "behavioral": question_ratio.behavioral,
-        }
-        
-        influence = {
-            "target_role": role,
-            "difficulty": difficulty,
-            "skills": skills_list,
-            "experience_level": profile.experience_level,
-        }
+        topics = gen_ctx["topics"]
+        ratio = gen_ctx["ratio"]
+        influence = gen_ctx["influence"]
         if payload.knowledge_reference_context:
             influence["knowledge_reference_context"] = payload.knowledge_reference_context
 
@@ -1089,39 +1064,17 @@ async def regenerate_job_profile_question_v2(
     from src.services.syllabus_service import syllabus_service
     from src.services.llm import generate_interview_questions_with_llm
 
-    role = syllabus_service._role_manager.derive_role(track)
-    topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
-
-    topics = {
-        "tech": topic_bank.tech,
-        "tech_allied": topic_bank.tech_allied,
-        "behavioral": topic_bank.behavioral,
-        "archetypes": topic_bank.archetypes,
-        "depth_guidelines": topic_bank.depth_guidelines,
-    }
-    topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
-        resume_text=context_text,
-        skills=skills_list,
-        fallback_topics=topics.get("tech_allied", []),
+    gen_ctx = syllabus_service.resolve_generation_context(
+        track=track,
+        category=getattr(profile, "category", None),
+        difficulty=difficulty,
+        context_text=context_text,
+        skills_list=skills_list,
+        experience_level=profile.experience_level,
     )
-
-    question_ratio = syllabus_service.compute_question_ratio(
-        years_experience=None,
-        has_resume_text=bool(context_text),
-        has_skills=bool(skills_list),
-    )
-    ratio = {
-        "tech": question_ratio.tech,
-        "tech_allied": question_ratio.tech_allied,
-        "behavioral": question_ratio.behavioral,
-    }
-
-    influence = {
-        "target_role": role,
-        "difficulty": difficulty,
-        "skills": skills_list,
-        "experience_level": profile.experience_level,
-    }
+    topics = gen_ctx["topics"]
+    ratio = gen_ctx["ratio"]
+    influence = gen_ctx["influence"]
 
     # 5. Generate new question using existing LLM service
     questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(

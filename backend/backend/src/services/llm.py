@@ -1448,6 +1448,108 @@ async def extract_jd_skills_with_llm(text: str) -> tuple[list[str], str | None]:
     return skills, error
 
 
+DOMAIN_SPECS: dict[str, dict[str, Any]] = {
+    "hr": {
+        "options": "'hr_operations', 'talent_acquisition', or 'behavioral'",
+        "ratio": {"hr_operations": 2, "talent_acquisition": 2, "behavioral": 1},
+        "labels": {
+            "hr_operations": "HR Operations & Compliance (hr_operations)",
+            "talent_acquisition": "Talent Acquisition & People Strategy (talent_acquisition)",
+            "behavioral": "Behavioral & Employee Relations (behavioral)",
+        },
+        "definitions": {
+            "hr_operations": "Core HR operations, employee onboarding, company policies, compliance, payroll, and workplace frameworks",
+            "talent_acquisition": "Recruitment lifecycle, talent sourcing, candidate screening/interviewing, job descriptions, and hiring strategy",
+            "behavioral": "Workplace scenarios, conflict resolution, stakeholder coordination, and culture fit from the provided list",
+        },
+    },
+    "sales": {
+        "options": "'sales_strategy', 'client_management', or 'behavioral'",
+        "ratio": {"sales_strategy": 2, "client_management": 2, "behavioral": 1},
+        "labels": {
+            "sales_strategy": "Sales Strategy & Pipeline (sales_strategy)",
+            "client_management": "Client Relationship & Negotiation (client_management)",
+            "behavioral": "Behavioral & Target Achievement (behavioral)",
+        },
+        "definitions": {
+            "sales_strategy": "Prospecting, lead qualification, sales funnel management, and revenue strategy",
+            "client_management": "Client communication, objection handling, pitch presentation, and closing deals",
+            "behavioral": "Handling rejection, managing quotas, collaboration, and resilience",
+        },
+    },
+    "marketing": {
+        "options": "'marketing_strategy', 'analytics_execution', or 'behavioral'",
+        "ratio": {"marketing_strategy": 2, "analytics_execution": 2, "behavioral": 1},
+        "labels": {
+            "marketing_strategy": "Marketing Strategy & Campaigns (marketing_strategy)",
+            "analytics_execution": "Analytics & Execution (analytics_execution)",
+            "behavioral": "Behavioral & Creative Collaboration (behavioral)",
+        },
+        "definitions": {
+            "marketing_strategy": "Brand positioning, content strategy, campaign planning, and audience segmentation",
+            "analytics_execution": "ROI tracking, conversion funnel, digital channels, SEO/SEM, and performance metrics",
+            "behavioral": "Creative problem solving, cross-functional alignment, and handling campaign setbacks",
+        },
+    },
+    "data": {
+        "options": "'data_engineering_querying', 'analysis_insights', or 'behavioral'",
+        "ratio": {"data_engineering_querying": 2, "analysis_insights": 2, "behavioral": 1},
+        "labels": {
+            "data_engineering_querying": "Data Engineering & Querying (data_engineering_querying)",
+            "analysis_insights": "Analysis & Insights (analysis_insights)",
+            "behavioral": "Behavioral (behavioral)",
+        },
+        "definitions": {
+            "data_engineering_querying": "Core data questions",
+            "analysis_insights": "Analytics questions",
+            "behavioral": "Behavioral questions from the provided list",
+        },
+    },
+    "design": {
+        "options": "'core_design', 'design_strategy', or 'behavioral'",
+        "ratio": {"core_design": 2, "design_strategy": 2, "behavioral": 1},
+        "labels": {
+            "core_design": "Core design (core_design)",
+            "design_strategy": "Design Strategy (design_strategy)",
+            "behavioral": "Behavioral (behavioral)",
+        },
+        "definitions": {
+            "core_design": "Core design questions",
+            "design_strategy": "Design Strategy questions",
+            "behavioral": "Behavioral questions from the provided list",
+        },
+    },
+    "non_tech": {
+        "options": "'core_domain', 'practical_scenario', or 'behavioral'",
+        "ratio": {"core_domain": 2, "practical_scenario": 2, "behavioral": 1},
+        "labels": {
+            "core_domain": "Core Domain Knowledge (core_domain)",
+            "practical_scenario": "Practical Scenarios & Execution (practical_scenario)",
+            "behavioral": "Behavioral & Communication (behavioral)",
+        },
+        "definitions": {
+            "core_domain": "Core domain principles, industry knowledge, and functional frameworks for the role",
+            "practical_scenario": "Real-world execution, case scenarios, operations, and problem solving",
+            "behavioral": "Teamwork, communication, stakeholder management, and ownership from the provided list",
+        },
+    },
+    "tech": {
+        "options": "'tech', 'tech_allied', or 'behavioral'",
+        "ratio": {"tech": 2, "tech_allied": 2, "behavioral": 1},
+        "labels": {
+            "tech": "Tech (tech)",
+            "tech_allied": "Tech Allied (tech_allied)",
+            "behavioral": "Behavioral (behavioral)",
+        },
+        "definitions": {
+            "tech": "Core technical questions for the target role",
+            "tech_allied": "Technical questions allied to the candidate's background/experience",
+            "behavioral": "Behavioral questions from the provided list",
+        },
+    },
+}
+
+
 async def generate_interview_questions_with_llm(
     track: str,
     context_text: str | None = None,
@@ -1473,64 +1575,99 @@ async def generate_interview_questions_with_llm(
     total = max(1, min(50, count or 3))
 
     track_words = set(track.lower().replace("-", " ").replace("_", " ").split())
+    track_lower = track.lower()
     job_category = (influence.get("category") or "").lower() if influence else ""
+    is_non_tech_flag = influence.get("is_non_tech", False) if influence else False
 
-    if job_category == "data" or "data" in track_words:
-        cat_mix = (
-            "- Data Engineering & Querying (data_engineering_querying): 2 questions\n"
-            "- Analysis & Insights (analysis_insights): 2 questions\n"
-            "- Behavioral (behavioral): 1 question\n"
-        )
-        cat_options = "'data_engineering_querying', 'analysis_insights', or 'behavioral'"
-        definitions = {
-            "data_engineering_querying": "Core data questions",
-            "analysis_insights": "Analytics questions",
-            "behavioral": "Behavioral questions from the provided list"
-        }
-        default_ratio = {"data_engineering_querying": 2, "analysis_insights": 2, "behavioral": 1}
-    elif job_category == "design" or "design" in track_words or "ui" in track_words or "ux" in track_words:
-        cat_mix = (
-            "- Core design (core_design): 2 questions\n"
-            "- Design Strategy (design_strategy): 2 questions\n"
-            "- Behavioral (behavioral): 1 question\n"
-        )
-        cat_options = "'core_design', 'design_strategy', or 'behavioral'"
-        definitions = {
-            "core_design": "Core design questions",
-            "design_strategy": "Design Strategy questions",
-            "behavioral": "Behavioral questions from the provided list"
-        }
-        default_ratio = {"core_design": 2, "design_strategy": 2, "behavioral": 1}
+    is_data = job_category == "data" or "data" in track_words
+    is_design = job_category == "design" or "design" in track_words or "ui" in track_words or "ux" in track_words
+    is_hr = (
+        job_category in ["hr", "human resources", "human_resources", "talent", "recruitment", "people"]
+        or "hr" in track_words
+        or "human resources" in track_lower
+        or "recruiter" in track_words
+        or "recruitment" in track_words
+        or "talent" in track_words
+    )
+    is_sales = job_category in ["sales", "business development", "bde"] or "sales" in track_words or "bde" in track_words
+    is_marketing = job_category in ["marketing", "growth"] or "marketing" in track_words
+    is_non_tech = is_non_tech_flag or is_hr or is_sales or is_marketing or (job_category in ["operations", "finance", "business", "legal"])
+
+    domain_key = "tech"
+    if is_data:
+        domain_key = "data"
+    elif is_design:
+        domain_key = "design"
+    elif is_hr:
+        domain_key = "hr"
+    elif is_sales:
+        domain_key = "sales"
+    elif is_marketing:
+        domain_key = "marketing"
+    elif is_non_tech:
+        domain_key = "non_tech"
+
+    spec = DOMAIN_SPECS[domain_key]
+    cat_options = spec["options"]
+    definitions = spec["definitions"]
+    active_ratio = ratio or spec["ratio"]
+    default_ratio = spec["ratio"]
+
+    # Compute category counts proportional to total requested questions using Largest Remainder Method (Hare-Niemeyer)
+    # to prevent trailing categories (such as behavioral) from being zeroed out due to integer truncation or greedy rounding.
+    total_weight = sum(active_ratio.values()) or 1
+    if not active_ratio:
+        cat_counts = {}
     else:
-        cat_mix = (
-            "- Tech (tech): 2 questions\n"
-            "- Tech Allied (tech_allied): 2 questions\n"
-            "- Behavioral (behavioral): 1 question\n"
+        exact_shares = {cat: (weight / total_weight) * total for cat, weight in active_ratio.items()}
+        cat_counts = {cat: int(share) for cat, share in exact_shares.items()}
+
+        # Sort categories by descending fractional remainder; tie-break by category weight
+        remainders = [
+            (share - cat_counts[cat], active_ratio[cat], cat)
+            for cat, share in exact_shares.items()
+        ]
+        remainders.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+        remaining_slots = total - sum(cat_counts.values())
+        for i in range(remaining_slots):
+            cat_counts[remainders[i % len(remainders)][2]] += 1
+
+    cat_mix_lines = [
+        f"- {spec['labels'].get(cat, cat)}: {cnt} question{'s' if cnt != 1 else ''}"
+        for cat, cnt in cat_counts.items()
+        if cnt > 0
+    ]
+    cat_mix = "\n".join(cat_mix_lines) + "\n"
+
+    if is_non_tech:
+        role_type_str = "professional"
+        role_mandate_rule = (
+            f"6. STRICT NON-TECHNICAL MANDATE: This is a non-technical {track} role. "
+            f"All questions MUST be strictly relevant to {track} and the provided job description. "
+            "Do NOT ask any programming, software coding, JavaScript, or developer syntax questions."
         )
-        cat_options = "'tech', 'tech_allied', or 'behavioral'"
-        definitions = {
-            "tech": "Core technical questions for the target role",
-            "tech_allied": "Technical questions allied to the candidate's background/experience",
-            "behavioral": "Behavioral questions from the provided list"
-        }
-        default_ratio = {"tech": 2, "tech_allied": 2, "behavioral": 1}
+    else:
+        role_type_str = "technical"
+        role_mandate_rule = (
+            f"6. STRICT ROLE FOCUS: All technical questions MUST be strictly focused on {track} "
+            "and the relevant tech stack/skills mentioned in the job context. "
+            "Do NOT ask questions about unrelated programming languages, frameworks, or defaults."
+        )
 
     sys_prompt = (
-        "You are an expert technical interviewer generating a set of exactly {count} interview questions for a candidate in the {track} role.\n\n"
+        f"You are an expert {role_type_str} interviewer generating a set of exactly {{count}} interview questions for a candidate in the {{track}} role.\n\n"
         "STRICT CATEGORY DISTRIBUTION MANDATE:\n"
         "You MUST generate the questions following this EXACT category mix:\n"
         f"{cat_mix}\n"
         "RULES FOR QUESTION GENERATION:\n"
         f"1. The 'category' field for each item MUST strictly be set to one of: {cat_options}.\n"
         "2. Ensure questions are suitable for spoken verbal answers (no coding or writing code).\n"
-        "3. Ask deep, targeted technical and situational questions that require thoughtful answers.\n"
+        "3. Ask deep, targeted questions that require thoughtful answers.\n"
         "4. Return ONLY valid JSON with key 'items' containing array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output.\n"
-        "5. The 'keywords' array MUST contain at most 2 keywords."
+        "5. The 'keywords' array MUST contain at most 2 keywords.\n"
+        f"{role_mandate_rule}"
     ).format(count=total, track=track)
-        # "You are an expert interviewer. Generate concise, specific interview questions for a candidate. "
-        # "Avoid open-ended prompts; ask targeted questions that require concrete answers, but keep in mind to ask deep questions that will take time to answer NOT one sentence or one word answers"
-        # "Return ONLY valid JSON with key: 'items' (array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output)."
-        # "Understand that this is a verbal interview setting, so questions should STRICTLY be suitable for strictly spoken responses."
     knowledge_reference_context = (influence or {}).get("knowledge_reference_context")
     if knowledge_reference_context:
         sys_prompt += (
@@ -1546,32 +1683,40 @@ async def generate_interview_questions_with_llm(
         )
     # Prepare a sampled syllabus so we don't send the entire topic bank to the LLM
     topics = syllabus_topics or {}
-    r = ratio or {"tech": 2, "tech_allied": 2, "behavioral": 1}
-    # Normalize ratio to total questions (we use it only as guidance for sampling size)
-    r_tech = max(0, r.get("tech", 0))
-    r_allied = max(0, r.get("tech_allied", 0))
-    r_beh = max(0, r.get("behavioral", 0))
+    r = ratio or default_ratio
 
     def _pick(ls: list[str] | None, n: int) -> list[str]:
         pool = list(ls or [])
         if not pool:
             return []
         k = min(len(pool), max(1, n))
-        # random.sample requires k <= len(pool)
         return random.sample(pool, k)
 
-    # Heuristic: provide up to 2x topics per expected question in that category (min 3)
-    tech_pool = _pick(topics.get("tech"), max(2, r_tech * 2))
-    allied_pool = _pick(topics.get("tech_allied"), max(2, r_allied * 2))
-    beh_pool_full = list(topics.get("behavioral", []))
-    beh_pool = _pick(beh_pool_full, max(3, r_beh * 2 if r_beh > 0 else 3))
+    if is_non_tech:
+        skills_from_inf = (influence.get("skills") if influence else []) or []
+        allied_source = list(topics.get("tech_allied") or skills_from_inf or [])
+        allied_pool = _pick(list(dict.fromkeys(allied_source)), 4)
+        beh_pool_full = list(topics.get("behavioral", []))
+        beh_pool = _pick(beh_pool_full, 3)
+        sampled_syllabus = {
+            "domain_topics": allied_pool,
+            "behavioral": beh_pool,
+        }
+    else:
+        r_tech = max(0, r.get("tech", 0))
+        r_allied = max(0, r.get("tech_allied", 0))
+        r_beh = max(0, r.get("behavioral", 0))
 
-    sampled_syllabus = {
-        "tech": tech_pool,
-        "tech_allied": allied_pool,
-        # Keep behavioral also as part of syllabus for uniformity; LLM will still honor categories
-        "behavioral": beh_pool,
-    }
+        tech_pool = _pick(topics.get("tech"), max(2, r_tech * 2))
+        allied_pool = _pick(topics.get("tech_allied"), max(2, r_allied * 2))
+        beh_pool_full = list(topics.get("behavioral", []))
+        beh_pool = _pick(beh_pool_full, max(3, r_beh * 2 if r_beh > 0 else 3))
+
+        sampled_syllabus = {
+            "tech": tech_pool,
+            "tech_allied": allied_pool,
+            "behavioral": beh_pool,
+        }
 
     exclude_list = (influence or {}).get("exclude_questions", [])
     constraints = [
@@ -1585,7 +1730,9 @@ async def generate_interview_questions_with_llm(
         "Follow the depth guidelines for the given difficulty",
         "Ask deep questions but make sure they have a clear, specific answer"
     ]
-    if not (job_category == "data" or "data" in track_words or job_category == "design" or "design" in track_words or "ui" in track_words or "ux" in track_words):
+    if is_non_tech:
+        constraints.append("Questions should assess real-world business scenarios, execution, and domain expertise from the job description")
+    elif not (is_data or is_design):
         constraints.append("Tech-allied questions should be related to the candidate's experience/skills when available")
 
     if exclude_list:
