@@ -8,6 +8,7 @@ from src.securities.authorizations.jwt import jwt_generator
 from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTokenError
 from src.securities.authorizations.access_revocation import is_access_revoked
 from src.api.dependencies.repository import get_repository
+from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
 
 # Create HTTPBearer security scheme for Swagger UI
 security = HTTPBearer()
@@ -53,19 +54,25 @@ async def get_current_user(
 
     try:
         user = await user_repo.get_user_by_email(email=email)
-        if not user:
-            raise fastapi.HTTPException(
-                status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
-                detail="User not found",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+    except EntityDoesNotExist:
+        # First time this SSO-verified identity hits the Samvaad backend. Mirror
+        # what auth_sso.py does on the /authorize callback: create a local row so
+        # subsequent requests (analytics, interviews, etc.) can find the user.
+        # auth_sso.py only runs when students go through the SSO interview link;
+        # admin-only users (who only hit the dashboard) never trigger that path.
+        name = (email or "").split("@")[0]
+        try:
+            user = await user_repo.create_user(email=email, password="", name=name)
+        except EntityAlreadyExists:
+            # Race between two concurrent first requests — re-fetch the now-existing row.
+            user = await user_repo.get_user_by_email(email=email)
     except Exception:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
             detail="User not found in database",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     return user
 
 
