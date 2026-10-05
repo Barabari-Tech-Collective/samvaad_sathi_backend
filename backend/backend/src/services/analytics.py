@@ -235,8 +235,23 @@ class AnalyticsService:
         if interview is None:
             return None
 
+        from sqlalchemy.orm import load_only
         questions_stmt = (
             sqlalchemy.select(InterviewQuestion)
+            .options(load_only(
+                InterviewQuestion.id,
+                InterviewQuestion.text,
+                InterviewQuestion.topic,
+                InterviewQuestion.category,
+                InterviewQuestion.status,
+                InterviewQuestion.order,
+                InterviewQuestion.interview_id,
+                InterviewQuestion.resume_used,
+                InterviewQuestion.is_follow_up,
+                InterviewQuestion.parent_question_id,
+                InterviewQuestion.follow_up_strategy,
+                InterviewQuestion.audio_url,
+            ))
             .where(InterviewQuestion.interview_id == interview_id)
             .order_by(InterviewQuestion.order.asc())
         )
@@ -937,7 +952,19 @@ class AnalyticsService:
     async def _questions_for_interviews(self, interview_ids: list[int]) -> list[InterviewQuestion]:
         if not interview_ids:
             return []
-        stmt = sqlalchemy.select(InterviewQuestion).where(InterviewQuestion.interview_id.in_(interview_ids))
+        from sqlalchemy.orm import load_only
+        stmt = (
+            sqlalchemy.select(InterviewQuestion)
+            .options(load_only(
+                InterviewQuestion.id,
+                InterviewQuestion.text,
+                InterviewQuestion.category,
+                InterviewQuestion.interview_id,
+                InterviewQuestion.topic,
+                InterviewQuestion.audio_url,
+            ))
+            .where(InterviewQuestion.interview_id.in_(interview_ids))
+        )
         return list((await self._db.execute(stmt)).scalars().all())
 
     async def _reattempt_stats(
@@ -1361,7 +1388,17 @@ class AnalyticsService:
         if not interview_ids:
             return {"low_score_questions": [], "high_dropoff_questions": []}
 
-        questions_stmt = sqlalchemy.select(InterviewQuestion).where(InterviewQuestion.interview_id.in_(interview_ids))
+        from sqlalchemy.orm import load_only
+        questions_stmt = (
+            sqlalchemy.select(InterviewQuestion)
+            .options(load_only(
+                InterviewQuestion.id,
+                InterviewQuestion.text,
+                InterviewQuestion.category,
+                InterviewQuestion.interview_id,
+            ))
+            .where(InterviewQuestion.interview_id.in_(interview_ids))
+        )
         attempts_stmt = sqlalchemy.select(QuestionAttempt).where(QuestionAttempt.interview_id.in_(interview_ids))
 
         questions = list((await self._db.execute(questions_stmt)).scalars().all())
