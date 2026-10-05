@@ -9,7 +9,7 @@ from src.services.syllabus_service import syllabus_service
 logger = logging.getLogger(__name__)
 
 LEVEL_MAP = {1: "easy", 2: "medium", 3: "hard", 4: "expert"}
-BATCH_SIZE = 40
+BATCH_SIZE = 20
 MAX_CONCURRENT_BATCHES = 5
 
 
