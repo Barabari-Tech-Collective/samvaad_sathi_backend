@@ -1655,6 +1655,41 @@ async def generate_interview_questions_with_llm(
             "Do NOT ask questions about unrelated programming languages, frameworks, or defaults."
         )
 
+    # Level-specific archetype constraint — aligns the question character with
+    # what each level label promises on the admin review screen.
+    _level_int = int((influence or {}).get("level", 0))
+    _level_archetypes = {
+        1: (
+            "7. LEVEL 1 — GENERAL FUNDAMENTALS: Questions must test core conceptual "
+            "knowledge, terminology, and first-principles understanding. They must be "
+            "answerable without any production or project experience. No scenario-based "
+            "or debugging questions at this level."
+        ),
+        2: (
+            "7. LEVEL 2 — PROJECT & RESUME BASED: Questions must probe the candidate's "
+            "direct implementation experience. Ask about specific design decisions, "
+            "trade-offs, or challenges from their past projects. Use the provided resume "
+            "or job-description context to ground the questions in what the candidate has "
+            "actually built or worked on. Avoid purely theoretical questions."
+        ),
+        3: (
+            "7. LEVEL 3 — PRODUCTION & SCENARIO BASED: Questions must require production "
+            "experience to answer. Focus on live-system debugging, operational failure "
+            "modes, scaling trade-offs, incident response, and real-world edge cases. "
+            "Frame questions as concrete scenarios ('You are on-call and X happens — "
+            "what do you do?'). Require evidence of having operated systems at scale."
+        ),
+        4: (
+            "7. LEVEL 4 — ADVANCED / PRESSURE SCENARIOS: Questions must be high-stakes "
+            "and expert-level. Probe architectural decision defence under constraints, "
+            "navigating genuinely ambiguous requirements, evaluating competing approaches "
+            "at scale, and leading through technical complexity. Questions should have no "
+            "single correct answer — the goal is to stress-test reasoning and judgement "
+            "under pressure, not recall of facts."
+        ),
+    }
+    level_archetype_rule = _level_archetypes.get(_level_int, "")
+
     sys_prompt = (
         f"You are an expert {role_type_str} interviewer generating a set of exactly {{count}} interview questions for a candidate in the {{track}} role.\n\n"
         "STRICT CATEGORY DISTRIBUTION MANDATE:\n"
@@ -1667,6 +1702,7 @@ async def generate_interview_questions_with_llm(
         "4. Return ONLY valid JSON with key 'items' containing array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output.\n"
         "5. The 'keywords' array MUST contain at most 2 keywords.\n"
         f"{role_mandate_rule}"
+        + (f"\n{level_archetype_rule}" if level_archetype_rule else "")
     ).format(count=total, track=track)
     knowledge_reference_context = (influence or {}).get("knowledge_reference_context")
     if knowledge_reference_context:
