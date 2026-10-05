@@ -1,5 +1,6 @@
 import logging
 import pathlib
+import urllib.parse
 
 import decouple
 import pydantic
@@ -80,8 +81,7 @@ class BackendBaseSettings(BaseSettings):
         "http://127.0.0.1:5173",  # Qwik docker port
         "http://127.0.0.1:5174",
         "https://backend-samvaad-saathi.barabaricollective.org",
-        "https://samvaad-saathi-frontend.vercel.app" #vercel new prod
-        "https://samvaad-saathi-frontend.vercel.app", #vercel new prod
+        "https://samvaad-saathi-frontend.vercel.app",  # vercel new prod
         "https://samvaad-sathi.barabaricollective.org",  # Production frontend (without www)
         "https://www.samvaad-sathi.barabaricollective.org",  # Production frontend (with www)
         "https://dev-backend-samvaadsathi.barabaricollective.org",  # Dev backend (for local frontend testing)
@@ -100,6 +100,28 @@ class BackendBaseSettings(BaseSettings):
     ]
     ALLOWED_METHODS: list[str] = ["*"]
     ALLOWED_HEADERS: list[str] = ["*"]
+
+    @pydantic.field_validator("ALLOWED_ORIGINS")
+    @classmethod
+    def _reject_malformed_origins(cls, origins: list[str]) -> list[str]:
+        """
+        A missing comma between two entries above is invisible: Python concatenates the
+        adjacent literals into one garbage origin ("https://a.comhttps://b.com") that
+        matches nothing, so the origin looks allow-listed but silently gets CORS-rejected.
+        Fail at import time instead of at 2am in a browser console.
+        """
+        for origin in origins:
+            parsed = urllib.parse.urlparse(origin)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise ValueError(f"ALLOWED_ORIGINS entry is not a valid origin: {origin!r}")
+            # CORS compares the Origin header literally, so anything past the host
+            # (path, query, trailing slash) can never match — and "://" appearing twice
+            # is the signature of the missing-comma concatenation described above.
+            if parsed.path or parsed.params or parsed.query or parsed.fragment:
+                raise ValueError(
+                    f"ALLOWED_ORIGINS entry must be scheme://host[:port] with no trailing path: {origin!r}"
+                )
+        return origins
 
     LOGGING_LEVEL: int = logging.INFO
     LOGGERS: tuple[str, str] = ("uvicorn.asgi", "uvicorn.access")
