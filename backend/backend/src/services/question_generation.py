@@ -103,8 +103,31 @@ async def generate_questions_for_level(
 
     batch_results = await asyncio.gather(*[fetch_batch(b, i) for i, b in enumerate(batches)])
 
-    items: list[tuple[int, str, dict]] = []
+    all_raw: list[dict] = []
     for res in batch_results:
-        for item in res:
-            items.append((level, difficulty, item))
-    return items
+        all_raw.extend(res)
+
+    # LLMs don't always return exactly the requested count — top up if short.
+    shortfall = count - len(all_raw)
+    if 0 < shortfall <= 15:
+        logger.warning(
+            "Level %d (%s): got %d/%d questions — topping up %d",
+            level, difficulty, len(all_raw), count, shortfall,
+        )
+        try:
+            _, fill_error, _, _, fill_items = await generate_interview_questions_with_llm(
+                track=track,
+                context_text=context_text,
+                count=shortfall + 3,  # slight over-ask so we definitely get enough
+                difficulty=difficulty,
+                syllabus_topics=topics,
+                ratio=ratio,
+                influence=dict(influence),
+            )
+            if fill_items and not fill_error:
+                all_raw.extend(fill_items[:shortfall])
+                logger.info("Top-up succeeded: now have %d/%d for level %d", len(all_raw), count, level)
+        except Exception as fill_exc:
+            logger.warning("Top-up call failed for level %d (%s): %s", level, difficulty, fill_exc)
+
+    return [(level, difficulty, item) for item in all_raw[:count]]
