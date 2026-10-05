@@ -2020,6 +2020,7 @@ async def analyze_domain_with_llm(
     user_profile: dict[str, Any],
     question_text: str | None,
     transcription: str,
+    expected_answer: str | None = None,
 ) -> tuple[dict[str, Any], str | None, int | None, str]:
     """
     Perform domain knowledge analysis using LLM. Returns (analysis_json, error, latency_ms, model).
@@ -2045,9 +2046,15 @@ async def analyze_domain_with_llm(
     error: str | None = None
     analysis: dict[str, Any] = {}
 
+    rubric_clause = (
+        " Use the provided expected_answer as a rubric: award full marks for coverage of the key points it contains, "
+        "deduct proportionally for missing or incorrect points, and note any extra correct insights as strengths."
+        if expected_answer else ""
+    )
     sys_prompt = (
-        "You are a strict technical interviewer. Assess the candidate's domain knowledge based on the transcript. "
-        "Return ONLY valid JSON with keys: overall_score (0-100), criteria (object with correctness/depth/coverage/"
+        "You are a strict technical interviewer. Assess the candidate's domain knowledge based on the transcript."
+        + rubric_clause +
+        " Return ONLY valid JSON with keys: overall_score (0-100), criteria (object with correctness/depth/coverage/"
         "relevance each having score (0-100) and reasons (string[]), misconceptions (present: bool, notes: string[]), "
         "examples (present: bool, notes: string[])), summary (string), strengths (string[] of positive aspects), "
         "improvements (string[] of areas to improve), confidence (0-1). "
@@ -2059,11 +2066,13 @@ async def analyze_domain_with_llm(
         "leave strengths empty, and set improvements to state clearly that no substantial answer was given — do not "
         "invent partial credit or plausible-sounding feedback for content that wasn't actually said."
     )
-    user_content = {
+    user_content: dict[str, Any] = {
         "user_profile": {k: v for k, v in user_profile.items() if v is not None},
         "question": question_text or "",
         "transcription": (transcription or "")[:8000],
     }
+    if expected_answer:
+        user_content["expected_answer"] = expected_answer[:2000]
 
     def _clean_and_parse_json(raw_text: str) -> dict[str, Any]:
         text = (raw_text or "").strip()

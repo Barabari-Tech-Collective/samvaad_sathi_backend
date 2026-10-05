@@ -495,11 +495,12 @@ async def generate_questions_v2(
                 for q in selected:
                     items.append({
                         "text": q.question_text,
-                        "topic": "General",
-                        "category": "tech",
+                        "topic": getattr(q, "question_type", None) or "General",
+                        "category": getattr(q, "category", None) or "tech",
                         "followUpStrategy": FOLLOW_UP_STRATEGY,
                         "audioUrl": getattr(q, "audio_url", None),
                         "job_profile_question_id": q.id,
+                        "expected_answer": getattr(q, "expected_answer", None),
                     })
 
         if not questions:
@@ -763,10 +764,11 @@ async def generate_non_tech_questions_v2(
                 for q in selected:
                     questions_data.append({
                         "text": q.question_text,
-                        "topic": "General",
-                        "category": "general",
+                        "topic": getattr(q, "question_type", None) or "General",
+                        "category": getattr(q, "category", None) or "general",
                         "audio_url": getattr(q, "audio_url", None),
                         "job_profile_question_id": q.id,
+                        "expected_answer": getattr(q, "expected_answer", None),
                     })
 
         if not questions_data:
