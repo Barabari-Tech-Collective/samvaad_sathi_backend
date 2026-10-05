@@ -662,7 +662,9 @@ async def generate_questions_v2(
     context_text = profile.job_description
 
     async def safe_fetch_batch(track, context_text, b_count, difficulty, topics, ratio, current_influence):
-        max_retries = 3
+        # TODO(architecture): Lift operational parameters (max_retries, backoff bounds, and max_passes)
+        # to .env / BackendBaseSettings in future configuration refactoring.
+        max_retries = 4
         error = None
         for attempt in range(max_retries):
             async with GLOBAL_LLM_SEMAPHORE:
@@ -679,7 +681,7 @@ async def generate_questions_v2(
                 return structured_items
             logger.warning(f"Batch failed on attempt {attempt+1}/{max_retries}: {error}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(min(8.0, 1.5 * (2 ** attempt)))
         raise Exception(f"Failed after {max_retries} attempts. Last error: {error}")
 
     async def fetch_batch_with_semaphore(b_count, batch_idx, l, difficulty, topics, ratio, current_influence):
@@ -700,44 +702,18 @@ async def generate_questions_v2(
             
         difficulty = level_map[l.level]
         
-        # Prepare syllabus and question ratio using existing syllabus service
-        role = syllabus_service._role_manager.derive_role(track)
-        topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
-        
-        topics = {
-            "tech": topic_bank.tech,
-            "tech_allied": topic_bank.tech_allied,
-            "behavioral": topic_bank.behavioral,
-            "archetypes": topic_bank.archetypes,
-            "depth_guidelines": topic_bank.depth_guidelines,
-        }
-        
-        # Extract tech-allied topics from job description
-        topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
-            resume_text=context_text,
-            skills=skills_list,
-            fallback_topics=topics.get("tech_allied", []),
+        # Prepare syllabus and question ratio using syllabus service
+        gen_ctx = syllabus_service.resolve_generation_context(
+            track=track,
+            category=profile.category,
+            difficulty=difficulty,
+            context_text=context_text,
+            skills_list=skills_list,
+            experience_level=profile.experience_level,
         )
-        
-        question_ratio = syllabus_service.compute_question_ratio(
-            years_experience=None,
-            has_resume_text=bool(context_text),
-            has_skills=bool(skills_list),
-        )
-        
-        ratio = {
-            "tech": question_ratio.tech,
-            "tech_allied": question_ratio.tech_allied,
-            "behavioral": question_ratio.behavioral,
-        }
-        
-        influence = {
-            "target_role": role,
-            "category": profile.category,
-            "difficulty": difficulty,
-            "skills": skills_list,
-            "experience_level": profile.experience_level,
-        }
+        topics = gen_ctx["topics"]
+        ratio = gen_ctx["ratio"]
+        influence = gen_ctx["influence"]
         if payload.knowledge_reference_context:
             influence["knowledge_reference_context"] = payload.knowledge_reference_context
 
@@ -746,7 +722,7 @@ async def generate_questions_v2(
         level_generated_items = []
         batch_idx_offset = 0
         
-        max_passes = 3
+        max_passes = 4
         passes = 0
         
         while remaining > 0 and passes < max_passes:
@@ -1091,39 +1067,17 @@ async def regenerate_job_profile_question_v2(
     difficulty = level_map.get(question.level, "easy")
 
     # 4. Prepare syllabus and ratio
-    role = syllabus_service._role_manager.derive_role(track)
-    topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
-
-    topics = {
-        "tech": topic_bank.tech,
-        "tech_allied": topic_bank.tech_allied,
-        "behavioral": topic_bank.behavioral,
-        "archetypes": topic_bank.archetypes,
-        "depth_guidelines": topic_bank.depth_guidelines,
-    }
-    topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
-        resume_text=context_text,
-        skills=skills_list,
-        fallback_topics=topics.get("tech_allied", []),
+    gen_ctx = syllabus_service.resolve_generation_context(
+        track=track,
+        category=profile.category,
+        difficulty=difficulty,
+        context_text=context_text,
+        skills_list=skills_list,
+        experience_level=profile.experience_level,
     )
-
-    question_ratio = syllabus_service.compute_question_ratio(
-        years_experience=None,
-        has_resume_text=bool(context_text),
-        has_skills=bool(skills_list),
-    )
-    ratio = {
-        "tech": question_ratio.tech,
-        "tech_allied": question_ratio.tech_allied,
-        "behavioral": question_ratio.behavioral,
-    }
-
-    influence = {
-        "target_role": role,
-        "difficulty": difficulty,
-        "skills": skills_list,
-        "experience_level": profile.experience_level,
-    }
+    topics = gen_ctx["topics"]
+    ratio = gen_ctx["ratio"]
+    influence = gen_ctx["influence"]
 
     # 5. Generate new question using existing LLM service
     questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
