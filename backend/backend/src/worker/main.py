@@ -7,10 +7,10 @@ See deploy/samvaad-worker.service for a systemd unit that runs this.
 """
 
 from src.worker.settings import redis_settings
-from src.worker.tasks import submit_resume_score_task
+from src.worker.tasks import generate_questions_task, submit_resume_score_task
 
 
 class WorkerSettings:
-    functions = [submit_resume_score_task]
+    functions = [submit_resume_score_task, generate_questions_task]
     redis_settings = redis_settings
-    max_tries = 3
+    max_tries = 1  # question generation must not auto-retry (would create duplicate questions)

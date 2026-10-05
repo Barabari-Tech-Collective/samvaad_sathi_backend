@@ -228,6 +228,18 @@ class JobProfileGenerateQuestionsResponse(BaseSchemaModel):
     questions: List[JobProfileGeneratedQuestionItem]
 
 
+class JobProfileGenerateJobEnqueuedResponse(BaseSchemaModel):
+    job_id: str
+    status: str  # "queued"
+
+
+class JobProfileGenerateJobStatusResponse(BaseSchemaModel):
+    job_id: str
+    status: str  # "queued" | "in_progress" | "complete" | "failed" | "not_found" | "unknown"
+    questions_count: Optional[int] = None
+    error: Optional[str] = None
+
+
 # --- Get Questions Schemas ---
 class JobProfileQuestionLevelCounts(BaseSchemaModel):
     level_1: int = 0

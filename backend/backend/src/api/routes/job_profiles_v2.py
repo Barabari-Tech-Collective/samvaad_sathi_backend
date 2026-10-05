@@ -7,8 +7,8 @@ from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.admin import get_current_admin_user
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.job_profile import (
-    JobProfileSummaryResponse, 
-    JobProfileResponse, 
+    JobProfileSummaryResponse,
+    JobProfileResponse,
     JobProfileCreateV2,
     JobProfileUpdateV2,
     JobProfileListResponse,
@@ -19,6 +19,8 @@ from src.models.schemas.job_profile import (
     JobProfileGenerateQuestionsRequest,
     JobProfileGenerateQuestionsResponse,
     JobProfileGeneratedQuestionItem,
+    JobProfileGenerateJobEnqueuedResponse,
+    JobProfileGenerateJobStatusResponse,
     JobProfileQuestionsListResponse,
     JobProfileQuestionItem,
     JobProfileQuestionLevelCounts,
@@ -44,6 +46,7 @@ from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.syllabus_service import syllabus_service
 from src.api.dependencies.admin import is_admin_user
+from src.worker.queue import enqueue_job, get_job_status
 
 def check_is_admin_dep(current_user=fastapi.Depends(get_current_user)) -> bool:
     return is_admin_user(current_user)
@@ -607,207 +610,92 @@ GLOBAL_LLM_SEMAPHORE = asyncio.Semaphore(5)
 @router.post(
     path="/job-profiles/{job_profile_id}/questions/generate",
     name="job-profiles:generate-questions",
-    response_model=JobProfileGenerateQuestionsResponse,
-    status_code=fastapi.status.HTTP_200_OK,
-    summary="Generate AI interview questions for a Job Profile",
+    response_model=JobProfileGenerateJobEnqueuedResponse,
+    status_code=fastapi.status.HTTP_202_ACCEPTED,
+    summary="Enqueue AI question generation for a Job Profile (returns immediately)",
 )
 async def generate_questions_v2(
     job_profile_id: int,
     payload: JobProfileGenerateQuestionsRequest,
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
-) -> JobProfileGenerateQuestionsResponse:
-    # 1. Fetch job profile details & validate existence
+) -> JobProfileGenerateJobEnqueuedResponse:
+    # 1. Validate profile exists
     profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
     if profile is None:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
-            detail=f"Job profile with ID {job_profile_id} not found"
+            detail=f"Job profile with ID {job_profile_id} not found",
         )
 
-    # 2. Level to difficulty map
-    level_map = {
-        1: "easy",
-        2: "medium",
-        3: "hard",
-        4: "expert"
-    }
-
-    # 3. Validate levels and counts
+    # 2. Validate levels and counts
+    valid_levels = {1, 2, 3, 4}
     total_requested = 0
     for l in payload.levels:
-        if l.level not in level_map:
+        if l.level not in valid_levels:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid level {l.level}. Level must be 1, 2, 3, or 4."
+                detail=f"Invalid level {l.level}. Must be 1, 2, 3, or 4.",
             )
         if l.count < 0:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid count {l.count} for level {l.level}. Count cannot be negative."
+                detail=f"Invalid count {l.count} for level {l.level}. Cannot be negative.",
             )
         total_requested += l.count
 
     if total_requested == 0:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-            detail="Total question count must be greater than zero."
+            detail="Total question count must be greater than zero.",
         )
 
-    # 4. Generate questions using existing LLM system
-    generated_questions_data = []
+    # 3. Enqueue background job — returns immediately so Cloudflare never times out
+    job_id = await enqueue_job(
+        "generate_questions_task",
+        job_profile_id=job_profile_id,
+        levels=[{"level": l.level, "count": l.count} for l in payload.levels],
+        knowledge_reference_context=payload.knowledge_reference_context,
+    )
 
-    skills_list = profile.skills or []
-    track = profile.job_name
-    context_text = profile.job_description
-
-    async def safe_fetch_batch(track, context_text, b_count, difficulty, topics, ratio, current_influence):
-        # TODO(architecture): Lift operational parameters (max_retries, backoff bounds, and max_passes)
-        # to .env / BackendBaseSettings in future configuration refactoring.
-        max_retries = 3
-        error = None
-        for attempt in range(max_retries):
-            async with GLOBAL_LLM_SEMAPHORE:
-                questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
-                    track=track,
-                    context_text=context_text,
-                    count=b_count,
-                    difficulty=difficulty,
-                    syllabus_topics=topics,
-                    ratio=ratio,
-                    influence=current_influence,
-                )
-            if not error and structured_items:
-                return structured_items
-            logger.warning(f"Batch failed on attempt {attempt+1}/{max_retries}: {error}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(min(3.0, 1.0 * (2 ** attempt)))
-        raise Exception(f"Failed after {max_retries} attempts. Last error: {error}")
-
-    async def fetch_batch_with_semaphore(b_count, batch_idx, l, difficulty, topics, ratio, current_influence):
-        logger.info(f"Batch {batch_idx} Level {l.level}: REQUESTING {b_count} questions.")
-        try:
-            structured_items = await safe_fetch_batch(
-                track, context_text, b_count, difficulty, topics, ratio, current_influence
-            )
-            logger.info(f"Batch {batch_idx} Level {l.level}: RECEIVED {len(structured_items)} questions.")
-            return structured_items
-        except Exception as e:
-            logger.error(f"Batch {batch_idx} Level {l.level}: FAILED after retries. Error: {e}")
-            return []
-
-    async def process_level(l):
-        if l.count == 0:
-            return []
-            
-        difficulty = level_map[l.level]
-        
-        # Prepare syllabus and question ratio using syllabus service
-        gen_ctx = syllabus_service.resolve_generation_context(
-            track=track,
-            category=profile.category,
-            difficulty=difficulty,
-            context_text=context_text,
-            skills_list=skills_list,
-            experience_level=profile.experience_level,
+    if job_id is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Job queue is temporarily unavailable. Please try again in a moment.",
         )
-        topics = gen_ctx["topics"]
-        ratio = gen_ctx["ratio"]
-        influence = gen_ctx["influence"]
-        if payload.knowledge_reference_context:
-            influence["knowledge_reference_context"] = payload.knowledge_reference_context
 
-        remaining = l.count
-        batch_size = 10
-        level_generated_items = []
-        batch_idx_offset = 0
-        
-        max_passes = 3
-        passes = 0
-        
-        while remaining > 0 and passes < max_passes:
-            passes += 1
-            # Plan batches for the current remaining count
-            batches = []
-            temp_remaining = remaining
-            while temp_remaining > 0:
-                batches.append(min(temp_remaining, batch_size))
-                temp_remaining -= batches[-1]
-            
-            # Fetch all planned batches concurrently for this pass
-            tasks = [
-                fetch_batch_with_semaphore(
-                    b_count, batch_idx_offset + i + 1, l, difficulty, topics, ratio, dict(influence)
-                )
-                for i, b_count in enumerate(batches)
-            ]
-            batch_results = await asyncio.gather(*tasks)
-            batch_idx_offset += len(batches)
-            
-            added_in_this_pass = 0
-            for structured_items in batch_results:
-                # Ensure we don't add more than remaining questions
-                if len(structured_items) > remaining:
-                    structured_items = structured_items[:remaining]
-                    
-                level_generated_items.extend(structured_items)
-                added_in_this_pass += len(structured_items)
-                remaining -= len(structured_items)
-                
-            if added_in_this_pass == 0:
-                logger.warning(f"Level {l.level}: Failed to gather more questions. Stopping early.")
-                break
+    logger.info(
+        "Enqueued generate_questions_task job_id=%s for job_profile_id=%d (%d questions)",
+        job_id, job_profile_id, total_requested,
+    )
+    return JobProfileGenerateJobEnqueuedResponse(job_id=job_id, status="queued")
 
-        return [(l.level, difficulty, item) for item in level_generated_items]
 
-    # Process all requested levels in parallel
-    results = await asyncio.gather(*[process_level(l) for l in payload.levels])
+@router.get(
+    path="/job-profiles/{job_profile_id}/questions/generate/status/{job_id}",
+    name="job-profiles:generate-questions-status",
+    response_model=JobProfileGenerateJobStatusResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Poll the status of a question-generation job",
+)
+async def get_generate_questions_status(
+    job_profile_id: int,
+    job_id: str,
+    current_user=fastapi.Depends(get_current_user),
+) -> JobProfileGenerateJobStatusResponse:
+    status_info = await get_job_status(job_id)
+    status = status_info.get("status", "unknown")
 
-    for level_results in results:
-        for level, difficulty, item in level_results:
-            generated_questions_data.append({
-                "job_profile_id": profile.id,
-                "question_text": item["text"],
-                "level": level,
-                "difficulty": difficulty,
-                "question_type": item.get("category", "theoretical"),
-                "is_ai_generated": True,
-                "keywords": item.get("keywords") or [],
-                "concepts_covered": item.get("concepts_covered") or [],
-                "expected_answer": item.get("expected_answer"),
-                "example_output": item.get("example_output"),
-            })
+    questions_count: int | None = None
+    if status == "complete":
+        result = status_info.get("result") or {}
+        questions_count = result.get("count")
 
-    # 5. Save generated questions into database
-    db_questions = await job_profile_repo.create_job_profile_questions(generated_questions_data)
-
-    # 6. Format and return response
-    response_items = [
-        JobProfileGeneratedQuestionItem(
-            question_id=str(q.id),
-            question=q.question_text,
-            level=q.level,
-            difficulty=q.difficulty,
-            type=q.question_type,
-            is_ai_generated=q.is_ai_generated,
-            keywords=getattr(q, "keywords", []) or [],
-            concepts_covered=getattr(q, "concepts_covered", []) or [],
-            expected_answer=getattr(q, "expected_answer", None),
-            example_output=getattr(q, "example_output", None),
-        )
-        for q in db_questions
-    ]
-
-    warning = None
-    if len(response_items) < total_requested:
-        warning = f"Requested {total_requested} questions, but only generated {len(response_items)}. The AI model may be returning partial results."
-
-    return JobProfileGenerateQuestionsResponse(
-        job_profile_id=str(profile.id),
-        total_questions=len(response_items),
-        requested_total=total_requested,
-        warning=warning,
-        questions=response_items
+    return JobProfileGenerateJobStatusResponse(
+        job_id=job_id,
+        status=status,
+        questions_count=questions_count,
+        error=status_info.get("error"),
     )
 
 
