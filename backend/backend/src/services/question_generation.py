@@ -11,6 +11,10 @@ logger = logging.getLogger(__name__)
 LEVEL_MAP = {1: "easy", 2: "medium", 3: "hard", 4: "expert"}
 BATCH_SIZE = 20
 MAX_CONCURRENT_BATCHES = 5
+# LLMs don't reliably return exactly N items — ask for N + this buffer, then trim.
+# At BATCH_SIZE=20, each question ≈ 250 tokens → 20 qs ≈ 5000 tokens; cap is 8000.
+# Buffer of 4 uses ~1000 extra tokens, well within the cap.
+BATCH_OVERAGE = 4
 
 
 async def generate_questions_for_level(
@@ -80,64 +84,66 @@ async def generate_questions_for_level(
     sem = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
 
     async def fetch_batch(b_count: int, batch_idx: int) -> list[dict]:
-        """Call the LLM until we have exactly b_count items for this batch.
+        """Fetch exactly b_count questions from the LLM.
 
-        On each attempt we ask for only the *remaining* shortfall so the LLM
-        is given a realistic count and doesn't hallucinate extras. Up to 3
-        attempts total; raises RuntimeError only if we get zero items from
-        every attempt.
+        Primary strategy: ask for b_count + BATCH_OVERAGE so the LLM almost
+        always returns ≥ b_count even if it under-generates slightly, then trim
+        to exactly b_count. This avoids retries in the happy path.
+
+        Fallback (rare): if the response is still short after the inflated ask,
+        retry once for the exact shortfall. This handles extreme under-generation.
         """
         async with sem:
-            collected: list[dict] = []
-            last_error: str | None = None
-
-            for attempt in range(3):
-                needed = b_count - len(collected)
-                if needed <= 0:
-                    break
-
-                logger.info(
-                    "Batch %d/%d — level %d (%s): attempt %d, requesting %d/%d",
-                    batch_idx + 1, len(batches), level, difficulty,
-                    attempt + 1, needed, b_count,
-                )
-                _, error, _, _, items = await generate_interview_questions_with_llm(
-                    track=track,
-                    context_text=context_text,
-                    count=needed,
-                    difficulty=difficulty,
-                    syllabus_topics=topics,
-                    ratio=ratio,
-                    influence=dict(influence),
-                )
-                if error or not items:
-                    last_error = error or "no items returned"
-                    logger.warning(
-                        "Batch %d/%d attempt %d error: %s",
-                        batch_idx + 1, len(batches), attempt + 1, last_error,
-                    )
-                    continue
-
-                collected.extend(items)
-                if len(collected) < b_count:
-                    logger.warning(
-                        "Batch %d/%d: LLM returned %d, still need %d more — retrying",
-                        batch_idx + 1, len(batches), len(items), b_count - len(collected),
-                    )
-
-            if not collected:
+            ask_count = b_count + BATCH_OVERAGE
+            logger.info(
+                "Batch %d/%d — level %d (%s): asking for %d (need %d, buffer %d)",
+                batch_idx + 1, len(batches), level, difficulty,
+                ask_count, b_count, BATCH_OVERAGE,
+            )
+            _, error, _, _, items = await generate_interview_questions_with_llm(
+                track=track,
+                context_text=context_text,
+                count=ask_count,
+                difficulty=difficulty,
+                syllabus_topics=topics,
+                ratio=ratio,
+                influence=dict(influence),
+            )
+            if error or not items:
                 raise RuntimeError(
                     f"LLM batch {batch_idx + 1} failed for level {level} ({difficulty}): "
-                    f"{last_error or 'no items returned after 3 attempts'}"
+                    f"{error or 'no items returned'}"
                 )
 
-            if len(collected) < b_count:
+            # Trim excess (happy path — we got enough)
+            if len(items) >= b_count:
+                return items[:b_count]
+
+            # Fallback: LLM still came up short despite the buffer — retry for the gap
+            shortfall = b_count - len(items)
+            logger.warning(
+                "Batch %d/%d: got %d/%d (asked %d) — retrying for %d shortfall",
+                batch_idx + 1, len(batches), len(items), b_count, ask_count, shortfall,
+            )
+            _, retry_error, _, _, extra = await generate_interview_questions_with_llm(
+                track=track,
+                context_text=context_text,
+                count=shortfall + BATCH_OVERAGE,
+                difficulty=difficulty,
+                syllabus_topics=topics,
+                ratio=ratio,
+                influence=dict(influence),
+            )
+            if extra and not retry_error:
+                items = items + extra
+
+            final = items[:b_count]
+            if len(final) < b_count:
                 logger.warning(
-                    "Batch %d/%d: delivered %d/%d after 3 attempts — proceeding with partial",
-                    batch_idx + 1, len(batches), len(collected), b_count,
+                    "Batch %d/%d: delivered %d/%d after retry — proceeding with partial",
+                    batch_idx + 1, len(batches), len(final), b_count,
                 )
-
-            return collected[:b_count]
+            return final
 
     batch_results = await asyncio.gather(*[fetch_batch(b, i) for i, b in enumerate(batches)])
 
