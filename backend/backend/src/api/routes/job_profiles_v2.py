@@ -63,7 +63,7 @@ router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles-v2"])
     summary="Get recent role-related activity",
 )
 async def get_recent_activity(
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> List[JobProfileActivityResponse]:
     """
@@ -81,7 +81,7 @@ async def get_recent_activity(
     summary="Get summary counts for Job Profiles",
 )
 async def get_job_profiles_summary(
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileSummaryResponse:
     """
@@ -119,7 +119,7 @@ async def list_job_profiles(
 )
 async def create_job_profile(
     payload: JobProfileCreateV2,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileResponse:
     profile = await job_profile_repo.create_profile(
@@ -146,7 +146,7 @@ async def create_job_profile(
 async def update_job_profile(
     job_profile_id: int,
     payload: JobProfileUpdateV2,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileResponse:
     update_data = payload.model_dump(exclude_unset=True)
@@ -199,7 +199,7 @@ async def update_job_profile_review(
 )
 async def get_job_profile_review(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileReviewResponse:
     # 1. Fetch JobProfile record
@@ -306,7 +306,7 @@ async def get_job_profile_review(
 )
 async def submit_job_profile(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileSubmitResponse:
     # 1. Fetch JobProfile record
@@ -357,7 +357,7 @@ async def submit_job_profile(
 )
 async def delete_job_profile(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileDeleteResponse:
     deleted = await job_profile_repo.delete(job_profile_id=job_profile_id)
@@ -379,7 +379,7 @@ async def delete_job_profile(
 )
 async def upload_job_description(
     file: UploadFile = File(..., description="PDF or DOC/DOCX file (max 10MB)"),
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
 ) -> JobProfileUploadResponse:
     """
     Validates and processes the uploaded Job Description file entirely in memory.
@@ -451,7 +451,7 @@ async def upload_job_description(
 )
 async def upload_knowledge_questions(
     file: UploadFile = File(..., description="PDF, DOC/DOCX, or TXT file (max 10MB)"),
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
 ) -> JobProfileUploadResponse:
     """
     Validates and processes the uploaded Knowledge Questions file entirely in memory.
@@ -580,7 +580,7 @@ async def upload_knowledge_questions(
 )
 async def extract_skills(
     payload: JobProfileExtractSkillsRequest,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
 ) -> JobProfileExtractSkillsResponse:
     """
     Extracts skills from the provided job description text.
@@ -618,7 +618,7 @@ GLOBAL_LLM_SEMAPHORE = asyncio.Semaphore(5)
 async def generate_questions_v2(
     job_profile_id: int,
     payload: JobProfileGenerateQuestionsRequest,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileGenerateJobEnqueuedResponse:
     # 1. Validate profile exists
@@ -694,7 +694,7 @@ async def generate_questions_v2(
 async def get_generate_questions_status(
     job_profile_id: int,
     job_id: str,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
 ) -> JobProfileGenerateJobStatusResponse:
     status_info = await get_job_status(job_id)
     status = status_info.get("status", "unknown")
@@ -721,7 +721,7 @@ async def get_generate_questions_status(
 )
 async def get_job_profile_questions_v2(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileQuestionsListResponse:
     # 1. Validate job_profile_id exists
@@ -788,7 +788,7 @@ async def get_job_profile_questions_v2(
 async def add_job_profile_question_v2(
     job_profile_id: int,
     payload: JobProfileAddQuestionRequest,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileAddQuestionResponse:
     # 1. Validate job_profile_id exists
@@ -855,7 +855,7 @@ async def add_job_profile_question_v2(
 async def update_job_profile_question_v2(
     question_id: int,
     payload: JobProfileUpdateQuestionRequest,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileUpdateQuestionResponse:
     # 1. Validate question_id exists
@@ -935,7 +935,7 @@ async def update_job_profile_question_v2(
 )
 async def regenerate_job_profile_question_v2(
     question_id: int,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileRegenerateQuestionResponse:
     # 1. Validate question_id exists
@@ -1039,7 +1039,7 @@ async def regenerate_job_profile_question_v2(
 )
 async def delete_job_profile_question_v2(
     question_id: int,
-    current_user=fastapi.Depends(get_current_user),
+    current_user=fastapi.Depends(get_current_admin_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileDeleteQuestionResponse:
     # 1. Validate question_id exists
