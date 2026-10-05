@@ -664,7 +664,7 @@ async def generate_questions_v2(
     async def safe_fetch_batch(track, context_text, b_count, difficulty, topics, ratio, current_influence):
         # TODO(architecture): Lift operational parameters (max_retries, backoff bounds, and max_passes)
         # to .env / BackendBaseSettings in future configuration refactoring.
-        max_retries = 4
+        max_retries = 3
         error = None
         for attempt in range(max_retries):
             async with GLOBAL_LLM_SEMAPHORE:
@@ -681,7 +681,7 @@ async def generate_questions_v2(
                 return structured_items
             logger.warning(f"Batch failed on attempt {attempt+1}/{max_retries}: {error}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(min(8.0, 1.5 * (2 ** attempt)))
+                await asyncio.sleep(min(3.0, 1.0 * (2 ** attempt)))
         raise Exception(f"Failed after {max_retries} attempts. Last error: {error}")
 
     async def fetch_batch_with_semaphore(b_count, batch_idx, l, difficulty, topics, ratio, current_influence):
@@ -722,7 +722,7 @@ async def generate_questions_v2(
         level_generated_items = []
         batch_idx_offset = 0
         
-        max_passes = 4
+        max_passes = 3
         passes = 0
         
         while remaining > 0 and passes < max_passes:
