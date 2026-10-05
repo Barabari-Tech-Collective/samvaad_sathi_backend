@@ -28,8 +28,17 @@ _RAW_IS_ADMIN = re.compile(
 )
 
 
+_EXEMPT = {
+    "__init__.py",
+    # internal_admin.py *sets* is_admin (the bridge that auth-service calls to
+    # grant/revoke admin status). It legitimately passes payload.is_admin to
+    # set_admin_status() — that is not an auth check; it is a write path.
+    "internal_admin.py",
+}
+
+
 def _route_files() -> list[pathlib.Path]:
-    return sorted(p for p in ROUTES_DIR.glob("*.py") if p.name != "__init__.py")
+    return sorted(p for p in ROUTES_DIR.glob("*.py") if p.name not in _EXEMPT)
 
 
 def test_route_files_exist():
