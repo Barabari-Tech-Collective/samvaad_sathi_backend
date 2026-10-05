@@ -131,6 +131,7 @@ async def create_job_profile(
         additional_context=payload.additional_context,
         category=payload.category,
         employment_type=payload.employment_type,
+        created_by=current_user.id,
     )
     return JobProfileResponse.model_validate(profile)
 
@@ -292,7 +293,7 @@ async def get_job_profile_review(
         role_details=role_details,
         jd_summary=jd_summary,
         question_summary=question_summary,
-        status="draft"
+        status=profile.status,
     )
 
 
@@ -650,7 +651,19 @@ async def generate_questions_v2(
             detail="Total question count must be greater than zero.",
         )
 
-    # 3. Enqueue background job — returns immediately so Cloudflare never times out
+    # 3. Idempotency guard: refuse if questions already exist for this profile.
+    # The frontend auto-trigger fires only when total_questions==0, so this never
+    # blocks the normal first-generation flow. It prevents a double-click or a
+    # stale poll from appending a second batch on top of an already-generated bank.
+    # To regenerate from scratch, delete all existing questions first.
+    existing_questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+    if existing_questions:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail=f"Job profile already has {len(existing_questions)} question(s). Delete existing questions before re-generating.",
+        )
+
+    # 4. Enqueue background job — returns immediately so Cloudflare never times out
     job_id = await enqueue_job(
         "generate_questions_task",
         job_profile_id=job_profile_id,

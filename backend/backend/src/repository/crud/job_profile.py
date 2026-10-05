@@ -59,6 +59,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         additional_context: Optional[str] = None,
         category: Optional[str] = None,
         employment_type: Optional[str] = None,
+        created_by: Optional[int] = None,
     ) -> JobProfile:
         new_profile = JobProfile(
             job_name=job_name,
@@ -70,6 +71,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             category=category,
             employment_type=employment_type,
             status=JobProfileStatus.DRAFT,
+            created_by=created_by,
         )
         self.async_session.add(new_profile)
         await self.async_session.commit()

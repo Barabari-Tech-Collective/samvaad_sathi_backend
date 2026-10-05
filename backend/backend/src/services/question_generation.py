@@ -25,6 +25,7 @@ async def generate_questions_for_level(
     context_text: str | None,
     skills_list: list[str],
     experience_level: str | None,
+    category: str | None = None,
     knowledge_reference_context: str | None = None,
 ) -> list[tuple[int, str, dict]]:
     """Generate all questions for one difficulty level.
@@ -40,38 +41,21 @@ async def generate_questions_for_level(
 
     difficulty = LEVEL_MAP[level]
 
-    role = syllabus_service._role_manager.derive_role(track)
-    topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
-
-    topics = {
-        "tech": topic_bank.tech,
-        "tech_allied": topic_bank.tech_allied,
-        "behavioral": topic_bank.behavioral,
-        "archetypes": topic_bank.archetypes,
-        "depth_guidelines": topic_bank.depth_guidelines,
-    }
-    topics["tech_allied"] = syllabus_service.extract_tech_allied_from_resume(
-        resume_text=context_text,
-        skills=skills_list,
-        fallback_topics=topics.get("tech_allied", []),
+    # resolve_generation_context handles tech/non-tech routing correctly,
+    # including zeroing tech topics and setting is_non_tech for HR/sales/marketing
+    # roles. The previous hand-rolled block omitted category/is_non_tech from the
+    # influence dict, so non-tech roles silently got a tech prompt.
+    gen_ctx = syllabus_service.resolve_generation_context(
+        track=track,
+        category=category,
+        difficulty=difficulty,
+        context_text=context_text or "",
+        skills_list=skills_list,
+        experience_level=experience_level,
     )
-
-    question_ratio = syllabus_service.compute_question_ratio(
-        years_experience=None,
-        has_resume_text=bool(context_text),
-        has_skills=bool(skills_list),
-    )
-    ratio = {
-        "tech": question_ratio.tech,
-        "tech_allied": question_ratio.tech_allied,
-        "behavioral": question_ratio.behavioral,
-    }
-    influence: dict = {
-        "target_role": role,
-        "difficulty": difficulty,
-        "skills": skills_list,
-        "experience_level": experience_level,
-    }
+    topics: dict = gen_ctx["topics"]
+    ratio: dict = gen_ctx["ratio"]
+    influence: dict = dict(gen_ctx["influence"])
     if knowledge_reference_context:
         influence["knowledge_reference_context"] = knowledge_reference_context
 

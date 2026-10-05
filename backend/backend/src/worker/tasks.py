@@ -50,6 +50,7 @@ async def generate_questions_task(
                 context_text=context_text,
                 skills_list=skills_list,
                 experience_level=profile.experience_level,
+                category=profile.category,
                 knowledge_reference_context=knowledge_reference_context,
             )
             for l in levels
