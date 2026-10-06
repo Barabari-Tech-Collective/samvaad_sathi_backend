@@ -72,8 +72,8 @@ class SkillNormalizer:
             "agile": "agile", "agile development": "agile",
 
             # --- UI/UX & DESIGN ---
-            "ui/ux": "uiux", "ui/ux design": "uiux", "ui design": "ui", "ux design": "ux",
-            "user interface": "ui", "user experience": "ux", "wireframing": "wireframing",
+            "ui/ux": "uiux", "ui/ux design": "uiux", "ui design": "uidesign", "ux design": "uxdesign",
+            "user interface": "uidesign", "user experience": "uxdesign", "wireframing": "wireframing",
             "prototyping": "prototyping", "graphic design": "graphicdesign", "visual design": "visualdesign",
             "framer": "framer", "sketch": "sketch", "invision": "invision", "web design": "webdesign", "website design": "webdesign",
 
@@ -98,7 +98,7 @@ class SkillNormalizer:
             "cicd": "CI/CD", "git": "Git", "github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket",
             "jenkins": "Jenkins", "terraform": "Terraform", "ansible": "Ansible",
             "figma": "Figma", "adobexd": "Adobe XD", "postman": "Postman", "jwt": "JWT", "agile": "Agile",
-            "uiux": "UI/UX Design", "ui": "UI Design", "ux": "UX Design", "wireframing": "Wireframing",
+            "uiux": "UI/UX Design", "uidesign": "UI Design", "uxdesign": "UX Design", "wireframing": "Wireframing",
             "prototyping": "Prototyping", "graphicdesign": "Graphic Design", "visualdesign": "Visual Design",
             "framer": "Framer", "sketch": "Sketch", "invision": "InVision", "webdesign": "Web Design",
             "openai": "OpenAI", "langchain": "LangChain", "tensorflow": "TensorFlow",
@@ -113,7 +113,7 @@ class SkillNormalizer:
             {"aws", "azure", "gcp"},
             {"docker", "kubernetes", "cicd", "terraform", "ansible"},
             {"javascript", "typescript", "python", "java", "go", "cpp", "csharp", "ruby", "rust", "php"},
-            {"uiux", "ui", "ux", "wireframing", "prototyping", "figma", "adobexd", "sketch", "invision", "framer"}
+            {"uiux", "uidesign", "uxdesign", "wireframing", "prototyping", "figma", "adobexd", "sketch", "invision", "framer"}
         ]
 
     def normalize(self, raw_string: str) -> str:
