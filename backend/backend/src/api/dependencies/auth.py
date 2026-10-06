@@ -12,6 +12,7 @@ from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyE
 
 # Create HTTPBearer security scheme for Swagger UI
 security = HTTPBearer()
+optional_security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
@@ -76,3 +77,14 @@ async def get_current_user(
     return user
 
 
+async def get_optional_current_user(
+    credentials: HTTPAuthorizationCredentials | None = fastapi.Depends(optional_security),
+    user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
+) -> User | None:
+    """Like get_current_user but returns None instead of 401 when no token is provided."""
+    if not credentials:
+        return None
+    try:
+        return await get_current_user(credentials=credentials, user_repo=user_repo)
+    except fastapi.HTTPException:
+        return None
