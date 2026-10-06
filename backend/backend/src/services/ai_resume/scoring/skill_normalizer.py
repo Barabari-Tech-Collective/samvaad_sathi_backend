@@ -67,9 +67,15 @@ class SkillNormalizer:
             "jenkins": "jenkins", "terraform": "terraform", "ansible": "ansible",
 
             # --- TOOLS & METHODOLOGIES ---
-            "figma": "figma", "adobe xd": "adobexd", "postman": "postman",
+            "figma": "figma", "adobe xd": "adobexd", "xd": "adobexd", "postman": "postman",
             "jwt": "jwt", "jwt authentication": "jwt",
             "agile": "agile", "agile development": "agile",
+
+            # --- UI/UX & DESIGN ---
+            "ui/ux": "uiux", "ui/ux design": "uiux", "ui design": "ui", "ux design": "ux",
+            "user interface": "ui", "user experience": "ux", "wireframing": "wireframing",
+            "prototyping": "prototyping", "graphic design": "graphicdesign", "visual design": "visualdesign",
+            "framer": "framer", "sketch": "sketch", "invision": "invision", "web design": "webdesign", "website design": "webdesign",
 
             # --- AI / ML / DATA ---
             "openai": "openai", "langchain": "langchain",
@@ -92,6 +98,9 @@ class SkillNormalizer:
             "cicd": "CI/CD", "git": "Git", "github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket",
             "jenkins": "Jenkins", "terraform": "Terraform", "ansible": "Ansible",
             "figma": "Figma", "adobexd": "Adobe XD", "postman": "Postman", "jwt": "JWT", "agile": "Agile",
+            "uiux": "UI/UX Design", "ui": "UI Design", "ux": "UX Design", "wireframing": "Wireframing",
+            "prototyping": "Prototyping", "graphicdesign": "Graphic Design", "visualdesign": "Visual Design",
+            "framer": "Framer", "sketch": "Sketch", "invision": "InVision", "webdesign": "Web Design",
             "openai": "OpenAI", "langchain": "LangChain", "tensorflow": "TensorFlow",
             "pytorch": "PyTorch", "pandas": "Pandas", "numpy": "NumPy"
         }
@@ -103,7 +112,8 @@ class SkillNormalizer:
             {"rest", "graphql", "soap", "websockets"},
             {"aws", "azure", "gcp"},
             {"docker", "kubernetes", "cicd", "terraform", "ansible"},
-            {"javascript", "typescript", "python", "java", "go", "cpp", "csharp", "ruby", "rust", "php"}
+            {"javascript", "typescript", "python", "java", "go", "cpp", "csharp", "ruby", "rust", "php"},
+            {"uiux", "ui", "ux", "wireframing", "prototyping", "figma", "adobexd", "sketch", "invision", "framer"}
         ]
 
     def normalize(self, raw_string: str) -> str:

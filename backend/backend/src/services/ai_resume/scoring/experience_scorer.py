@@ -290,7 +290,12 @@ class ExperienceScorer:
         # Candidate Seniority computed strictly from total unique experience
         candidate_seniority = self._infer_candidate_seniority(total_months)
 
-        base_experience_index = self._calculate_base_experience_index(total_months)
+        # If the target job is explicitly Entry Level / Fresher, 
+        # do not penalize for lack of corporate experience. Give full index.
+        if target_track == "Entry Level / Fresher":
+            base_experience_index = 100.0
+        else:
+            base_experience_index = self._calculate_base_experience_index(total_months)
 
         calculated_exp_score = round((base_experience_index / 100.0) * exp_weight, 1)
         calculated_proj_score = round((project_score_out_of_35 / 35.0) * proj_weight, 1)
