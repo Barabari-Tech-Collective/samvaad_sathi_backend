@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
 logger = logging.getLogger(__name__)
 
-from src.api.dependencies.auth import get_optional_current_user
+from src.api.dependencies.auth import get_current_user, get_optional_current_user
 from src.api.dependencies.rate_limit import hybrid_rate_limiter
 from src.api.dependencies.session import get_async_session
 from src.config.manager import settings
