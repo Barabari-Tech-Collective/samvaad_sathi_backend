@@ -78,16 +78,6 @@ class ATSEngine:
             project_report=project_report
         )
         text_lower = raw_resume_text.lower()
-        
-        if "github" in text_lower or "github.com" in text_lower:
-            master_report["hygieneCheck"]["hasGithub"] = True
-            if "link:" in text_lower or "http" in text_lower:
-                master_report["hygieneCheck"]["githubWorking"] = True
-
-        if "linkedin" in text_lower or "linkedin.com" in text_lower:
-            master_report["hygieneCheck"]["hasLinkedIn"] = True
-            master_report["hygieneCheck"]["linkedInWorking"] = True
-
         raw_text_strip = raw_resume_text.strip()
 
         phone_regex = re.compile(r'\+?\d[\d\s\-\(\)]{8,}\d')

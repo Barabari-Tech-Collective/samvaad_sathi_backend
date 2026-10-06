@@ -13,6 +13,11 @@ def build_ats_analysis_prompt(
     """
     role_lower = target_role.lower()
     is_fresher = any(k in experience_level.lower() for k in ["fresher", "intern", "entry", "0 years"])
+    experience_rating = (
+        "Fresher profile configuration applied. Scoring focus shifted heavily onto project metrics and academic builds."
+        if is_fresher
+        else "Evaluated based on corporate experience history and project depth."
+    )
 
     if any(k in role_lower for k in ["design", "ui", "ux", "graphics", "product designer"]):
         role_track_type = "DESIGN / CREATIVE TRACK"
@@ -33,7 +38,7 @@ def build_ats_analysis_prompt(
         score = proj["score"]
         gaps_str = ", ".join(proj["detectedGaps"]) if proj["detectedGaps"] else "None"
         project_json_schema_builder.append(
-            f'{{\n      "projectName": "{name}",\n      "feedback": "Write unique, deep engineering critique specifically for the \'{name}\' project. Address why it scored {score}/40 based on these verified issues: {gaps_str}."\n    }}'
+            f'{{\n      "projectName": "{name}",\n      "feedback": "Write unique, deep critique specifically for the \'{name}\' project. You may state that it scored {score}/40, but DO NOT explain the mathematical breakdown or matrix calculation behind the score. Address these verified issues: {gaps_str}."\n    }}'
         )
     
     schema_projects_block = ",\n    ".join(project_json_schema_builder)
@@ -66,7 +71,7 @@ Return response in EXACT clean valid JSON format matching the schema below witho
 
 {{
   "atsScore": {exact_total_score},
-  "summary": "High-level professional explanation detailing how their profile maps to the core role specifications, explicitly justifying why they received their pre-computed score of {exact_total_score}/100.",
+  "summary": "High-level professional explanation detailing how their profile maps to the core role specifications. You may state their overall score of {exact_total_score}/100, but DO NOT explain the mathematical breakdown or matrix calculations behind it.",
   "scoreBreakdown": {{
     "skillsMatch": {exact_breakdown['skillsMatch']},
     "experienceMatch": {exact_breakdown['experienceMatch']},
@@ -80,11 +85,11 @@ Return response in EXACT clean valid JSON format matching the schema below witho
     "additionalSkills": ["Irrelevant_Skill_1"]
   }},
   "experienceEvaluation": {{
-    "rating": "Fresher profile configuration applied. Scoring focus shifted heavily onto project metrics and academic builds.",
-    "feedback": "Deep natural language analysis explaining their occupational history or project depth relative to the JD requirements."
+    "rating": "{experience_rating}",
+    "feedback": "Deep natural language analysis explaining their occupational history or project depth relative to the JD requirements. You may state their total experience score, but DO NOT explain the mathematical breakdown or matrix logic (e.g. do not breakdown points for corporate vs project history)."
   }},
   "educationEvaluation": {{
-    "educationExplanation": "Write natural language feedback explaining layout gaps or structural advice regarding academic records here."
+    "educationExplanation": "Write natural language feedback explaining layout gaps or structural advice regarding academic records here. You may state their overall education score, but DO NOT explain the mathematical calculation behind it."
   }},
   "projectEvaluation": [
     {schema_projects_block}
@@ -140,7 +145,7 @@ REQUIREMENTS:
 3. Extract all skills into a flat array of strings.
 4. Extract work experience into an array of objects. Each must have: title, duration, company, and an array of bullet points (highlights).
 5. Extract projects into an array of objects. Each must have: title, duration, description, and an array of bullet points (highlights).
-6. Extract education into an array of objects. Each must have: degree, institution, duration.
+6. Extract education into an array of objects. Each must have: degree, institution, duration, and grade (CGPA or percentage if available).
 7. Return ONLY valid JSON matching the schema exactly. No markdown wrappers.
 
 JSON SCHEMA EXPECTED:
@@ -175,7 +180,8 @@ JSON SCHEMA EXPECTED:
     {{
       "degree": "...",
       "institution": "...",
-      "duration": "..."
+      "duration": "...",
+      "grade": "..."
     }}
   ]
 }}
