@@ -61,9 +61,11 @@ class SkillsScorer:
         }
 
         # Resume-only recognized skills.
+        known_canonical_skills = set(self.normalizer.alias_matrix.values())
         additional_skills = {
             skill
             for skill in final_resume_set.difference(final_jd_set)
+            if skill in known_canonical_skills
         }
 
         # Score ONLY exact matches.

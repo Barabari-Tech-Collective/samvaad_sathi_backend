@@ -13,6 +13,11 @@ def build_ats_analysis_prompt(
     """
     role_lower = target_role.lower()
     is_fresher = any(k in experience_level.lower() for k in ["fresher", "intern", "entry", "0 years"])
+    experience_rating = (
+        "Fresher profile configuration applied. Scoring focus shifted heavily onto project metrics and academic builds."
+        if is_fresher
+        else "Evaluated based on corporate experience history and project depth."
+    )
 
     if any(k in role_lower for k in ["design", "ui", "ux", "graphics", "product designer"]):
         role_track_type = "DESIGN / CREATIVE TRACK"
@@ -80,7 +85,7 @@ Return response in EXACT clean valid JSON format matching the schema below witho
     "additionalSkills": ["Irrelevant_Skill_1"]
   }},
   "experienceEvaluation": {{
-    "rating": "Fresher profile configuration applied. Scoring focus shifted heavily onto project metrics and academic builds.",
+    "rating": "{experience_rating}",
     "feedback": "Deep natural language analysis explaining their occupational history or project depth relative to the JD requirements. You may state their total experience score, but DO NOT explain the mathematical breakdown or matrix logic (e.g. do not breakdown points for corporate vs project history)."
   }},
   "educationEvaluation": {{

@@ -165,9 +165,9 @@ class SmartLinkValidator:
                     "stars": data.get('stargazers_count', 0) if repo else None,
                     "followers": data.get('followers', 0) if not repo else None
                 }
-            else:
-                # Fallback to normal HTTP check if API fails for ANY reason (403, 404, etc.)
-                # This guarantees that if the web link is clickable and live, it gets marked as valid.
+            elif status_code == 403 or status_code == 401:
+                # Only fall back on rate-limit/auth (403/401). For anything else (404, etc.),
+                # the GitHub API result is authoritative — trust it.
                 is_valid, fallback_status, err = await self.check_link_active_async(client, clean_url)
                 return {
                     "valid": is_valid, 
@@ -175,6 +175,8 @@ class SmartLinkValidator:
                     "sub_type": "repository" if repo else "profile",
                     "reason": err or f"Fallback {fallback_status}"
                 }
+            else:
+                return {"valid": False, "status_code": status_code, "reason": f"GitHub Status {status_code}"}
         except Exception as e:
             # Fallback on exception as well
             is_valid, fallback_status, err = await self.check_link_active_async(client, clean_url)
