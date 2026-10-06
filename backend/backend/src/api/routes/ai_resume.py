@@ -1,5 +1,6 @@
 import logging
 import uuid
+from typing import Optional
 import fastapi
 from fastapi import (
     UploadFile,
@@ -14,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
 logger = logging.getLogger(__name__)
 
-from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.rate_limit import rate_limiter
+from src.api.dependencies.auth import get_optional_current_user
+from src.api.dependencies.rate_limit import hybrid_rate_limiter
 from src.api.dependencies.session import get_async_session
 from src.config.manager import settings
 
@@ -57,11 +58,11 @@ async def analyze_resume(
     targetRole: str = Form(...),
     experienceLevel: str = Form(...),
     jobDescription: str = Form(...),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
     user_repo: UserCRUDRepository = Depends(get_repository(repo_type=UserCRUDRepository)),
     _rate_limit=Depends(
-        rate_limiter(
+        hybrid_rate_limiter(
             key_prefix="resume_analysis",
             limit=settings.RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR,
             window_seconds=3600,
@@ -125,45 +126,38 @@ async def analyze_resume(
         analysis_id = analysis_result.get("analysisId", str(uuid.uuid4()))
         analysis_result["analysisId"] = analysis_id
 
-        # Save in DB
-        db_analysis = AIResumeAnalysis(
-            analysis_id=analysis_id,
-            user_id=current_user.id,
-            target_role=targetRole,
-            experience_level=experienceLevel,
-            job_description=jobDescription,
-            extracted_resume_text=pure_resume_text,  # Clean string for DB
-            analysis_result=analysis_result,
-        )
-
-        session.add(db_analysis)
-
-        # Removed: We no longer overwrite the master resume_text for ATS checks
-
-        await session.commit()
-        await session.refresh(db_analysis)
-
-        if current_user.student_id:
-            queued = await enqueue_job(
-                "submit_resume_score_task",
-                student_id=current_user.student_id,
-                resume_score=analysis_result["atsScore"],
-                request_id=analysis_id,
+        if current_user:
+            # Save in DB (only for authenticated users — user_id is non-nullable)
+            db_analysis = AIResumeAnalysis(
+                analysis_id=analysis_id,
+                user_id=current_user.id,
                 target_role=targetRole,
+                experience_level=experienceLevel,
+                job_description=jobDescription,
+                extracted_resume_text=pure_resume_text,
+                analysis_result=analysis_result,
             )
-            if not queued:
-                # Redis/arq unreachable - fall back to an in-process best-effort
-                # task rather than dropping the callback entirely. No retry or
-                # durability in this path, same as before this change.
-                background_tasks.add_task(
-                    submit_resume_score_to_barabari,
+
+            session.add(db_analysis)
+            await session.commit()
+            await session.refresh(db_analysis)
+
+            if current_user.student_id:
+                queued = await enqueue_job(
+                    "submit_resume_score_task",
                     student_id=current_user.student_id,
                     resume_score=analysis_result["atsScore"],
                     request_id=analysis_id,
                     target_role=targetRole,
                 )
-
-        # Removed: We no longer upload ATS resumes to overwrite the original_resume_s3_key
+                if not queued:
+                    background_tasks.add_task(
+                        submit_resume_score_to_barabari,
+                        student_id=current_user.student_id,
+                        resume_score=analysis_result["atsScore"],
+                        request_id=analysis_id,
+                        target_role=targetRole,
+                    )
 
         return analysis_result
 
@@ -173,7 +167,7 @@ async def analyze_resume(
     except Exception as e:
         await session.rollback()
 
-        logger.exception("Resume analysis failed for user_id=%s", current_user.id)
+        logger.exception("Resume analysis failed for user_id=%s", current_user.id if current_user else "anonymous")
 
         raise fastapi.HTTPException(
             status_code=500,
