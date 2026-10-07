@@ -1043,15 +1043,19 @@ class AnalyticsService:
                 continue
             dt = interview.created_at
             ep = earliest_practice
-            if dt:
+            if dt and ep:
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=datetime.timezone.utc)
-                if ep and ep.tzinfo is None:
+                if ep.tzinfo is None:
                     ep = ep.replace(tzinfo=datetime.timezone.utc)
+                
                 if dt < ep:
                     pre_scores.append(score)
                 else:
                     post_scores.append(score)
+            elif dt:
+                # Fallback logic if earliest_practice is missing
+                post_scores.append(score)
 
         if not pre_scores or not post_scores:
             return {"available": False, "delta": None}

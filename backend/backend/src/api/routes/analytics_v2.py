@@ -1125,12 +1125,16 @@ async def get_student_latest_feedback(
     feedback_text = None
     if isinstance(latest.report_json, dict) and "finalTip" in latest.report_json:
         tip = latest.report_json["finalTip"]
-        title = tip.get("title", "")
-        desc = tip.get("description", "")
-        if title and desc:
-            feedback_text = f"**{title}**\n{desc}"
-        elif desc:
-            feedback_text = desc
+        
+        if isinstance(tip, dict):
+            title = tip.get("title", "")
+            desc = tip.get("description", "")
+            if title and desc:
+                feedback_text = f"**{title}**\n{desc}"
+            elif desc:
+                feedback_text = desc
+        elif isinstance(tip, str):
+            feedback_text = tip
             
     if not feedback_text:
         return StudentLatestFeedbackResponse(student_id=student_id)
