@@ -152,7 +152,14 @@ class AnalyticsService:
         overall_scores = [point["overall_score"] for point in score_points if point.get("overall_score") is not None]
         overall_scores.sort()
 
-        ordered_scores = sorted(score_points, key=lambda x: x.get("created_at") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+        def _safe_dt(dt: datetime.datetime | None) -> datetime.datetime:
+            if not dt:
+                return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=datetime.timezone.utc)
+            return dt
+
+        ordered_scores = sorted(score_points, key=lambda x: _safe_dt(x.get("created_at")))
         latest_score = ordered_scores[-1]["overall_score"] if ordered_scores else None
         prev_score = ordered_scores[-2]["overall_score"] if len(ordered_scores) >= 2 else None
         avg_last_3 = _avg_non_null([x["overall_score"] for x in ordered_scores[-3:]])
@@ -1034,10 +1041,17 @@ class AnalyticsService:
             score = _extract_overall_score(reports.get(interview.id), summaries.get(interview.id))
             if score is None:
                 continue
-            if interview.created_at and interview.created_at < earliest_practice:
-                pre_scores.append(score)
-            else:
-                post_scores.append(score)
+            dt = interview.created_at
+            ep = earliest_practice
+            if dt:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                if ep and ep.tzinfo is None:
+                    ep = ep.replace(tzinfo=datetime.timezone.utc)
+                if dt < ep:
+                    pre_scores.append(score)
+                else:
+                    post_scores.append(score)
 
         if not pre_scores or not post_scores:
             return {"available": False, "delta": None}
@@ -1706,7 +1720,11 @@ def _find_interview(interviews: list[Interview], interview_id: int) -> Interview
 def _average_gap_hours(times: list[datetime.datetime]) -> float | None:
     if len(times) < 2:
         return None
-    ordered = sorted(times)
+    def _ensure_utc(dt: datetime.datetime) -> datetime.datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+    ordered = sorted([_ensure_utc(t) for t in times])
     gaps = []
     for idx in range(1, len(ordered)):
         gaps.append((ordered[idx] - ordered[idx - 1]).total_seconds() / 3600)
