@@ -294,14 +294,12 @@ class ExperienceScorer:
         # do not penalize for lack of corporate experience. Give full index.
         if target_track == "Entry Level / Fresher":
             base_experience_index = 100.0
-            calculated_exp_score = exp_weight
-            calculated_proj_score = proj_weight
-            combined_score = 35.0
         else:
             base_experience_index = self._calculate_base_experience_index(total_months)
-            calculated_exp_score = round((base_experience_index / 100.0) * exp_weight, 1)
-            calculated_proj_score = round((project_score_out_of_35 / 35.0) * proj_weight, 1)
-            combined_score = round(calculated_exp_score + calculated_proj_score, 1)
+
+        calculated_exp_score = round((base_experience_index / 100.0) * exp_weight, 1)
+        calculated_proj_score = round((project_score_out_of_35 / 35.0) * proj_weight, 1)
+        combined_score = round(calculated_exp_score + calculated_proj_score, 1)
 
         # Format human-readable duration
         years = total_months // 12

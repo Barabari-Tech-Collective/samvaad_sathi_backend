@@ -129,11 +129,11 @@ class SmartLinkValidator:
 
         try:
             response = await client.head(clean_url, timeout=self.timeout, follow_redirects=True, headers=self.headers)
-            if response.status_code < 400 or response.status_code in (401, 403, 999):
+            if response.status_code < 400:
                 return True, response.status_code, ""
 
             response = await client.get(clean_url, timeout=self.timeout, follow_redirects=True, headers=self.headers)
-            return response.status_code < 400 or response.status_code in (401, 403, 999), response.status_code, ""
+            return response.status_code < 400, response.status_code, ""
         except Exception as e:
             return False, 0, str(e)
 
@@ -244,15 +244,16 @@ class SmartLinkValidator:
                     extra_meta = gh_meta
                 elif platform == "linkedin":
                     # LinkedIn blocks automated requests with 999, so we validate format
-                    is_format_valid = bool(re.match(r'^https:\/\/(www\.)?linkedin\.com\/(in|company|school)\/[a-zA-Z0-9%_-]+\/?$', clean_url, re.IGNORECASE))
+                    is_format_valid = bool(re.match(r'^https?:\/\/(www\.|[a-z]{2}\.)?linkedin\.com\/(in|company|school)\/[a-zA-Z0-9%_-]+\/?$', clean_url, re.IGNORECASE))
                     is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
                     # Only mark as valid if format is correct AND it didn't return an actual 404
-                    if is_format_valid and status_code in (401, 403, 999):
+                    if is_format_valid and (is_valid or status_code in (401, 403, 999)):
                         is_valid = True
+                        err_msg = ""
                     elif not is_format_valid:
                         is_valid = False
                         err_msg = "Invalid LinkedIn URL format"
-                    extra_meta = {"error": err_msg} if err_msg else {}
+                    extra_meta = {"error": err_msg} if not is_valid and err_msg else {}
                 else:
                     is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
                     extra_meta = {"error": err_msg} if err_msg else {}
