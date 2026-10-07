@@ -1388,6 +1388,8 @@ async def create_structure_practice_session(
         # Generate questions based on difficulty
         try:
             role = syllabus_service._role_manager.derive_role(track)
+            if not role:
+                raise ValueError(f"Could not derive a valid role for track '{track}'")
         except ValueError as exc:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_400_BAD_REQUEST,
