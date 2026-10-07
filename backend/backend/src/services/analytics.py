@@ -969,6 +969,7 @@ class AnalyticsService:
                 InterviewQuestion.interview_id,
                 InterviewQuestion.topic,
                 InterviewQuestion.audio_url,
+                InterviewQuestion.is_follow_up,
             ))
             .where(InterviewQuestion.interview_id.in_(interview_ids))
         )
