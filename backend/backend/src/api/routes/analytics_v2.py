@@ -1139,10 +1139,19 @@ async def get_student_latest_feedback(
     if not feedback_text:
         return StudentLatestFeedbackResponse(student_id=student_id)
 
+    qa_stmt = (
+        sqlalchemy.select(QuestionAttempt.id)
+        .join(Interview, Interview.id == QuestionAttempt.interview_id)
+        .where(Interview.user_id == student_id)
+        .order_by(QuestionAttempt.created_at.desc())
+        .limit(1)
+    )
+    latest_qa_id = (await session.execute(qa_stmt)).scalar_one_or_none()
+
     return StudentLatestFeedbackResponse(
         student_id=student_id,
         latest_feedback=feedback_text,
-        question_attempt_id=None,  # Null because it's overall interview feedback, not a single question
+        question_attempt_id=latest_qa_id,  # Restored for backward compatibility with frontend navigation
         interview_id=latest.interview_id,
         created_at=latest.created_at,
     )
@@ -1566,10 +1575,11 @@ async def get_college_score_trend(
 
 @router.get(
     "/colleges/{college_name}/practice-metrics",
-    response_model=DistributionResponse,
+    response_model=DashboardTopListResponse,
     status_code=200,
-    summary="College practice metrics distribution",
-    description="Reasoning: reveals difficulty distribution of completed interviews.",
+    summary="College practice metrics",
+    description="Reasoning: indicates whether a college needs practice-focused interventions."
+    " Output: college practice-alert metrics row.",
 )
 async def get_college_practice_metrics(
     college_name: str,
@@ -1593,14 +1603,20 @@ async def get_college_practice_metrics(
         if label in buckets_map:
             buckets_map[label] += int(count)
 
-    buckets = [
-        DistributionBucket(label="Easy", count=buckets_map["easy"]),
-        DistributionBucket(label="Medium", count=buckets_map["medium"]),
-        DistributionBucket(label="Hard", count=buckets_map["hard"]),
-        DistributionBucket(label="Expert", count=buckets_map["expert"]),
+    items = [
+        {
+            "college": college_name,
+            "practice_alerts_count": 0,
+            "attention_required": False,
+            "distribution": [
+                {"label": "Easy", "count": buckets_map["easy"]},
+                {"label": "Medium", "count": buckets_map["medium"]},
+                {"label": "Hard", "count": buckets_map["hard"]},
+                {"label": "Expert", "count": buckets_map["expert"]},
+            ]
+        }
     ]
-    
-    return DistributionResponse(chart_type="bar", buckets=buckets)
+    return DashboardTopListResponse(table_type="college_practice_metrics", items=items)
 
 
 @router.get("/colleges/{college_name}/weak-skills", response_model=HeatmapResponse, status_code=200, summary="College weak skills heatmap", description="Reasoning: reveals recurring role/weakness patterns inside one college. Output: heatmap cells with role, weakness tag, and frequency.")
