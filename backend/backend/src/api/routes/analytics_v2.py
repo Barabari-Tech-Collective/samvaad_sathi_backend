@@ -1111,19 +1111,34 @@ async def get_student_latest_feedback(
 ):
     del current_user
     stmt = (
-        sqlalchemy.select(QuestionAttempt)
-        .join(Interview, Interview.id == QuestionAttempt.interview_id)
-        .where(Interview.user_id == student_id, QuestionAttempt.feedback.is_not(None))
-        .order_by(QuestionAttempt.created_at.desc())
+        sqlalchemy.select(SummaryReport)
+        .join(Interview, Interview.id == SummaryReport.interview_id)
+        .where(Interview.user_id == student_id, SummaryReport.report_json.is_not(None))
+        .order_by(SummaryReport.created_at.desc())
         .limit(1)
     )
     latest = (await session.execute(stmt)).scalar_one_or_none()
+    
     if latest is None:
         return StudentLatestFeedbackResponse(student_id=student_id)
+        
+    feedback_text = None
+    if isinstance(latest.report_json, dict) and "finalTip" in latest.report_json:
+        tip = latest.report_json["finalTip"]
+        title = tip.get("title", "")
+        desc = tip.get("description", "")
+        if title and desc:
+            feedback_text = f"**{title}**\n{desc}"
+        elif desc:
+            feedback_text = desc
+            
+    if not feedback_text:
+        return StudentLatestFeedbackResponse(student_id=student_id)
+
     return StudentLatestFeedbackResponse(
         student_id=student_id,
-        latest_feedback=latest.feedback,
-        question_attempt_id=latest.id,
+        latest_feedback=feedback_text,
+        question_attempt_id=None,  # Null because it's overall interview feedback, not a single question
         interview_id=latest.interview_id,
         created_at=latest.created_at,
     )
@@ -1547,11 +1562,10 @@ async def get_college_score_trend(
 
 @router.get(
     "/colleges/{college_name}/practice-metrics",
-    response_model=DashboardTopListResponse,
+    response_model=DistributionResponse,
     status_code=200,
-    summary="College practice metrics",
-    description="Reasoning: indicates whether a college needs practice-focused interventions."
-    " Output: college practice-alert metrics row.",
+    summary="College practice metrics distribution",
+    description="Reasoning: reveals difficulty distribution of completed interviews.",
 )
 async def get_college_practice_metrics(
     college_name: str,
@@ -1559,10 +1573,6 @@ async def get_college_practice_metrics(
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
-    service = AnalyticsService(session)
-    alerts = await service.get_alerts()
-    college_alerts = [a for a in alerts.get("system_alerts", []) if a.get("college") == college_name]
-    
     # Calculate difficulty distribution
     stmt = (
         sqlalchemy.select(Interview.difficulty, sqlalchemy.func.count(Interview.id))
@@ -1579,20 +1589,14 @@ async def get_college_practice_metrics(
         if label in buckets_map:
             buckets_map[label] += int(count)
 
-    items = [
-        {
-            "college": college_name,
-            "practice_alerts_count": len(college_alerts),
-            "attention_required": bool(college_alerts),
-            "distribution": [
-                {"label": "Easy", "count": buckets_map["easy"]},
-                {"label": "Medium", "count": buckets_map["medium"]},
-                {"label": "Hard", "count": buckets_map["hard"]},
-                {"label": "Expert", "count": buckets_map["expert"]},
-            ]
-        }
+    buckets = [
+        DistributionBucket(label="Easy", count=buckets_map["easy"]),
+        DistributionBucket(label="Medium", count=buckets_map["medium"]),
+        DistributionBucket(label="Hard", count=buckets_map["hard"]),
+        DistributionBucket(label="Expert", count=buckets_map["expert"]),
     ]
-    return DashboardTopListResponse(table_type="college_practice_metrics", items=items)
+    
+    return DistributionResponse(chart_type="bar", buckets=buckets)
 
 
 @router.get("/colleges/{college_name}/weak-skills", response_model=HeatmapResponse, status_code=200, summary="College weak skills heatmap", description="Reasoning: reveals recurring role/weakness patterns inside one college. Output: heatmap cells with role, weakness tag, and frequency.")
