@@ -25,6 +25,13 @@ from src.models.db.job_profile import JobProfile
 # Why it was made: Decouples static role/domain category mappings from core analytics logic, keeping
 # this service file focused strictly on business logic as requested during PR review.
 from src.services.mappings import TRACK_TO_CATEGORY
+def _ensure_utc(dt: datetime.datetime | None) -> datetime.datetime:
+    """Return dt as UTC-aware; if None, return datetime.min UTC."""
+    if not dt:
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
 
 
 class AnalyticsService:
@@ -152,7 +159,7 @@ class AnalyticsService:
         overall_scores = [point["overall_score"] for point in score_points if point.get("overall_score") is not None]
         overall_scores.sort()
 
-        ordered_scores = sorted(score_points, key=lambda x: x.get("created_at") or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
+        ordered_scores = sorted(score_points, key=lambda x: _ensure_utc(x.get("created_at")))
         latest_score = ordered_scores[-1]["overall_score"] if ordered_scores else None
         prev_score = ordered_scores[-2]["overall_score"] if len(ordered_scores) >= 2 else None
         avg_last_3 = _avg_non_null([x["overall_score"] for x in ordered_scores[-3:]])
@@ -1061,10 +1068,19 @@ class AnalyticsService:
             score = _extract_overall_score(reports.get(interview.id), summaries.get(interview.id))
             if score is None:
                 continue
-            if interview.created_at and interview.created_at < earliest_practice:
-                pre_scores.append(score)
-            else:
-                post_scores.append(score)
+            dt = interview.created_at
+            ep = earliest_practice
+            if dt and ep:
+                dt_utc = _ensure_utc(dt)
+                ep_utc = _ensure_utc(ep)
+                
+                if dt_utc < ep_utc:
+                    pre_scores.append(score)
+                else:
+                    post_scores.append(score)
+            elif dt:
+                # Can't classify without a baseline — skip this score
+                continue
 
         if not pre_scores or not post_scores:
             return {"available": False, "delta": None}
@@ -1743,7 +1759,7 @@ def _find_interview(interviews: list[Interview], interview_id: int) -> Interview
 def _average_gap_hours(times: list[datetime.datetime]) -> float | None:
     if len(times) < 2:
         return None
-    ordered = sorted(times)
+    ordered = sorted([_ensure_utc(t) for t in times])
     gaps = []
     for idx in range(1, len(ordered)):
         gaps.append((ordered[idx] - ordered[idx - 1]).total_seconds() / 3600)

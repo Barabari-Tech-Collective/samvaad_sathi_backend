@@ -1111,19 +1111,47 @@ async def get_student_latest_feedback(
 ):
     del current_user
     stmt = (
-        sqlalchemy.select(QuestionAttempt)
-        .join(Interview, Interview.id == QuestionAttempt.interview_id)
-        .where(Interview.user_id == student_id, QuestionAttempt.feedback.is_not(None))
-        .order_by(QuestionAttempt.created_at.desc())
+        sqlalchemy.select(SummaryReport)
+        .join(Interview, Interview.id == SummaryReport.interview_id)
+        .where(Interview.user_id == student_id, SummaryReport.report_json.is_not(None))
+        .order_by(SummaryReport.created_at.desc())
         .limit(1)
     )
     latest = (await session.execute(stmt)).scalar_one_or_none()
+    
     if latest is None:
         return StudentLatestFeedbackResponse(student_id=student_id)
+        
+    feedback_text = None
+    if isinstance(latest.report_json, dict) and "finalTip" in latest.report_json:
+        tip = latest.report_json["finalTip"]
+        
+        if isinstance(tip, dict):
+            title = tip.get("title", "")
+            desc = tip.get("description", "")
+            if title and desc:
+                feedback_text = f"**{title}**\n{desc}"
+            elif desc:
+                feedback_text = desc
+        elif isinstance(tip, str):
+            feedback_text = tip
+            
+    if not feedback_text:
+        return StudentLatestFeedbackResponse(student_id=student_id)
+
+    qa_stmt = (
+        sqlalchemy.select(QuestionAttempt.id)
+        .join(Interview, Interview.id == QuestionAttempt.interview_id)
+        .where(Interview.user_id == student_id)
+        .order_by(QuestionAttempt.created_at.desc())
+        .limit(1)
+    )
+    latest_qa_id = (await session.execute(qa_stmt)).scalar_one_or_none()
+
     return StudentLatestFeedbackResponse(
         student_id=student_id,
-        latest_feedback=latest.feedback,
-        question_attempt_id=latest.id,
+        latest_feedback=feedback_text,
+        question_attempt_id=latest_qa_id,  # Restored for backward compatibility with frontend navigation
         interview_id=latest.interview_id,
         created_at=latest.created_at,
     )
@@ -1559,10 +1587,6 @@ async def get_college_practice_metrics(
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
-    service = AnalyticsService(session)
-    alerts = await service.get_alerts()
-    college_alerts = [a for a in alerts.get("system_alerts", []) if a.get("college") == college_name]
-    
     # Calculate difficulty distribution
     stmt = (
         sqlalchemy.select(Interview.difficulty, sqlalchemy.func.count(Interview.id))
@@ -1582,8 +1606,8 @@ async def get_college_practice_metrics(
     items = [
         {
             "college": college_name,
-            "practice_alerts_count": len(college_alerts),
-            "attention_required": bool(college_alerts),
+            "practice_alerts_count": 0,
+            "attention_required": False,
             "distribution": [
                 {"label": "Easy", "count": buckets_map["easy"]},
                 {"label": "Medium", "count": buckets_map["medium"]},
