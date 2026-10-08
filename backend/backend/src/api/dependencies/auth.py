@@ -67,7 +67,10 @@ async def get_current_user(
         except EntityAlreadyExists:
             # Race between two concurrent first requests — re-fetch the now-existing row.
             user = await user_repo.get_user_by_email(email=email)
-    except Exception:
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"DATABASE ERROR in get_current_user: {e}")
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
             detail="User not found in database",

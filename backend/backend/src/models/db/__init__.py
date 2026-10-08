@@ -15,3 +15,5 @@ from .pronunciation_practice import PronunciationPractice  # noqa: F401
 from .structure_practice import StructurePractice, StructurePracticeAnswer  # noqa: F401
 from .ai_resume_analysis import AIResumeAnalysis  # noqa: F401
 from .resume_instance import UserResumeInstance  # noqa: F401
+from .team import Team  # noqa: F401
+from .team_member import TeamMember  # noqa: F401

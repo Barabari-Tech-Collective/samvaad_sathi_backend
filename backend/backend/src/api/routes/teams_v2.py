@@ -1,0 +1,198 @@
+import fastapi
+import datetime
+from typing import List
+from sqlalchemy.exc import IntegrityError
+
+from src.api.dependencies.admin import get_current_admin_user, get_current_super_admin_user
+from src.api.dependencies.repository import get_repository
+from src.models.schemas.teams_v2 import (
+    TeamResponse,
+    TeamCreate,
+    TeamMemberResponse,
+    TeamMemberCreate,
+    TeamMemberUpdate,
+    TeamMemberRecycleBinResponse,
+)
+from src.repository.crud.team_v2 import TeamCRUDRepository
+from src.models.db.user import User
+
+router = fastapi.APIRouter(prefix="/v2/teams", tags=["teams-v2"])
+
+@router.get(
+    path="",
+    name="teams:get_all",
+    response_model=List[TeamResponse],
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Get all teams",
+)
+async def get_all_teams(
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+) -> List[TeamResponse]:
+    teams = await team_repo.get_all_teams()
+    return [TeamResponse(**t) for t in teams]
+
+@router.post(
+    path="",
+    name="teams:create",
+    response_model=TeamResponse,
+    status_code=fastapi.status.HTTP_201_CREATED,
+    summary="Create a new team",
+)
+async def create_team(
+    team_data: TeamCreate,
+    current_user: User = fastapi.Depends(get_current_super_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+) -> TeamResponse:
+    team = await team_repo.create_team(team_data)
+    return TeamResponse(**team)
+
+@router.delete(
+    path="/{team_id}",
+    name="teams:delete",
+    status_code=fastapi.status.HTTP_204_NO_CONTENT,
+    summary="Delete a team",
+)
+async def delete_team(
+    team_id: int,
+    current_user: User = fastapi.Depends(get_current_super_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+):
+    result = await team_repo.delete_team(team_id)
+    if result == "has_members":
+        raise fastapi.HTTPException(status_code=400, detail="Cannot delete team. Please remove or transfer all members first.")
+    elif result == "not_found":
+        raise fastapi.HTTPException(status_code=404, detail="Team not found")
+    
+    return None
+
+@router.get(
+    path="/{team_id}/members",
+    name="teams:get_active_members",
+    response_model=List[TeamMemberResponse],
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Get active team members",
+)
+async def get_active_members(
+    team_id: int,
+    status: str = fastapi.Query("active", description="Status of the member (active/deleted)"),
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+) -> List[TeamMemberResponse]:
+    members = await team_repo.get_team_members(team_id, status)
+    return [TeamMemberResponse(**m) for m in members]
+
+@router.post(
+    path="/{team_id}/members",
+    name="teams:add_member",
+    response_model=TeamMemberResponse,
+    status_code=fastapi.status.HTTP_201_CREATED,
+    summary="Add a new member to a team",
+)
+async def add_member(
+    team_id: int,
+    member_data: TeamMemberCreate,
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+) -> TeamMemberResponse:
+    try:
+        member = await team_repo.add_team_member(team_id, member_data)
+        return TeamMemberResponse(**member)
+    except IntegrityError as e:
+        error_msg = str(e.orig) if hasattr(e, "orig") else str(e)
+        if "unique constraint" in error_msg.lower() or "duplicate key" in error_msg.lower():
+            if "team_member" in error_msg.lower() or "team_id" in error_msg.lower():
+                raise fastapi.HTTPException(status_code=400, detail="User is already a member of this team.")
+            raise fastapi.HTTPException(status_code=400, detail="The email is already registered or member already exists.")
+        raise fastapi.HTTPException(status_code=400, detail="Database integrity error occurred.")
+
+@router.get(
+    path="/{team_id}/recycle-bin",
+    name="teams:get_recycle_bin",
+    response_model=List[TeamMemberRecycleBinResponse],
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Get deleted members for recycle bin",
+)
+async def get_recycle_bin(
+    team_id: int,
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+) -> List[TeamMemberRecycleBinResponse]:
+    members = await team_repo.get_team_members(team_id, status='deleted')
+    return [TeamMemberRecycleBinResponse(**m) for m in members]
+
+@router.delete(
+    path="/{team_id}/members/{member_id}",
+    name="teams:soft_delete_member",
+    status_code=fastapi.status.HTTP_204_NO_CONTENT,
+    summary="Move member to recycle bin (soft delete)",
+)
+async def soft_delete_member(
+    team_id: int,
+    member_id: int,
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+):
+    success = await team_repo.soft_delete_member(team_id, member_id)
+    if not success:
+        raise fastapi.HTTPException(status_code=404, detail="Member not found")
+    return None
+
+@router.patch(
+    path="/{team_id}/members/{member_id}",
+    name="teams:update_member",
+    response_model=TeamMemberResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Update an existing team member",
+)
+async def update_member(
+    team_id: int,
+    member_id: int,
+    member_data: TeamMemberUpdate,
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+) -> TeamMemberResponse:
+    try:
+        updated_member = await team_repo.update_team_member(team_id, member_id, member_data)
+        if not updated_member:
+            raise fastapi.HTTPException(status_code=404, detail="Member not found")
+        return TeamMemberResponse(**updated_member)
+    except IntegrityError as e:
+        error_msg = str(e.orig) if hasattr(e, "orig") else str(e)
+        if "unique constraint" in error_msg.lower() or "duplicate key" in error_msg.lower():
+            raise fastapi.HTTPException(status_code=400, detail="The email is already registered to another user.")
+        raise fastapi.HTTPException(status_code=400, detail="Database integrity error occurred.")
+
+@router.patch(
+    path="/{team_id}/members/{member_id}/restore",
+    name="teams:restore_member",
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Restore member from recycle bin",
+)
+async def restore_member(
+    team_id: int,
+    member_id: int,
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+):
+    success = await team_repo.restore_member(team_id, member_id)
+    if not success:
+        raise fastapi.HTTPException(status_code=404, detail="Member not found")
+    return {"message": "Member restored successfully"}
+
+@router.delete(
+    path="/{team_id}/members/{member_id}/permanent",
+    name="teams:permanent_delete_member",
+    status_code=fastapi.status.HTTP_204_NO_CONTENT,
+    summary="Permanently delete member",
+)
+async def permanent_delete_member(
+    team_id: int,
+    member_id: int,
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+):
+    success = await team_repo.permanent_delete_member(team_id, member_id)
+    if not success:
+        raise fastapi.HTTPException(status_code=404, detail="Member not found")
+    return None

@@ -34,6 +34,7 @@ class BackendBaseSettings(BaseSettings):
     # service may not have. Empty by default: no student is ever included
     # implicitly. See api/dependencies/admin.py.
     ADMIN_EMAILS: str = decouple.config("ADMIN_EMAILS", cast=str, default="")  # type: ignore
+    SUPER_ADMIN_EMAILS: str = decouple.config("SUPER_ADMIN_EMAILS", cast=str, default="")  # type: ignore
     DOCS_URL: str = "/docs"
     OPENAPI_URL: str = "/openapi.json"
     REDOC_URL: str = "/redoc"

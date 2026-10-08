@@ -81,6 +81,10 @@ class User(Base):  # type: ignore
         sqlalchemy.Boolean, nullable=False, server_default=sqlalchemy.text("false"),
         doc="Grants access to cross-student analytics endpoints. Default false."
     )
+    is_super_admin: SQLAlchemyMapped[bool] = sqlalchemy_mapped_column(
+        sqlalchemy.Boolean, nullable=False, server_default=sqlalchemy.text("false"),
+        doc="Grants full system access, including team creation. Default false."
+    )
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True), nullable=False, server_default=sqlalchemy_functions.now()
     )

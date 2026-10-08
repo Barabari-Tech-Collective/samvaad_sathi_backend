@@ -61,3 +61,30 @@ async def get_current_admin_user(
             detail="Administrator access required.",
         )
     return current_user
+
+
+def _super_admin_allow_listed_emails() -> set[str]:
+    """Parse SUPER_ADMIN_EMAILS into a normalised set. Comma-separated; blanks and
+    surrounding whitespace ignored."""
+    raw = getattr(settings, "SUPER_ADMIN_EMAILS", "") or ""
+    return {entry.strip().lower() for entry in raw.split(",") if entry.strip()}
+
+
+def is_super_admin_user(user: User) -> bool:
+    """True if `user` has full system access, including team creation."""
+    if getattr(user, "is_super_admin", False):
+        return True
+    email = (getattr(user, "email", "") or "").strip().lower()
+    return bool(email) and email in _super_admin_allow_listed_emails()
+
+
+async def get_current_super_admin_user(
+    current_user: User = fastapi.Depends(get_current_user),
+) -> User:
+    """Require an authenticated user with Super Admin privileges."""
+    if not is_super_admin_user(current_user):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Super Administrator access required.",
+        )
+    return current_user
