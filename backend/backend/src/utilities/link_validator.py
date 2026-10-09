@@ -4,6 +4,13 @@ from urllib.parse import urlparse, unquote
 import httpx
 
 
+def is_success_or_blocked(status: int) -> bool:
+    # 401/403 = link resolves but requires auth (e.g. private GitHub repo).
+    # We treat these as "present" — the URL exists even if the recruiter
+    # can't open it — to avoid unfairly penalising candidates.
+    return status < 400 or status in (401, 403)
+
+
 class SmartLinkValidator:
     """
     Pure Validation & Classification Engine.
@@ -126,9 +133,6 @@ class SmartLinkValidator:
         clean_url = self._unwrap_url(url)
         if not clean_url.startswith(("http://", "https://")):
             clean_url = "https://" + clean_url
-
-        def is_success_or_blocked(status: int) -> bool:
-            return status < 400 or status in (401, 403)
 
         try:
             response = await client.head(clean_url, timeout=self.timeout, follow_redirects=True, headers=self.headers)

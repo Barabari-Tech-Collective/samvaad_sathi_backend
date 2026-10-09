@@ -32,9 +32,9 @@ async def validate_resume_file(file: UploadFile):
     await file.seek(0)
 
 
-from typing import Any
+from typing import Any, Union
 
-async def extract_resume_text(file: UploadFile) -> Any:
+async def extract_resume_text(file: UploadFile) -> Union[str, dict]:
     await validate_resume_file(file)
     filename = file.filename.lower()
 
@@ -134,17 +134,19 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
                                 }
                             )
 
-        raw_text_output = "\n".join(reconstructed_lines)
+        try:
+            raw_text_output = "\n".join(reconstructed_lines)
 
-        # Fallback to standard text extraction if spatial dict fails (e.g. Canva resumes)
-        if not raw_text_output.strip():
-            fallback_text = []
-            for page_num in range(len(pdf_document)):
-                fallback_text.append(pdf_document.load_page(page_num).get_text("text"))
-            raw_text_output = "\n".join(fallback_text)
-            
-        pdf_document.close()
-        await file.seek(0)
+            # Fallback to standard text extraction if spatial dict fails (e.g. Canva resumes)
+            if not raw_text_output.strip():
+                fallback_text = []
+                for page_num in range(len(pdf_document)):
+                    fallback_text.append(pdf_document.load_page(page_num).get_text("text"))
+                raw_text_output = "\n".join(fallback_text)
+                
+        finally:
+            pdf_document.close()
+            await file.seek(0)
 
         if not raw_text_output.strip():
             raise HTTPException(

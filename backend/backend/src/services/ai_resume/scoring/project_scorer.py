@@ -115,7 +115,7 @@ class ProjectScorer:
             gaps = []
             
             if repo_status.get("working") and deployment_status.get("working"):
-                gaps.append("Excellent! Both a working repository and a live deployment link were successfully verified.")
+                pass  # No gaps — both links are fine; the LLM prompt has nothing to critique here
             else:
                 # Repo status checks
                 if repo_status.get("present") and not repo_status.get("working"):

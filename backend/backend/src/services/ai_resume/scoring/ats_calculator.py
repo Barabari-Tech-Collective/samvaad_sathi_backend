@@ -126,11 +126,11 @@ class ATSCalculator:
         has_phone = len([c for c in text_lower if c.isdigit()]) >= 10
 
         return {
-            "hasLinkedIn": li_data.get("working", False),
+            "hasLinkedIn": li_data.get("present", False),
             "linkedInWorking": li_data.get("working", False),
-            "hasGithub": gh_data.get("working", False),
+            "hasGithub": gh_data.get("present", False),
             "githubWorking": gh_data.get("working", False),
-            "hasPortfolio": port_data.get("working", False),
+            "hasPortfolio": port_data.get("present", False),
             "portfolioWorking": port_data.get("working", False),
             "hasInstitution": edu_analysis.get("institution", {}).get("present", False),
             "hasDuration": edu_analysis.get("duration", {}).get("present", False),
