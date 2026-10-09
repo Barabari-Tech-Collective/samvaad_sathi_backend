@@ -115,6 +115,12 @@ class ProjectScorer:
             gaps = []
             if not repo_status.get("working") and not deployment_status.get("working"):
                 gaps.append("Repository link or public live application deployment details are unavailable.")
+            elif repo_status.get("working") and not deployment_status.get("working"):
+                gaps.append("A working repository link was found, but a live deployment website link is missing. Adding a live deployment link would maximize your score.")
+            elif not repo_status.get("working") and deployment_status.get("working"):
+                gaps.append("A live deployment was found, but a working repository (e.g., GitHub) link is missing. Adding the source code repository would maximize your score.")
+            elif repo_status.get("working") and deployment_status.get("working"):
+                gaps.append("Excellent! Both a working repository and a live deployment link were successfully verified. Explicitly praise the presence of both links, but do not mention any specific numeric points or scores.")
             if not has_metrics:
                 gaps.append("Project description could be strengthened by including quantitative impact or performance metrics.")
             if tech_count < 2:

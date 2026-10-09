@@ -80,8 +80,10 @@ class ProjectLinkMapper:
                 assigned_urls.add(proj["projectUrl"])
                 continue
 
-            best_candidate = None
-            highest_confidence = 0.0
+            best_repo = None
+            highest_repo_confidence = 0.0
+            best_deployment = None
+            highest_deployment_confidence = 0.0
 
             for raw_url in candidate_urls:
                 if raw_url in assigned_urls:
@@ -111,13 +113,30 @@ class ProjectLinkMapper:
                             confidence_score += 40.0
                             break
 
-                if confidence_score > highest_confidence and confidence_score >= 15.0:
-                    highest_confidence = confidence_score
-                    best_candidate = raw_url
+                if confidence_score >= 15.0:
+                    url_cat = url_meta.get("category")
+                    if url_cat == "repository" and confidence_score > highest_repo_confidence:
+                        highest_repo_confidence = confidence_score
+                        best_repo = raw_url
+                    elif url_cat == "deployment" and confidence_score > highest_deployment_confidence:
+                        highest_deployment_confidence = confidence_score
+                        best_deployment = raw_url
 
-            if best_candidate:
-                proj["projectUrl"] = best_candidate
-                assigned_urls.add(best_candidate)
-                print(f"Project Mapper Bound: '{p_title}' -> '{best_candidate}' (Confidence Score: {highest_confidence})")
+            if best_repo:
+                assigned_urls.add(best_repo)
+                is_valid = links_data.get(best_repo, {}).get("valid", False)
+                proj["repository"] = {"present": True, "working": is_valid}
+                if not proj.get("projectUrl"):
+                    proj["projectUrl"] = best_repo
+                print(f"Project Mapper Bound Repo: '{p_title}' -> '{best_repo}' (Confidence Score: {highest_repo_confidence})")
+            
+            if best_deployment:
+                assigned_urls.add(best_deployment)
+                is_valid = links_data.get(best_deployment, {}).get("valid", False)
+                proj["deployment"] = {"present": True, "working": is_valid}
+                if not proj.get("projectUrl") or (proj.get("projectUrl") == best_repo and "github" in best_repo.lower()):
+                    # Prefer deployment link as the primary project URL if the current one is just a repo
+                    proj["projectUrl"] = best_deployment
+                print(f"Project Mapper Bound Deployment: '{p_title}' -> '{best_deployment}' (Confidence Score: {highest_deployment_confidence})")
 
         return projects

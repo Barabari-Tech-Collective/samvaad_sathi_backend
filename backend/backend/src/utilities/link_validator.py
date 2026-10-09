@@ -127,13 +127,16 @@ class SmartLinkValidator:
         if not clean_url.startswith(("http://", "https://")):
             clean_url = "https://" + clean_url
 
+        def is_success_or_blocked(status: int) -> bool:
+            return status < 400 or status in (401, 403)
+
         try:
             response = await client.head(clean_url, timeout=self.timeout, follow_redirects=True, headers=self.headers)
-            if response.status_code < 400:
+            if is_success_or_blocked(response.status_code):
                 return True, response.status_code, ""
 
             response = await client.get(clean_url, timeout=self.timeout, follow_redirects=True, headers=self.headers)
-            return response.status_code < 400, response.status_code, ""
+            return is_success_or_blocked(response.status_code), response.status_code, ""
         except Exception as e:
             return False, 0, str(e)
 

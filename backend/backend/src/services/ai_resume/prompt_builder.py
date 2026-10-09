@@ -38,7 +38,7 @@ def build_ats_analysis_prompt(
         score = proj["score"]
         gaps_str = ", ".join(proj["detectedGaps"]) if proj["detectedGaps"] else "None"
         project_json_schema_builder.append(
-            f'{{\n      "projectName": "{name}",\n      "feedback": "Write unique, deep critique specifically for the \'{name}\' project. You may state that it scored {score}/40, but DO NOT explain the mathematical breakdown or matrix calculation behind the score. Address these verified issues: {gaps_str}."\n    }}'
+            f'{{\n      "projectName": "{name}",\n      "feedback": "Write unique, deep critique specifically for the \'{name}\' project. You may state that it scored {score}/35, but DO NOT explain the mathematical breakdown behind it. Incorporate this verified feedback: {gaps_str}."\n    }}'
         )
     
     schema_projects_block = ",\n    ".join(project_json_schema_builder)
@@ -49,6 +49,8 @@ Your objective is to provide professional natural language summaries, granular f
 
 CRITICAL ARCHITECTURAL REQUIREMENT:
 A deterministic Python engine has already analyzed the technical elements of this resume and calculated the EXACT numerical scores. You are strictly FORBIDDEN from altering, guessing, or recalculating these numbers. You must map them directly into your JSON output fields as specified below.
+
+NOTE ON LINK FORMATTING: The resume text provided below was extracted from a PDF. Any URLs enclosed in brackets (e.g., `[https://...]`) were extracted from proper, clickable hyperlinks in the original PDF. DO NOT critique the candidate for improper hyperlink formatting or claim they pasted plain text links just because you see brackets.
 
 TARGET SYSTEM SCORES TO INJECT (USE THESE EXACT NUMBERS):
 - MASTER ATS SCORE: {exact_total_score}

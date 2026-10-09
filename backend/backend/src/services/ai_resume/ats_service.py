@@ -49,7 +49,9 @@ async def generate_ats_analysis(
         link_validator = SmartLinkValidator()
         
         # Ingest pre-extracted spatial links or fallback text buffer
-        extracted_targets = embedded_links if embedded_links else []
+        from src.services.ai_resume.url_validator import extract_professional_urls
+        extracted_targets = list(embedded_links) if embedded_links else []
+        extracted_targets.extend(extract_professional_urls(resume_text))
                 
         verified_links_context = await link_validator.validate_all_links_async(extracted_targets)
 
