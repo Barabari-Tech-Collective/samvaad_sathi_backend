@@ -134,7 +134,7 @@ class ProjectLinkMapper:
                 assigned_urls.add(best_deployment)
                 is_valid = links_data.get(best_deployment, {}).get("valid", False)
                 proj["deployment"] = {"present": True, "working": is_valid}
-                if not proj.get("projectUrl") or (proj.get("projectUrl") == best_repo and "github" in best_repo.lower()):
+                if not proj.get("projectUrl") or proj.get("projectUrl") == best_repo:
                     # Prefer deployment link as the primary project URL if the current one is just a repo
                     proj["projectUrl"] = best_deployment
                 print(f"Project Mapper Bound Deployment: '{p_title}' -> '{best_deployment}' (Confidence Score: {highest_deployment_confidence})")

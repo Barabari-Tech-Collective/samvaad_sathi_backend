@@ -114,22 +114,20 @@ class ProjectScorer:
             # Generate targeted gaps
             gaps = []
             
-            # Repo status checks
-            if repo_status.get("present") and not repo_status.get("working"):
-                gaps.append("A repository link was detected, but it appears to be broken or private. Ensure the link is public and functioning.")
-            elif not repo_status.get("present"):
-                gaps.append("A working repository link (e.g., GitHub) is missing. Adding the source code repository would maximize your score.")
-                
-            # Deployment status checks
-            if deployment_status.get("present") and not deployment_status.get("working"):
-                gaps.append("A live deployment link was detected, but it appears to be broken. Ensure the application is actively hosted.")
-            elif not deployment_status.get("present"):
-                gaps.append("A live deployment website link is missing. Adding a live deployment link would maximize your score.")
-                
-            # Both working
             if repo_status.get("working") and deployment_status.get("working"):
-                gaps = [g for g in gaps if "missing" not in g and "broken" not in g] # clear negative link gaps
-                gaps.append("Excellent! Both a working repository and a live deployment link were successfully verified. Explicitly praise the presence of both links, but do not mention any specific numeric points or scores.")
+                gaps.append("Excellent! Both a working repository and a live deployment link were successfully verified.")
+            else:
+                # Repo status checks
+                if repo_status.get("present") and not repo_status.get("working"):
+                    gaps.append("A repository link was detected, but it appears to be broken or private. Ensure the link is public and functioning.")
+                elif not repo_status.get("present"):
+                    gaps.append("A working repository link (e.g., GitHub) is missing. Adding the source code repository would maximize your score.")
+                    
+                # Deployment status checks
+                if deployment_status.get("present") and not deployment_status.get("working"):
+                    gaps.append("A live deployment link was detected, but it appears to be broken. Ensure the application is actively hosted.")
+                elif not deployment_status.get("present"):
+                    gaps.append("A live deployment website link is missing. Adding a live deployment link would maximize your score.")
             if not has_metrics:
                 gaps.append("Project description could be strengthened by including quantitative impact or performance metrics.")
             if tech_count < 2:
