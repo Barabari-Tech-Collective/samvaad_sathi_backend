@@ -60,7 +60,7 @@ class ProjectLinkMapper:
         # Filter for candidate repositories and deployments only
         candidate_urls = [
             raw_url for raw_url, details in links_data.items()
-            if details.get("valid") and details.get("category") in ["repository", "deployment"]
+            if details.get("category") in ["repository", "deployment"]
         ]
 
         assigned_urls = set()

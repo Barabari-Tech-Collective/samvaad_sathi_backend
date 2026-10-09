@@ -32,7 +32,9 @@ async def validate_resume_file(file: UploadFile):
     await file.seek(0)
 
 
-async def extract_resume_text(file: UploadFile) -> str:
+from typing import Any
+
+async def extract_resume_text(file: UploadFile) -> Any:
     await validate_resume_file(file)
     filename = file.filename.lower()
 
@@ -132,14 +134,22 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
                                 }
                             )
 
+        raw_text_output = "\n".join(reconstructed_lines)
+
+        # Fallback to standard text extraction if spatial dict fails (e.g. Canva resumes)
+        if not raw_text_output.strip():
+            fallback_text = []
+            for page_num in range(len(pdf_document)):
+                fallback_text.append(pdf_document.load_page(page_num).get_text("text"))
+            raw_text_output = "\n".join(fallback_text)
+            
         pdf_document.close()
         await file.seek(0)
 
-        raw_text_output = "\n".join(reconstructed_lines)
-
         if not raw_text_output.strip():
             raise HTTPException(
-                status_code=400, detail="No text found in PDF resume"
+                status_code=400, 
+                detail="No readable text found. Your resume appears to be a scanned image OR has corrupted font encoding (missing Unicode maps) commonly caused by design tools like Canva. ATS systems cannot read these formats. Please re-export your resume directly from Word or Google Docs as a standard text-based PDF."
             )
 
         # Append structured spatial metadata block at bottom for downstream parser contexts
