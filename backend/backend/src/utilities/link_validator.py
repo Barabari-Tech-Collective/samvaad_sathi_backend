@@ -47,10 +47,10 @@ class SmartLinkValidator:
             "firebaseapp.com": {"platform": "firebase", "category": "deployment"},
             "web.app": {"platform": "firebase", "category": "deployment"},
 
-            # Design & Creative
-            "figma.com": {"platform": "figma", "category": "design"},
-            "behance.net": {"platform": "behance", "category": "design"},
-            "dribbble.com": {"platform": "dribbble", "category": "design"},
+            # Design & Creative Portfolios
+            "figma.com": {"platform": "figma", "category": "portfolio"},
+            "behance.net": {"platform": "behance", "category": "portfolio"},
+            "dribbble.com": {"platform": "dribbble", "category": "portfolio"},
 
             # Professional Networks & Socials
             "linkedin.com": {"platform": "linkedin", "category": "social"},
@@ -59,13 +59,27 @@ class SmartLinkValidator:
             "medium.com": {"platform": "medium", "category": "blog"},
             "youtube.com": {"platform": "youtube", "category": "social"},
 
+            # Coding Platforms
+            "leetcode.com": {"platform": "leetcode", "category": "coding_profile"},
+            "hackerrank.com": {"platform": "hackerrank", "category": "coding_profile"},
+            "codechef.com": {"platform": "codechef", "category": "coding_profile"},
+            "codeforces.com": {"platform": "codeforces", "category": "coding_profile"},
+            "geeksforgeeks.org": {"platform": "geeksforgeeks", "category": "coding_profile"},
+
             # Credentials & Packages
             "npmjs.com": {"platform": "npm", "category": "package"},
             "pypi.org": {"platform": "pypi", "category": "package"},
             "credly.com": {"platform": "credly", "category": "certification"},
             "badgr.com": {"platform": "badgr", "category": "certification"},
             "tinyurl.com": {"platform": "tinyurl", "category": "shortener"},
-            "bit.ly": {"platform": "bitly", "category": "shortener"}
+            "bit.ly": {"platform": "bitly", "category": "shortener"},
+
+            # Portfolio & Link-in-bio Platforms
+            "linktr.ee": {"platform": "linktree", "category": "portfolio"},
+            "bento.me": {"platform": "bento", "category": "portfolio"},
+            "campsite.bio": {"platform": "campsite", "category": "portfolio"},
+            "about.me": {"platform": "aboutme", "category": "portfolio"},
+            "hashnode.dev": {"platform": "hashnode", "category": "portfolio"}
         }
 
     def _unwrap_url(self, raw_url: str) -> str:
@@ -124,7 +138,7 @@ class SmartLinkValidator:
 
         # 4. Custom Personal Domain / Portfolio
         if "." in hostname:
-            return {"platform": "custom_domain", "category": "portfolio"}
+            return {"platform": "custom_domain", "category": "other"}
 
         return {"platform": "unknown", "category": "other"}
 
@@ -238,56 +252,77 @@ class SmartLinkValidator:
             "summary": {"working": 0, "broken": 0, "repositories": 0, "deployments": 0}
         }
 
+        async def validate_single_url(clean_url: str, spatial_meta: Dict[str, Any], client: httpx.AsyncClient) -> Dict[str, Any]:
+            classification = self.classify_url(clean_url)
+            cat = classification["category"]
+            platform = classification["platform"]
+
+            # If it's a custom domain but found in Projects or Experience, it's likely a project deployment, not the main portfolio
+            section_lower = str(spatial_meta.get("section", "")).lower()
+            anchor_lower = str(spatial_meta.get("anchorText", "")).lower()
+            
+            if platform == "custom_domain" and any(keyword in section_lower for keyword in ["project", "experience"]):
+                cat = "deployment"
+            elif (platform == "custom_domain" or platform == "unknown") and (
+                "portfolio" in section_lower or "portfolio" in anchor_lower or 
+                "contact" in section_lower or "header" in section_lower or section_lower == ""
+            ):
+                cat = "portfolio"
+
+            if platform == "github":
+                gh_meta = await self.validate_github_url_async(client, clean_url)
+                is_valid = gh_meta.get("valid", False)
+                status_code = gh_meta.get("status_code", 404)
+                extra_meta = gh_meta
+            elif platform == "linkedin":
+                # LinkedIn blocks automated requests with 999, so we validate format
+                is_format_valid = bool(re.match(r'^https?:\/\/(www\.|[a-z]{2}\.)?linkedin\.com\/(in|company|school)\/[a-zA-Z0-9%_-]+\/?$', clean_url, re.IGNORECASE))
+                is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
+                # Only mark as valid if format is correct AND it didn't return an actual 404
+                if is_format_valid and (is_valid or status_code in (401, 403, 999)):
+                    is_valid = True
+                    err_msg = ""
+                elif not is_format_valid:
+                    is_valid = False
+                    err_msg = "Invalid LinkedIn URL format"
+                extra_meta = {"error": err_msg} if not is_valid and err_msg else {}
+            else:
+                is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
+                extra_meta = {"error": err_msg} if err_msg else {}
+
+            return {
+                "url": clean_url,
+                "valid": is_valid,
+                "status_code": status_code,
+                "platform": platform,
+                "category": cat,
+                "page": spatial_meta.get("page"),
+                "section": spatial_meta.get("section"),
+                "anchorText": spatial_meta.get("anchorText"),
+                "line": spatial_meta.get("line"),
+                **extra_meta
+            }
+
+        import asyncio
         async with httpx.AsyncClient() as client:
-            for clean_url, spatial_meta in url_metadata_map.items():
-                classification = self.classify_url(clean_url)
-                cat = classification["category"]
-                platform = classification["platform"]
+            tasks = [validate_single_url(clean_url, meta, client) for clean_url, meta in url_metadata_map.items()]
+            link_records = await asyncio.gather(*tasks)
 
-                if platform == "github":
-                    gh_meta = await self.validate_github_url_async(client, clean_url)
-                    is_valid = gh_meta.get("valid", False)
-                    status_code = gh_meta.get("status_code", 404)
-                    extra_meta = gh_meta
-                elif platform == "linkedin":
-                    # LinkedIn blocks automated requests with 999, so we validate format
-                    is_format_valid = bool(re.match(r'^https?:\/\/(www\.|[a-z]{2}\.)?linkedin\.com\/(in|company|school)\/[a-zA-Z0-9%_-]+\/?$', clean_url, re.IGNORECASE))
-                    is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
-                    # Only mark as valid if format is correct AND it didn't return an actual 404
-                    if is_format_valid and (is_valid or status_code in (401, 403, 999)):
-                        is_valid = True
-                        err_msg = ""
-                    elif not is_format_valid:
-                        is_valid = False
-                        err_msg = "Invalid LinkedIn URL format"
-                    extra_meta = {"error": err_msg} if not is_valid and err_msg else {}
-                else:
-                    is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
-                    extra_meta = {"error": err_msg} if err_msg else {}
+        for record in link_records:
+            clean_url = record["url"]
+            is_valid = record["valid"]
+            cat = record["category"]
+            
+            results["links"][clean_url] = record
+            
+            if is_valid:
+                results["summary"]["working"] += 1
+            else:
+                results["summary"]["broken"] += 1
 
-                link_record = {
-                    "url": clean_url,
-                    "valid": is_valid,
-                    "status_code": status_code,
-                    "platform": platform,
-                    "category": cat,
-                    "page": spatial_meta.get("page"),
-                    "section": spatial_meta.get("section"),
-                    "anchorText": spatial_meta.get("anchorText"),
-                    "line": spatial_meta.get("line"),
-                    **extra_meta
-                }
-
-                results["links"][clean_url] = link_record
-
-                if is_valid:
-                    results["summary"]["working"] += 1
-                else:
-                    results["summary"]["broken"] += 1
-
-                if cat == "repository":
-                    results["summary"]["repositories"] += 1
-                elif cat == "deployment":
-                    results["summary"]["deployments"] += 1
+            if cat == "repository":
+                results["summary"]["repositories"] += 1
+            elif cat == "deployment":
+                results["summary"]["deployments"] += 1
 
         return results
