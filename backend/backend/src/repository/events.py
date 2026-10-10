@@ -1,5 +1,6 @@
 import fastapi
 import loguru
+import sqlalchemy
 from sqlalchemy import event, text
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_connection
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSessionTransaction
@@ -62,6 +63,32 @@ async def initialize_db_tables(connection: AsyncConnection) -> None:
             await connection.execute(text("ALTER TABLE interview ADD COLUMN IF NOT EXISTS duration_seconds INTEGER"))
             await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_interview_completed_at ON interview (completed_at)"))
 
+            # interview.difficulty and interview.job_profile_id are declared on the
+            # model but no migration ever adds them: the original create_table has
+            # neither, and the only other reference is an alter_column that assumes
+            # difficulty already exists. A database created before they were added to
+            # the model therefore never gets them, and create_all(checkfirst=True)
+            # cannot help because it only creates missing tables, never columns.
+            # Every interview query selects both, so the whole product 500s - the
+            # same failure mode, and the same fix, as user.is_admin below.
+            # NOT NULL DEFAULT 'medium' matches the model default and leaves existing
+            # rows valid.
+            await connection.execute(
+                text(
+                    "ALTER TABLE interview ADD COLUMN IF NOT EXISTS difficulty "
+                    "VARCHAR(16) NOT NULL DEFAULT 'medium'"
+                )
+            )
+            await connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_interview_difficulty ON interview (difficulty)")
+            )
+            await connection.execute(
+                text("ALTER TABLE interview ADD COLUMN IF NOT EXISTS job_profile_id INTEGER")
+            )
+            await connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_interview_job_profile_id ON interview (job_profile_id)")
+            )
+
             # user.is_admin gates the cross-student analytics endpoints. The model
             # declares it, so if the column is absent EVERY query against `user`
             # fails - including login - which is exactly what happened on staging
@@ -112,11 +139,66 @@ async def initialize_db_tables(connection: AsyncConnection) -> None:
             await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_analytics_event_event_type ON analytics_event (event_type)"))
             await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_analytics_event_created_at ON analytics_event (created_at)"))
 
+        await report_schema_drift(connection)
+
     except Exception as e:
         loguru.logger.error(f"Database initialization error: {e}")
         raise
 
     loguru.logger.info("Database Table Initialization --- Successfully Completed!")
+
+
+def _missing_columns(inspector, metadata) -> dict[str, list[str]]:
+    """Columns the models declare that the live database does not have."""
+    present_tables = set(inspector.get_table_names())
+    drift: dict[str, list[str]] = {}
+    for name, table in metadata.tables.items():
+        if name not in present_tables:
+            # A missing table is a different problem and is reported elsewhere;
+            # flagging all of its columns here would only add noise.
+            continue
+        actual = {column["name"] for column in inspector.get_columns(name)}
+        missing = [column.name for column in table.columns if column.name not in actual]
+        if missing:
+            drift[name] = missing
+    return drift
+
+
+async def report_schema_drift(connection) -> None:
+    """Names columns the models expect but the database lacks.
+
+    A column present on the model and absent from the table makes every query
+    touching that table fail at runtime, because SQLAlchemy names each column in
+    its SELECT. That has already cost this product twice: user.is_admin broke
+    login on staging, and interview.difficulty broke interview creation, each
+    surfacing only as an opaque 500 long after deploy. Alembic cannot be relied
+    on to prevent it - no migration adds interview.difficulty at all - and
+    create_all(checkfirst=True) only ever creates missing tables, never columns.
+
+    Reported rather than raised: refusing to start would turn drift into an
+    outage, while a named list in the logs is immediately actionable.
+    """
+    try:
+        drift = await connection.run_sync(
+            lambda sync_connection: _missing_columns(
+                sqlalchemy.inspect(sync_connection), Base.metadata
+            )
+        )
+    except Exception as inspection_error:  # noqa: BLE001
+        loguru.logger.warning(f"Could not check schema drift: {inspection_error}")
+        return
+
+    if not drift:
+        loguru.logger.info("Schema check --- models and database agree")
+        return
+
+    for table, columns in sorted(drift.items()):
+        loguru.logger.error(
+            "SCHEMA DRIFT | table '{}' is missing column(s) declared on the model: {}. "
+            "Every query selecting them will fail with UndefinedColumnError.",
+            table,
+            ", ".join(sorted(columns)),
+        )
 
 
 async def initialize_db_connection(backend_app: fastapi.FastAPI) -> None:
