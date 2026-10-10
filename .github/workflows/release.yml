@@ -1,0 +1,52 @@
+name: Gated release
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [staging, production]
+        required: true
+      test_evidence:
+        description: 'Local live-test record for staging; staging acceptance record for production (tester, date, results, link)'
+        type: string
+        required: true
+permissions:
+  contents: read
+  deployments: write
+  id-token: write
+concurrency:
+  group: release-${{ inputs.environment }}
+  cancel-in-progress: false
+jobs:
+  quality:
+    uses: ./.github/workflows/ci.yml
+  deploy:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Authenticate to AWS with short-lived credentials
+        if: inputs.environment == 'production'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy tested commit and verify health
+        run: python ops/release.py
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+          TEST_EVIDENCE: ${{ inputs.test_evidence }}
+          GH_TOKEN: ${{ github.token }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_SERVICE_ID }}
+          HEALTH_URL: ${{ vars.HEALTH_URL }}
+          PRODUCTION_PROVIDER: ec2
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          EC2_RELEASE_CONFIGURED: ${{ vars.EC2_RELEASE_CONFIGURED }}
