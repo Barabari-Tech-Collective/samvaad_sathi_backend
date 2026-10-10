@@ -1,5 +1,8 @@
 import logging
+import traceback
+
 import fastapi
+import fastapi.responses
 import uvicorn
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,6 +103,29 @@ def initialize_backend_application() -> fastapi.FastAPI:
     except Exception:
         # Non-fatal if attributes are not available
         pass
+
+    # Registered before CORSMiddleware so that it ends up *inside* it. Starlette
+    # turns an unhandled exception into a 500 at ServerErrorMiddleware, which sits
+    # outside the CORS layer, so that response carries no Access-Control-Allow-Origin
+    # and the browser reports "blocked by CORS policy" instead of the real failure.
+    # Every server error then looks like a CORS misconfiguration from the frontend,
+    # which is a long detour away from the actual bug. Turning the exception into a
+    # response here means CORSMiddleware still adds its headers and the browser can
+    # read the status.
+    @app.middleware("http")
+    async def return_unhandled_errors_with_cors_headers(request, call_next):
+        try:
+            return await call_next(request)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Unhandled error | %s %s", request.method, request.url.path
+            )
+            # The cause is echoed in local development only; a deployed environment
+            # must not leak internals to the browser.
+            detail = "Something went wrong. Please try again."
+            if settings.ENVIRONMENT == Environment.DEVELOPMENT.value:
+                detail = f"{detail} (dev: {traceback.format_exc(limit=0).strip()})"
+            return fastapi.responses.JSONResponse(status_code=500, content={"detail": detail})
 
     # Add middleware BEFORE including routers (middleware is applied in reverse order)
     # CORS middleware should be added first to handle preflight requests
