@@ -42,10 +42,6 @@ async def transcribe_audio_answer(
     4. Save audio file and update database
     5. Return transcription results
     """
-    logger.warning(
-    "######## TRANSCRIBE NEW CODE TEST v1 ######## | QuestionAttempt=%s",
-    question_attempt_id,
-    )
     # Step 1: Verify question attempt exists and belongs to current user
     try:
         request_start = time.perf_counter()
@@ -118,7 +114,7 @@ async def transcribe_audio_answer(
       question_attempt_id_int,
       time.perf_counter() - whisper_start,
       whisper_error,
-      extract_word_count(transcription),
+      extract_word_count(transcription) or 0,
     )
 
     follow_up_service = FollowUpService(async_session=question_repo.async_session)
@@ -170,7 +166,11 @@ async def transcribe_audio_answer(
 
     # Step 8: Clean up temporary file
     if temp_file_path:
-        await cleanup_temp_audio_file(temp_file_path)
+        try:
+            await cleanup_temp_audio_file(temp_file_path)
+        except Exception:
+            # Cleanup cannot turn a committed answer into an apparent save failure.
+            logger.warning("Temporary audio cleanup failed | QuestionAttempt=%s", question_attempt_id_int)
 
     # Step 9: Extract metadata for response
     word_count = extract_word_count(transcription)
@@ -178,6 +178,15 @@ async def transcribe_audio_answer(
     # Determine overall save status and error message
     final_save_error = save_error or db_save_error
     final_saved = saved and not final_save_error
+
+    if not final_saved:
+        await question_repo.async_session.rollback()
+        logger.error("Answer persistence failed | QuestionAttempt=%s", question_attempt_id_int)
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Your answer was not saved. Keep this page open and retry the upload.",
+            headers={"Retry-After": "3"},
+        )
     
     follow_up_metadata = None
     follow_up_question = None
