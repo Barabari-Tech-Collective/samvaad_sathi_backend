@@ -245,61 +245,70 @@ class SmartLinkValidator:
             "summary": {"working": 0, "broken": 0, "repositories": 0, "deployments": 0}
         }
 
+        async def validate_single_url(clean_url: str, spatial_meta: Dict[str, Any], client: httpx.AsyncClient) -> Dict[str, Any]:
+            classification = self.classify_url(clean_url)
+            cat = classification["category"]
+            platform = classification["platform"]
+
+            # If it's a custom domain but found in Projects or Experience, it's likely a project deployment, not the main portfolio
+            section_lower = str(spatial_meta.get("section", "")).lower()
+            if platform == "custom_domain" and any(keyword in section_lower for keyword in ["project", "experience"]):
+                cat = "deployment"
+
+            if platform == "github":
+                gh_meta = await self.validate_github_url_async(client, clean_url)
+                is_valid = gh_meta.get("valid", False)
+                status_code = gh_meta.get("status_code", 404)
+                extra_meta = gh_meta
+            elif platform == "linkedin":
+                # LinkedIn blocks automated requests with 999, so we validate format
+                is_format_valid = bool(re.match(r'^https?:\/\/(www\.|[a-z]{2}\.)?linkedin\.com\/(in|company|school)\/[a-zA-Z0-9%_-]+\/?$', clean_url, re.IGNORECASE))
+                is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
+                # Only mark as valid if format is correct AND it didn't return an actual 404
+                if is_format_valid and (is_valid or status_code in (401, 403, 999)):
+                    is_valid = True
+                    err_msg = ""
+                elif not is_format_valid:
+                    is_valid = False
+                    err_msg = "Invalid LinkedIn URL format"
+                extra_meta = {"error": err_msg} if not is_valid and err_msg else {}
+            else:
+                is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
+                extra_meta = {"error": err_msg} if err_msg else {}
+
+            return {
+                "url": clean_url,
+                "valid": is_valid,
+                "status_code": status_code,
+                "platform": platform,
+                "category": cat,
+                "page": spatial_meta.get("page"),
+                "section": spatial_meta.get("section"),
+                "anchorText": spatial_meta.get("anchorText"),
+                "line": spatial_meta.get("line"),
+                **extra_meta
+            }
+
+        import asyncio
         async with httpx.AsyncClient() as client:
-            for clean_url, spatial_meta in url_metadata_map.items():
-                classification = self.classify_url(clean_url)
-                cat = classification["category"]
-                platform = classification["platform"]
+            tasks = [validate_single_url(clean_url, meta, client) for clean_url, meta in url_metadata_map.items()]
+            link_records = await asyncio.gather(*tasks)
 
-                # If it's a custom domain but found in Projects or Experience, it's likely a project deployment, not the main portfolio
-                section_lower = str(spatial_meta.get("section", "")).lower()
-                if platform == "custom_domain" and any(keyword in section_lower for keyword in ["project", "experience"]):
-                    cat = "deployment"
+        for record in link_records:
+            clean_url = record["url"]
+            is_valid = record["valid"]
+            cat = record["category"]
+            
+            results["links"][clean_url] = record
+            
+            if is_valid:
+                results["summary"]["working"] += 1
+            else:
+                results["summary"]["broken"] += 1
 
-                if platform == "github":
-                    gh_meta = await self.validate_github_url_async(client, clean_url)
-                    is_valid = gh_meta.get("valid", False)
-                    status_code = gh_meta.get("status_code", 404)
-                    extra_meta = gh_meta
-                elif platform == "linkedin":
-                    # LinkedIn blocks automated requests with 999, so we validate format
-                    is_format_valid = bool(re.match(r'^https?:\/\/(www\.|[a-z]{2}\.)?linkedin\.com\/(in|company|school)\/[a-zA-Z0-9%_-]+\/?$', clean_url, re.IGNORECASE))
-                    is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
-                    # Only mark as valid if format is correct AND it didn't return an actual 404
-                    if is_format_valid and (is_valid or status_code in (401, 403, 999)):
-                        is_valid = True
-                        err_msg = ""
-                    elif not is_format_valid:
-                        is_valid = False
-                        err_msg = "Invalid LinkedIn URL format"
-                    extra_meta = {"error": err_msg} if not is_valid and err_msg else {}
-                else:
-                    is_valid, status_code, err_msg = await self.check_link_active_async(client, clean_url)
-                    extra_meta = {"error": err_msg} if err_msg else {}
-
-                link_record = {
-                    "url": clean_url,
-                    "valid": is_valid,
-                    "status_code": status_code,
-                    "platform": platform,
-                    "category": cat,
-                    "page": spatial_meta.get("page"),
-                    "section": spatial_meta.get("section"),
-                    "anchorText": spatial_meta.get("anchorText"),
-                    "line": spatial_meta.get("line"),
-                    **extra_meta
-                }
-
-                results["links"][clean_url] = link_record
-
-                if is_valid:
-                    results["summary"]["working"] += 1
-                else:
-                    results["summary"]["broken"] += 1
-
-                if cat == "repository":
-                    results["summary"]["repositories"] += 1
-                elif cat == "deployment":
-                    results["summary"]["deployments"] += 1
+            if cat == "repository":
+                results["summary"]["repositories"] += 1
+            elif cat == "deployment":
+                results["summary"]["deployments"] += 1
 
         return results
