@@ -108,7 +108,7 @@ class LinkScorer:
 
         total_score = round(profile_score + proof_score + extras_score, 1)
 
-        has_local_links = any(url.lower().startswith("file://") or "c:/" in url.lower() or "users/" in url.lower() for url in links_map.keys())
+        has_local_links = any(url.lower().startswith("file://") or "c:/" in url.lower() for url in links_map.keys())
 
         return {
             "totalScore": total_score,

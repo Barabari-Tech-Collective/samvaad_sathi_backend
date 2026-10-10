@@ -9,9 +9,9 @@ URL_PATTERN = re.compile(r'https?://[^\s<>"]+|www\.[^\s<>"]+|(?:github\.com|link
 # We will focus validation primarily on professional profiles.
 PROFESSIONAL_DOMAINS = ["github.com", "linkedin.com", "gitlab.com", "bitbucket.org", "vercel.app", "netlify.app", "onrender.com", "herokuapp.com"]
 
-def extract_professional_urls(text: str) -> list[str]:
+def extract_all_urls(text: str) -> list[str]:
     """
-    Extracts URLs from text and filters for professional profiles.
+    Extracts all URLs from text.
     Returns a list of URLs prefixed with https:// if necessary.
     """
     raw_urls = URL_PATTERN.findall(text)

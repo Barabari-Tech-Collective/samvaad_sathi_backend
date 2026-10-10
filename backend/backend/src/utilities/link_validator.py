@@ -253,7 +253,7 @@ class SmartLinkValidator:
 
                 # If it's a custom domain but found in Projects or Experience, it's likely a project deployment, not the main portfolio
                 section_lower = str(spatial_meta.get("section", "")).lower()
-                if cat == "portfolio" and any(keyword in section_lower for keyword in ["project", "experience"]):
+                if platform == "custom_domain" and any(keyword in section_lower for keyword in ["project", "experience"]):
                     cat = "deployment"
 
                 if platform == "github":
