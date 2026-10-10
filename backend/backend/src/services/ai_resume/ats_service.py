@@ -186,7 +186,18 @@ async def generate_ats_analysis(
             ],
             "suggestedProject": parsed_ai_feedback.get("suggestedProject", {}),
             "finalRecommendations": parsed_ai_feedback.get("finalRecommendations", []),
-            "hygieneCheck": deterministic_report["hygieneCheck"]
+            "hygieneCheck": deterministic_report["hygieneCheck"],
+            "allLinks": [
+                {
+                    "url": url,
+                    "platform": details.get("platform", "unknown"),
+                    "category": details.get("category", "other"),
+                    "working": details.get("valid", False),
+                    "statusCode": details.get("status_code", 0),
+                    "error": details.get("error", "")
+                }
+                for url, details in verified_links_context.get("links", {}).items()
+            ]
         }
 
         final_response["hygieneCheck"]["grammarIssues"] = parsed_ai_feedback.get("hygieneCheck", {}).get("grammarIssues", [])

@@ -113,17 +113,54 @@ class ATSCalculator:
         link_report: Dict[str, Any],
         education_report: Dict[str, Any],
         raw_resume_text: str = ""
-    ) -> Dict[str, bool]:
+    ) -> Dict[str, Any]:
         categories = link_report.get("categoryBreakdown", {})
         edu_analysis = education_report.get("educationAnalysis", {})
 
         li_data = categories.get("linkedin", {})
         gh_data = categories.get("github", {})
         port_data = categories.get("portfolio", {})
+        coding_data = categories.get("coding_profiles", {})
 
         text_lower = raw_resume_text.lower()
         has_email = "@" in text_lower and "." in text_lower
         has_phone = len([c for c in text_lower if c.isdigit()]) >= 10
+
+        link_messages = []
+        
+        # 1. LinkedIn Strict Check
+        if li_data.get("present", False) and not li_data.get("working", False):
+            link_messages.append("❌ LinkedIn profile link is broken or invalid. Please provide a direct, public 'linkedin.com/in/username' URL.")
+        elif not li_data.get("present", False):
+            link_messages.append("⚠️ No LinkedIn profile detected. A professional LinkedIn profile is highly recommended.")
+
+        # 2. GitHub Strict Check
+        if gh_data.get("present", False) and not gh_data.get("working", False):
+            link_messages.append("❌ GitHub profile link is broken or returned an error (e.g., 404 Not Found). Please verify your username is typed correctly.")
+            
+        # 3. Portfolio Strict Check
+        if port_data.get("present", False) and not port_data.get("working", False):
+            link_messages.append("❌ Portfolio website link is broken or the server is unreachable. Please ensure the site is live and publicly accessible.")
+
+        if not li_data.get("present", False) and not gh_data.get("present", False) and not port_data.get("present", False):
+            link_messages.append("💡 Tip: Ensure all your links start with 'https://' and have no spaces so they can be parsed correctly.")
+
+        # 4. Check for embedded local file paths
+        if link_report.get("hasLocalLinks", False):
+            link_messages.append("⚠️ We detected a local file path (e.g., 'file:///C:/...') in your hyperlinks! This means you accidentally hyperlinked your text to a file on your own computer instead of an internet URL. Please fix the hyperlinks in your PDF so recruiters can click them.")
+
+        # 5. Hidden Link Detector
+        import re
+        pure_text = raw_resume_text.lower()
+        if "----- spatially verified embedded links -----" in pure_text:
+            pure_text = pure_text.split("----- spatially verified embedded links -----")[0]
+        pure_text = re.sub(r'\[.*?\]', '', pure_text) # Remove injected spatial bracket links
+        
+        if li_data.get("working", False) and "linkedin.com" not in pure_text:
+            link_messages.append("⚠️ Your LinkedIn URL is hidden behind text (e.g. the word 'LinkedIn'). ATS best practice is to type out the full URL (linkedin.com/in/username) so older text-only ATS software can parse it and recruiters can read it on printed copies.")
+            
+        if gh_data.get("working", False) and "github.com" not in pure_text:
+            link_messages.append("⚠️ Your GitHub URL is hidden behind text. ATS best practice is to type out the full URL (github.com/username) so it can be read on printed resumes.")
 
         return {
             "hasLinkedIn": li_data.get("present", False),
@@ -132,9 +169,12 @@ class ATSCalculator:
             "githubWorking": gh_data.get("working", False),
             "hasPortfolio": port_data.get("present", False),
             "portfolioWorking": port_data.get("working", False),
+            "hasCodingProfile": coding_data.get("present", False),
+            "codingProfileWorking": coding_data.get("working", False),
             "hasInstitution": edu_analysis.get("institution", {}).get("present", False),
             "hasDuration": edu_analysis.get("duration", {}).get("present", False),
             "hasScore": edu_analysis.get("grade", {}).get("present", False),
             "hasPhone": has_phone,
-            "hasEmail": has_email
+            "hasEmail": has_email,
+            "linkFeedbackMessages": link_messages
         }

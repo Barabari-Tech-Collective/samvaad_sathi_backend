@@ -59,6 +59,13 @@ class SmartLinkValidator:
             "medium.com": {"platform": "medium", "category": "blog"},
             "youtube.com": {"platform": "youtube", "category": "social"},
 
+            # Coding Platforms
+            "leetcode.com": {"platform": "leetcode", "category": "coding_profile"},
+            "hackerrank.com": {"platform": "hackerrank", "category": "coding_profile"},
+            "codechef.com": {"platform": "codechef", "category": "coding_profile"},
+            "codeforces.com": {"platform": "codeforces", "category": "coding_profile"},
+            "geeksforgeeks.org": {"platform": "geeksforgeeks", "category": "coding_profile"},
+
             # Credentials & Packages
             "npmjs.com": {"platform": "npm", "category": "package"},
             "pypi.org": {"platform": "pypi", "category": "package"},
@@ -124,7 +131,7 @@ class SmartLinkValidator:
 
         # 4. Custom Personal Domain / Portfolio
         if "." in hostname:
-            return {"platform": "custom_domain", "category": "portfolio"}
+            return {"platform": "custom_domain", "category": "other"}
 
         return {"platform": "unknown", "category": "other"}
 
@@ -243,6 +250,11 @@ class SmartLinkValidator:
                 classification = self.classify_url(clean_url)
                 cat = classification["category"]
                 platform = classification["platform"]
+
+                # If it's a custom domain but found in Projects or Experience, it's likely a project deployment, not the main portfolio
+                section_lower = str(spatial_meta.get("section", "")).lower()
+                if cat == "portfolio" and any(keyword in section_lower for keyword in ["project", "experience"]):
+                    cat = "deployment"
 
                 if platform == "github":
                     gh_meta = await self.validate_github_url_async(client, clean_url)

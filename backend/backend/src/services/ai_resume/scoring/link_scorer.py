@@ -33,7 +33,8 @@ class LinkScorer:
             "deployments": [],
             "repositories": [],
             "packages": [],
-            "certifications": []
+            "certifications": [],
+            "coding_profiles": []
         }
 
         for url, details in links_map.items():
@@ -62,6 +63,8 @@ class LinkScorer:
                 categories["packages"].append(link_payload)
             elif cat == "certification":
                 categories["certifications"].append(link_payload)
+            elif cat == "coding_profile":
+                categories["coding_profiles"].append(link_payload)
 
         # 1. Score Pillar 1: Identity & Profiles (Max 2.0 Pts)
         li_valid = any(l["valid"] for l in categories["linkedin"])
@@ -95,16 +98,21 @@ class LinkScorer:
         # 3. Score Pillar 3: Technical Extras (Max 1.0 Pt)
         valid_packages = [l for l in categories["packages"] if l["valid"]]
         valid_certs = [l for l in categories["certifications"] if l["valid"]]
+        valid_coding = [l for l in categories["coding_profiles"] if l["valid"]]
 
         extras_score = 0.0
         if valid_packages: extras_score += 0.5
         if valid_certs: extras_score += 0.5
+        if valid_coding: extras_score += 0.5
         extras_score = min(extras_score, 1.0)
 
         total_score = round(profile_score + proof_score + extras_score, 1)
 
+        has_local_links = any(url.lower().startswith("file://") or "c:/" in url.lower() or "users/" in url.lower() for url in links_map.keys())
+
         return {
             "totalScore": total_score,
+            "hasLocalLinks": has_local_links,
             "maxScore": 5.0,
             "track": track,
             "categoryBreakdown": {
@@ -113,7 +121,8 @@ class LinkScorer:
                 "portfolio": {"present": len(categories["portfolio"]) > 0, "working": port_valid},
                 "deployments": {"present": len(categories["deployments"]) > 0, "working": valid_deploy_count > 0, "activeCount": valid_deploy_count},
                 "packages": {"present": len(categories["packages"]) > 0, "working": len(valid_packages) > 0, "count": len(valid_packages)},
-                "certifications": {"present": len(categories["certifications"]) > 0, "working": len(valid_certs) > 0, "count": len(valid_certs)}
+                "certifications": {"present": len(categories["certifications"]) > 0, "working": len(valid_certs) > 0, "count": len(valid_certs)},
+                "coding_profiles": {"present": len(categories["coding_profiles"]) > 0, "working": len(valid_coding) > 0, "count": len(valid_coding)}
             },
             "linkAnalysis": {
                 "linkedIn": {"present": len(categories["linkedin"]) > 0, "working": li_valid, "score": 0.8 if li_valid else 0.0},

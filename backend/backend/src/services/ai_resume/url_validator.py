@@ -4,7 +4,7 @@ import asyncio
 from loguru import logger
 
 # Regex to find common URLs in resume text, including specific professional domains without http
-URL_PATTERN = re.compile(r'https?://[^\s<>"]+|www\.[^\s<>"]+|(?:github\.com|linkedin\.com/in|gitlab\.com|bitbucket\.org|vercel\.app|netlify\.app|onrender\.com|herokuapp\.com)/?[^\s<>"]*')
+URL_PATTERN = re.compile(r'https?://[^\s<>"]+|www\.[^\s<>"]+|(?:github\.com|linkedin\.com/in|gitlab\.com|bitbucket\.org|vercel\.app|netlify\.app|onrender\.com|herokuapp\.com|leetcode\.com|hackerrank\.com|codechef\.com|codeforces\.com|geeksforgeeks\.org)/?[^\s<>"]*')
 
 # We will focus validation primarily on professional profiles.
 PROFESSIONAL_DOMAINS = ["github.com", "linkedin.com", "gitlab.com", "bitbucket.org", "vercel.app", "netlify.app", "onrender.com", "herokuapp.com"]
@@ -19,14 +19,13 @@ def extract_professional_urls(text: str) -> list[str]:
     
     for url in raw_urls:
         url_lower = url.lower()
-        # Check if the URL belongs to a professional domain
-        if any(domain in url_lower for domain in PROFESSIONAL_DOMAINS):
-            # Ensure it has a scheme
-            if not url_lower.startswith("http"):
-                url = "https://" + url
-            # Clean trailing punctuation
-            url = url.rstrip('.,;)')
-            professional_urls.append(url)
+        # Ensure it has a scheme
+        if not url_lower.startswith("http"):
+            url = "https://" + url
+        
+        # Clean trailing punctuation
+        url = url.rstrip('.,;)')
+        professional_urls.append(url)
             
     return list(set(professional_urls))
 
