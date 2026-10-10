@@ -1,3 +1,4 @@
+import logging
 import secrets
 from urllib.parse import quote, urlencode
 
@@ -14,6 +15,9 @@ from src.utilities.exceptions.database import EntityDoesNotExist
 from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTokenError
 
 
+logger = logging.getLogger(__name__)
+
+
 class RequestAccessBody(pydantic.BaseModel):
     request_code: str
 
@@ -28,6 +32,17 @@ async def sso_login(request: Request):
     existing cross-product session (shared barabari_sso cookie) or bounces to the central
     Sampark Saathi login page first.
     """
+    # Checked before any state is minted or stored: without a configured auth
+    # service the authorize URL below would be a relative path that resolves back
+    # to this service and answers 404, which is the dead "Continue" button
+    # students hit. Report the misconfiguration instead of redirecting into it.
+    if not settings.AUTH_SERVICE_BASE_URL.strip():
+        logger.error("Refusing SSO login: AUTH_SERVICE_BASE_URL is not configured")
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sign-in is temporarily unavailable. Please try again later.",
+        )
+
     state = secrets.token_urlsafe(24)
     # Mirrors how auth_cognito.py used the session for CSRF-adjacent bookkeeping (authlib
     # owns the OAuth `state` there; here we own it ourselves since we're not using authlib).
@@ -39,7 +54,7 @@ async def sso_login(request: Request):
     # scheme, which is http unless uvicorn trusts X-Forwarded-Proto, and the resulting
     # http:// URL silently fails to match the registered https:// entry.
     redirect_uri = settings.SSO_REDIRECT_URI or str(request.url_for("auth_sso_callback"))
-    authorize_url = f"{settings.AUTH_SERVICE_BASE_URL}/barabari-auth/api/auth/public/v1/authorize?" + urlencode(
+    authorize_url = f"{settings.AUTH_SERVICE_BASE_URL.rstrip('/')}/barabari-auth/api/auth/public/v1/authorize?" + urlencode(
         {
             "product": settings.SAMPARK_PRODUCT_UNIQUE_ID,
             "redirect_uri": redirect_uri,

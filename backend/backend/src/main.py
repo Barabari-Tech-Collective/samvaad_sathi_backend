@@ -13,10 +13,38 @@ from src.config.events import (
 )
 from src.config.loki_logging import configure_loki_logging
 from src.config.manager import settings
+from src.config.settings.environment import Environment
+
+
+def verify_sso_configuration() -> None:
+    """Refuse to serve a deployment that cannot complete a student sign-in.
+
+    An empty AUTH_SERVICE_BASE_URL makes the authorize redirect a relative path
+    that resolves back to this service and answers 404, so every student sees a
+    dead "Continue" button with nothing in the logs explaining why. A deployed
+    environment therefore fails to start rather than serving a broken login.
+
+    Local development is still allowed to run without the auth service, because
+    most work does not touch sign-in; the SSO routes report a clear error there
+    instead of emitting an unusable redirect.
+    """
+    if settings.AUTH_SERVICE_BASE_URL.strip():
+        return
+    message = (
+        "AUTH_SERVICE_BASE_URL is not set, so Sampark Saathi SSO cannot build a "
+        "valid authorize redirect and student sign-in would fail."
+    )
+    if settings.ENVIRONMENT != Environment.DEVELOPMENT.value:
+        raise RuntimeError(message)
+    logging.getLogger(__name__).error(
+        "%s Continuing because this is local development; /api/auth/sso routes "
+        "will report that sign-in is unavailable.",
+        message,
+    )
 
 
 def initialize_backend_application() -> fastapi.FastAPI:
-    
+
     logging.basicConfig(
         level=settings.LOGGING_LEVEL,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -28,15 +56,9 @@ def initialize_backend_application() -> fastapi.FastAPI:
     logging.getLogger("src").setLevel(settings.LOGGING_LEVEL)
     configure_loki_logging()
 
-    logging.getLogger(__name__).info(
-    "######## APPLICATION INFO LOG TEST ########"
-    )
-    logging.getLogger(__name__).warning(
-    "######## APPLICATION WARNING LOG TEST ########"
-    )
-
     # Load environment variables from .env if present
     load_dotenv()
+    verify_sso_configuration()
     app = fastapi.FastAPI(**settings.set_backend_app_attributes)  # type: ignore
 
     # Tags metadata for Swagger grouping
