@@ -47,10 +47,10 @@ class SmartLinkValidator:
             "firebaseapp.com": {"platform": "firebase", "category": "deployment"},
             "web.app": {"platform": "firebase", "category": "deployment"},
 
-            # Design & Creative
-            "figma.com": {"platform": "figma", "category": "design"},
-            "behance.net": {"platform": "behance", "category": "design"},
-            "dribbble.com": {"platform": "dribbble", "category": "design"},
+            # Design & Creative Portfolios
+            "figma.com": {"platform": "figma", "category": "portfolio"},
+            "behance.net": {"platform": "behance", "category": "portfolio"},
+            "dribbble.com": {"platform": "dribbble", "category": "portfolio"},
 
             # Professional Networks & Socials
             "linkedin.com": {"platform": "linkedin", "category": "social"},
@@ -72,7 +72,14 @@ class SmartLinkValidator:
             "credly.com": {"platform": "credly", "category": "certification"},
             "badgr.com": {"platform": "badgr", "category": "certification"},
             "tinyurl.com": {"platform": "tinyurl", "category": "shortener"},
-            "bit.ly": {"platform": "bitly", "category": "shortener"}
+            "bit.ly": {"platform": "bitly", "category": "shortener"},
+
+            # Portfolio & Link-in-bio Platforms
+            "linktr.ee": {"platform": "linktree", "category": "portfolio"},
+            "bento.me": {"platform": "bento", "category": "portfolio"},
+            "campsite.bio": {"platform": "campsite", "category": "portfolio"},
+            "about.me": {"platform": "aboutme", "category": "portfolio"},
+            "hashnode.dev": {"platform": "hashnode", "category": "portfolio"}
         }
 
     def _unwrap_url(self, raw_url: str) -> str:
@@ -252,8 +259,15 @@ class SmartLinkValidator:
 
             # If it's a custom domain but found in Projects or Experience, it's likely a project deployment, not the main portfolio
             section_lower = str(spatial_meta.get("section", "")).lower()
+            anchor_lower = str(spatial_meta.get("anchorText", "")).lower()
+            
             if platform == "custom_domain" and any(keyword in section_lower for keyword in ["project", "experience"]):
                 cat = "deployment"
+            elif (platform == "custom_domain" or platform == "unknown") and (
+                "portfolio" in section_lower or "portfolio" in anchor_lower or 
+                "contact" in section_lower or "header" in section_lower or section_lower == ""
+            ):
+                cat = "portfolio"
 
             if platform == "github":
                 gh_meta = await self.validate_github_url_async(client, clean_url)
