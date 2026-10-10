@@ -149,19 +149,6 @@ class ATSCalculator:
         if link_report.get("hasLocalLinks", False):
             link_messages.append("⚠️ We detected a local file path (e.g., 'file:///C:/...') in your hyperlinks! This means you accidentally hyperlinked your text to a file on your own computer instead of an internet URL. Please fix the hyperlinks in your PDF so recruiters can click them.")
 
-        # 5. Hidden Link Detector
-        import re
-        pure_text = raw_resume_text.lower()
-        if "----- spatially verified embedded links -----" in pure_text:
-            pure_text = pure_text.split("----- spatially verified embedded links -----")[0]
-        pure_text = re.sub(r'\[.*?\]', '', pure_text) # Remove injected spatial bracket links
-        
-        if li_data.get("working", False) and "linkedin.com" not in pure_text:
-            link_messages.append("⚠️ Your LinkedIn URL is hidden behind text (e.g. the word 'LinkedIn'). ATS best practice is to type out the full URL (linkedin.com/in/username) so older text-only ATS software can parse it and recruiters can read it on printed copies.")
-            
-        if gh_data.get("working", False) and "github.com" not in pure_text:
-            link_messages.append("⚠️ Your GitHub URL is hidden behind text. ATS best practice is to type out the full URL (github.com/username) so it can be read on printed resumes.")
-
         return {
             "hasLinkedIn": li_data.get("present", False),
             "linkedInWorking": li_data.get("working", False),
