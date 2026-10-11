@@ -1,5 +1,6 @@
 from io import BytesIO
 import json
+import re
 from docx import Document
 from fastapi import HTTPException, UploadFile
 import fitz  # PyMuPDF
@@ -68,6 +69,12 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
         reconstructed_lines = []
         document_map = []
         all_unique_urls = set()
+        rich_embedded_links = []
+        current_section = "header"
+        COMMON_SECTION_KEYWORDS = [
+            "summary", "experience", "employment", "projects", "education",
+            "skills", "certifications", "contact", "interests", "awards"
+        ]
 
         for page_num in range(len(pdf_document)):
             page = pdf_document.load_page(page_num)
@@ -96,6 +103,16 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
                         line_text_parts = []
                         line_bbox = line.get("bbox")
 
+                        # Determine if line looks like a major section heading
+                        line_plain = " ".join(span.get("text", "") for span in line.get("spans", [])).strip()
+                        line_lower = line_plain.lower()
+                        if len(line_plain) <= 40:
+                            for sec_kw in COMMON_SECTION_KEYWORDS:
+                                if sec_kw in line_lower:
+                                    current_section = sec_kw
+                                    break
+
+                        line_matched_urls = {}
                         for span in line.get("spans", []):
                             span_text = span.get("text", "")
                             span_rect = fitz.Rect(span.get("bbox"))
@@ -110,6 +127,11 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
                                     or span_rect.contains(l["rect"])
                                 ):
                                     matched_url = l["uri"]
+                                    clean_span = span_text.strip()
+                                    if clean_span and re.search(r'[a-zA-Z0-9]', clean_span):
+                                        if matched_url not in line_matched_urls:
+                                            line_matched_urls[matched_url] = []
+                                        line_matched_urls[matched_url].append(clean_span)
                                     break
 
                             if matched_url and matched_url not in span_text:
@@ -119,6 +141,16 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
                                 )
                             else:
                                 line_text_parts.append(span_text)
+
+                        for m_url, words in line_matched_urls.items():
+                            combined_anchor = " ".join(words)
+                            rich_embedded_links.append({
+                                "url": m_url,
+                                "anchorText": combined_anchor,
+                                "section": current_section,
+                                "page": page_num + 1,
+                                "line": len(reconstructed_lines) + 1
+                            })
 
                         full_line = " ".join(line_text_parts).strip()
                         if full_line:
@@ -133,6 +165,18 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
                                     "y_top": line_bbox[1] if line_bbox else 0,
                                 }
                             )
+
+            # Add any interactive links that had no text span overlap (e.g. icon-only buttons)
+            matched_urls_set = {item["url"] for item in rich_embedded_links}
+            for l in valid_links:
+                if l["uri"] not in matched_urls_set:
+                    rich_embedded_links.append({
+                        "url": l["uri"],
+                        "anchorText": "",
+                        "section": current_section,
+                        "page": page_num + 1,
+                        "line": len(reconstructed_lines)
+                    })
 
         try:
             raw_text_output = "\n".join(reconstructed_lines)
@@ -162,7 +206,7 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
         return {
             "text": raw_text_output.strip(),
             "documentMap": document_map,
-            "embeddedLinks": list(all_unique_urls)
+            "embeddedLinks": rich_embedded_links if rich_embedded_links else list(all_unique_urls)
         }
 
     except HTTPException:

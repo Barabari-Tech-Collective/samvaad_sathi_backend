@@ -23,8 +23,8 @@ def extract_all_urls(text: str) -> list[str]:
         if not url_lower.startswith("http"):
             url = "https://" + url
         
-        # Clean trailing punctuation
-        url = url.rstrip('.,;)')
+        # Clean trailing punctuation and markdown/bracket artifacts
+        url = url.rstrip('.,;)]}>"\'')
         professional_urls.append(url)
             
     return list(set(professional_urls))

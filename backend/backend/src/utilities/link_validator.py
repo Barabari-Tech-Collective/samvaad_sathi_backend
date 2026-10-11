@@ -79,7 +79,12 @@ class SmartLinkValidator:
             "bento.me": {"platform": "bento", "category": "portfolio"},
             "campsite.bio": {"platform": "campsite", "category": "portfolio"},
             "about.me": {"platform": "aboutme", "category": "portfolio"},
-            "hashnode.dev": {"platform": "hashnode", "category": "portfolio"}
+            "hashnode.dev": {"platform": "hashnode", "category": "portfolio"},
+            "lovable.app": {"platform": "lovable", "category": "portfolio"},
+            "framer.website": {"platform": "framer", "category": "portfolio"},
+            "framer.app": {"platform": "framer", "category": "portfolio"},
+            "carrd.co": {"platform": "carrd", "category": "portfolio"},
+            "notion.site": {"platform": "notion", "category": "portfolio"}
         }
 
     def _unwrap_url(self, raw_url: str) -> str:
@@ -101,7 +106,7 @@ class SmartLinkValidator:
                 clean = unquote(match.group(1))
 
         # Handle mailto links or plain unquoted URIs
-        clean = unquote(clean).strip()
+        clean = unquote(clean).strip().rstrip('.,;)]}>"\'')
         return clean
 
     def classify_url(self, url: str) -> Dict[str, str]:
@@ -207,7 +212,7 @@ class SmartLinkValidator:
                 "sub_type": "repository" if repo else "profile",
                 "reason": str(e)
             }
-    async def validate_all_links_async(self, extracted_links: List[Any]) -> Dict[str, Any]:
+    async def validate_all_links_async(self, extracted_links: List[Any], resume_text: str = "") -> Dict[str, Any]:
         """
         Processes extracted links safely. Guarantees raw string streams or non-URL tokens
         are rejected before executing network requests.
@@ -244,6 +249,13 @@ class SmartLinkValidator:
                     and ("." in unwrapped_url or ":" in unwrapped_url)
                     and unwrapped_url not in url_metadata_map
                 ):
+                    # If anchorText wasn't set (plain-text URL) but 'portfolio' is right next to it in resume_text
+                    if not meta.get("anchorText") and resume_text:
+                        domain_core = unwrapped_url.replace("https://", "").replace("http://", "").rstrip("/")
+                        pattern = rf"(?:portfolio|personal\s+website)[^\n\r]{{0,40}}{re.escape(domain_core)}|{re.escape(domain_core)}[^\n\r]{{0,40}}(?:portfolio|personal\s+website)"
+                        if re.search(pattern, resume_text, re.IGNORECASE):
+                            meta["anchorText"] = "portfolio"
+
                     url_metadata_map[unwrapped_url] = meta
 
         results = {
@@ -257,17 +269,32 @@ class SmartLinkValidator:
             cat = classification["category"]
             platform = classification["platform"]
 
-            # If it's a custom domain but found in Projects or Experience, it's likely a project deployment, not the main portfolio
             section_lower = str(spatial_meta.get("section", "")).lower()
             anchor_lower = str(spatial_meta.get("anchorText", "")).lower()
-            
-            if platform == "custom_domain" and any(keyword in section_lower for keyword in ["project", "experience"]):
-                cat = "deployment"
-            elif (platform == "custom_domain" or platform == "unknown") and (
-                "portfolio" in section_lower or "portfolio" in anchor_lower or 
-                "contact" in section_lower or "header" in section_lower or section_lower == ""
-            ):
+
+            # 1. Explicit portfolio indicator takes highest precedence:
+            # Anchor text containing "portfolio" (or URL containing "portfolio") is a definitive signal.
+            # However, dedicated coding/networking platforms (GitHub repos, LinkedIn, LeetCode) retain their types.
+            is_dedicated_platform = platform in [
+                "github", "linkedin", "leetcode", "hackerrank", "codechef", "codeforces", "geeksforgeeks"
+            ]
+            is_explicit_portfolio = (
+                not is_dedicated_platform
+                and (
+                    "portfolio" in anchor_lower or 
+                    "portfolio" in clean_url.lower()
+                )
+            )
+            # Custom links located in the top contact / header section of the resume
+            is_header_portfolio = (
+                platform in ["custom_domain", "custom_deployment", "unknown", "lovable", "framer"]
+                and any(s in section_lower for s in ["header", "contact", "portfolio"])
+            )
+
+            if is_explicit_portfolio or is_header_portfolio:
                 cat = "portfolio"
+            elif (platform in ["custom_domain", "custom_deployment"] or cat == "deployment") and any(keyword in section_lower for keyword in ["project", "experience"]):
+                cat = "deployment"
 
             if platform == "github":
                 gh_meta = await self.validate_github_url_async(client, clean_url)

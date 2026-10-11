@@ -50,11 +50,20 @@ async def generate_ats_analysis(
         link_validator = SmartLinkValidator()
         
         # Ingest pre-extracted spatial links or fallback text buffer
-        extracted_targets = list(embedded_links) if embedded_links else []
-        extracted_targets.extend(extract_all_urls(resume_text))
-        extracted_targets = list(dict.fromkeys(extracted_targets))  # deduplicate, preserve order
+        seen_urls = set()
+        extracted_targets = []
+        for item in (embedded_links or []):
+            url_str = item.get("url") if isinstance(item, dict) else str(item)
+            if url_str and url_str not in seen_urls:
+                seen_urls.add(url_str)
+                extracted_targets.append(item)
+
+        for url_str in extract_all_urls(resume_text):
+            if url_str and url_str not in seen_urls:
+                seen_urls.add(url_str)
+                extracted_targets.append(url_str)
                 
-        verified_links_context = await link_validator.validate_all_links_async(extracted_targets)
+        verified_links_context = await link_validator.validate_all_links_async(extracted_targets, resume_text=resume_text)
 
         print("\n--- [STEP 1: SmartLinkValidator Output Links] ---")
         print(json.dumps(verified_links_context, indent=2))
