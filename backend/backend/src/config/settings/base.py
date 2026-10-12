@@ -14,6 +14,13 @@ class BackendBaseSettings(BaseSettings):
     TIMEZONE: str = "UTC"
     DESCRIPTION: str | None = None
     DEBUG: bool = False
+    # Whether a 500 may tell the caller what actually went wrong. Its own
+    # setting, defaulting to off, rather than inferred from ENVIRONMENT: the
+    # production host runs with ENVIRONMENT=DEV, so anything keyed on that
+    # would leak internals to students' browsers. Opt in explicitly per host.
+    EXPOSE_ERROR_DETAIL: bool = decouple.config(
+        "EXPOSE_ERROR_DETAIL", cast=bool, default=False
+    )  # type: ignore
     ENVIRONMENT: str = "DEV"  # Default environment, overridden by subclasses
 
     SERVER_HOST: str = decouple.config("BACKEND_SERVER_HOST", cast=str)  # type: ignore

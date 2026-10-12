@@ -49,3 +49,21 @@ def test_successful_response_still_carries_cors_headers(client_with_failing_rout
     response = client_with_failing_route.get("/docs", headers={"Origin": ORIGIN})
     assert response.status_code == fastapi.status.HTTP_200_OK
     assert response.headers.get("access-control-allow-origin") == ORIGIN
+
+
+def test_error_detail_is_withheld_unless_explicitly_enabled(client_with_failing_route):
+    """A 500 must not describe itself to the caller by default.
+
+    The detail is gated on EXPOSE_ERROR_DETAIL rather than on ENVIRONMENT,
+    because the production host runs with ENVIRONMENT=DEV - anything keyed on
+    the environment would have leaked driver errors and table names to
+    students' browsers.
+    """
+    assert settings.EXPOSE_ERROR_DETAIL is False, "must default to withholding detail"
+    response = client_with_failing_route.get(
+        "/_test_unhandled_failure", headers={"Origin": ORIGIN}
+    )
+    detail = response.json()["detail"]
+    assert "database is on fire" not in detail
+    assert "RuntimeError" not in detail
+    assert "Something went wrong" in detail

@@ -122,11 +122,13 @@ def initialize_backend_application() -> fastapi.FastAPI:
             logger.exception(
                 "Unhandled error | %s %s", request.method, request.url.path
             )
-            # The cause is echoed in local development only; a deployed environment
-            # must not leak internals to the browser.
+            # Gated on its own opt-in setting rather than on ENVIRONMENT. The
+            # production host runs with ENVIRONMENT=DEV, so keying this on the
+            # environment would have echoed exception text - table names, driver
+            # errors - straight to students' browsers.
             detail = "Something went wrong. Please try again."
-            if settings.ENVIRONMENT == Environment.DEVELOPMENT.value:
-                detail = f"{detail} (dev: {traceback.format_exc(limit=0).strip()})"
+            if settings.EXPOSE_ERROR_DETAIL:
+                detail = f"{detail} (detail: {traceback.format_exc(limit=0).strip()})"
             return fastapi.responses.JSONResponse(status_code=500, content={"detail": detail})
 
     # Add middleware BEFORE including routers (middleware is applied in reverse order)
