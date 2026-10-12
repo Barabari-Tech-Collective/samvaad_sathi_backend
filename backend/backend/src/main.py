@@ -18,6 +18,8 @@ from src.config.loki_logging import configure_loki_logging
 from src.config.manager import settings
 from src.config.settings.environment import Environment
 
+logger = logging.getLogger(__name__)
+
 
 def verify_sso_configuration() -> None:
     """Refuse to serve a deployment that cannot complete a student sign-in.
@@ -39,7 +41,7 @@ def verify_sso_configuration() -> None:
     )
     if settings.ENVIRONMENT != Environment.DEVELOPMENT.value:
         raise RuntimeError(message)
-    logging.getLogger(__name__).error(
+    logger.error(
         "%s Continuing because this is local development; /api/auth/sso routes "
         "will report that sign-in is unavailable.",
         message,
@@ -117,7 +119,7 @@ def initialize_backend_application() -> fastapi.FastAPI:
         try:
             return await call_next(request)
         except Exception:
-            logging.getLogger(__name__).exception(
+            logger.exception(
                 "Unhandled error | %s %s", request.method, request.url.path
             )
             # The cause is echoed in local development only; a deployed environment

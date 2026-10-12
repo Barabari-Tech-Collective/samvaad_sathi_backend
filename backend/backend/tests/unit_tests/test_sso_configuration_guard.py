@@ -6,8 +6,6 @@ student saw a dead "Continue" button and nothing explained it. A deployed
 environment must refuse to start, and the SSO route must refuse to redirect.
 """
 
-import logging
-
 import fastapi
 import pytest
 
@@ -38,35 +36,32 @@ def test_deployed_environment_refuses_to_start_without_auth_service(settings_stu
         verify_sso_configuration()
 
 
-def test_local_development_starts_but_reports_the_gap(settings_stub):
-    """Captured with an explicit handler rather than caplog.
+def test_local_development_starts_but_reports_the_gap(settings_stub, monkeypatch):
+    """Substitutes the logger rather than capturing from the logging system.
 
+    Two earlier attempts were defeated by global logging state:
     initialize_backend_application() calls logging.basicConfig(force=True),
-    which drops every root handler - including the one caplog installs. Any
-    test that builds the app therefore silently disarms caplog for whatever
-    runs afterwards, so this assertion passed locally and failed in CI purely
-    on test ordering. Attaching to the emitting logger is independent of that.
+    which drops the handler caplog installs, and Loki configuration rearranges
+    handlers again. Either way the assertion passed or failed on test ordering
+    rather than on behaviour. Recording what the function asks the logger to do
+    is deterministic, and the behaviour under test is "it reports the gap".
     """
+    import src.main as main
+
     settings_stub.ENVIRONMENT = Environment.DEVELOPMENT.value
+    reported: list[str] = []
 
-    records: list[str] = []
+    class Recorder:
+        def error(self, message, *args):
+            reported.append(message % args if args else message)
 
-    class Capture(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            records.append(record.getMessage())
+    # Replaces only this module's logger. Patching logging.getLogger itself
+    # handed pytest's own logging plugin a Recorder and crashed the run.
+    monkeypatch.setattr(main, "logger", Recorder())
 
-    logger = logging.getLogger("src.main")
-    handler = Capture(level=logging.ERROR)
-    logger.addHandler(handler)
-    previous_level = logger.level
-    logger.setLevel(logging.ERROR)
-    try:
-        verify_sso_configuration()
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous_level)
+    verify_sso_configuration()  # must not raise in development
 
-    assert any("AUTH_SERVICE_BASE_URL" in message for message in records)
+    assert any("AUTH_SERVICE_BASE_URL" in message for message in reported)
 
 
 @pytest.mark.parametrize("environment", [e.value for e in Environment])
