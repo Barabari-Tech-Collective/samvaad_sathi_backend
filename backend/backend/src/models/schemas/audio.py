@@ -36,6 +36,42 @@ class AudioTranscriptionResponse(BaseSchemaModel):
     )
 
 
+class TranscriptionStatusResponse(BaseSchemaModel):
+    """What a client polls while its answer is transcribed in the background.
+
+    `status` is the only field a caller must branch on. It reaches `transcribed`
+    or `failed` exactly once and never changes afterwards, so polling can stop
+    the moment `is_terminal` is true.
+    """
+
+    question_attempt_id: int = pydantic.Field(description="Attempt this status belongs to")
+    status: str = pydantic.Field(
+        description="pending, processing, transcribed, or failed"
+    )
+    is_terminal: bool = pydantic.Field(
+        description="True when the status will not change again and polling should stop"
+    )
+    saved: bool = pydantic.Field(
+        description="Whether the answer is durably stored. True from acceptance onward, "
+                    "so a student is never told their recording was lost while it is still being processed"
+    )
+    transcription: dict | None = pydantic.Field(
+        default=None, description="Populated once status is transcribed"
+    )
+    word_count: int | None = pydantic.Field(default=None, description="Words in the transcription")
+    error: str | None = pydantic.Field(
+        default=None, description="Shown to the student when status is failed"
+    )
+    follow_up_question: FollowUpQuestion | None = pydantic.Field(
+        default=None,
+        description="Follow-up generated from this answer, if any. Arrives with the "
+                    "terminal status rather than with the upload response",
+    )
+    updated_at: str | None = pydantic.Field(
+        default=None, description="When the status last changed, ISO 8601"
+    )
+
+
 class AudioValidationError(BaseSchemaModel):
     """Error response for audio validation failures"""
     error: str = pydantic.Field(description="Error message")

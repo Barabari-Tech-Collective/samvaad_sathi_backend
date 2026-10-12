@@ -1,0 +1,66 @@
+name: CI
+on:
+  pull_request:
+  push:
+    # This repository's default branch is master; there is no main.
+    branches: [Manager-Arma-new-samvaad-10, staging, master]
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # Gives the migration gate a real, empty database to build from scratch.
+      # Pinned to 17 to match production, which is Aiven PostgreSQL 17.11.
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-only-password
+          # Must match ops/ci_tests.py: alembic's env.py builds its connection
+          # from application settings rather than the url passed to the Config,
+          # so the gate has to point at the same database the app is told about.
+          POSTGRES_DB: samvaad_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the production EC2 host (3.12.3). Testing on a different minor
+          # than production lets a dependency or stdlib difference reach students
+          # having passed every check.
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/backend/requirements.txt
+      # pycairo builds from source and needs cairo's headers; there is no wheel.
+      # Nothing declared this, so it only ever worked on machines that happened
+      # to have cairo already - rebuilding the production host today would fail
+      # the same way this run did.
+      - name: Install system libraries that pycairo builds against
+        run: sudo apt-get update && sudo apt-get install -y libcairo2-dev pkg-config
+      - run: pip install -r backend/backend/requirements.txt
+      - name: Compile application
+        run: python -m compileall -q backend/backend/src
+      - name: Run complete test suite with synthetic settings
+        run: python ops/ci_tests.py -q --junitxml=test-results/backend.xml
+        env:
+          # Enables the migration gate: proves `alembic upgrade head` on an empty
+          # database reproduces exactly what the models declare. Without this the
+          # suite silently skips it and schema drift reaches production.
+          SCHEMA_TEST_DATABASE_URL: postgresql+psycopg2://ci:ci-only-password@localhost:5432/samvaad_ci
+      - name: Check release runner syntax
+        run: bash -n ops/ec2-release.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-test-results
+          path: test-results/
