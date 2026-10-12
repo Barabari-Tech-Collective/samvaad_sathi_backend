@@ -5,7 +5,11 @@ from fastapi import Form, UploadFile, File
 
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
-from src.models.schemas.audio import AudioTranscriptionResponse
+from src.models.schemas.audio import AudioTranscriptionResponse, TranscriptionStatusResponse
+from src.models.db.question_attempt import (
+    TERMINAL_TRANSCRIPTION_STATUSES,
+    TranscriptionStatus,
+)
 from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.services.audio_processor import validate_audio_file, save_audio_file, get_audio_duration_estimate, cleanup_temp_audio_file
 from src.services.whisper import transcribe_audio_with_whisper, validate_transcription_language, extract_word_count, strip_word_level_data
@@ -258,4 +262,57 @@ async def transcribe_audio_answer(
         follow_up_generated=follow_up_metadata is not None,
         follow_up_metadata=follow_up_metadata,
         follow_up_question=follow_up_question,
+    )
+
+
+@router.get(
+    path="/audio/attempts/{question_attempt_id}/transcription",
+    name="audio:transcription-status",
+    response_model=TranscriptionStatusResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Progress of an answer being transcribed in the background",
+)
+async def get_transcription_status(
+    question_attempt_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    question_repo: QuestionAttemptCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=QuestionAttemptCRUDRepository)
+    ),
+) -> TranscriptionStatusResponse:
+    """Lets a client follow an answer that is transcribed outside the request.
+
+    Also makes the flow resumable: a student who reloads mid-transcription can
+    reattach to the work already in progress instead of losing the answer, which
+    the synchronous path could not offer.
+
+    Scoped by owner, and a foreign attempt is reported as missing rather than
+    forbidden so the endpoint cannot be used to discover which ids exist.
+    """
+    attempt = await question_repo.get_by_id_and_user(
+        question_attempt_id=question_attempt_id, user_id=current_user.id
+    )
+    if not attempt:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="Question attempt not found or access denied",
+        )
+
+    status = attempt.transcription_status or TranscriptionStatus.PENDING.value
+    transcription = attempt.transcription
+    return TranscriptionStatusResponse(
+        question_attempt_id=attempt.id,
+        status=status,
+        is_terminal=status in TERMINAL_TRANSCRIPTION_STATUSES,
+        # The recording is stored before the job is queued, so an answer in
+        # flight is already safe. Reporting otherwise would tell a student their
+        # answer was lost while it is merely still being processed.
+        saved=bool(attempt.audio_url),
+        transcription=strip_word_level_data(transcription) if transcription else None,
+        word_count=extract_word_count(transcription) if transcription else None,
+        error=attempt.transcription_error,
+        updated_at=(
+            attempt.transcription_updated_at.isoformat()
+            if attempt.transcription_updated_at
+            else None
+        ),
     )

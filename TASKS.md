@@ -133,6 +133,34 @@ incident.
 
 1.6 is deliberately last. The patches are what keep production running today.
 
+## Option 3 — move transcription to the worker (fixes C1)
+
+Rolled out expand/contract: the backend serves both shapes, the frontend
+switches, then the old path is removed. Three independently reversible deploys
+instead of one flag-day — this is what replaces having a staging environment.
+
+| # | Task | Status |
+|---|---|---|
+| O3.1 | `transcription_status` / `_error` / `_updated_at` on `question_attempt`, with backfill | `LOCAL` |
+| O3.2 | Migration `a1c4e7b92f08`; chain still single-headed at 46 | `LOCAL` |
+| O3.3 | Idempotent startup patch for the new columns (needed while C2 blocks migrating production) | `LOCAL` |
+| O3.4 | `GET /audio/attempts/{id}/transcription` status endpoint, owner-scoped, 14 tests | `LOCAL` |
+| O3.5 | arq task that performs the transcription | `TODO` |
+| O3.6 | `POST /audio/transcribe` returns `202` when the client opts in; synchronous by default | `TODO` |
+| O3.7 | Frontend polls to a terminal status | `TODO` |
+| O3.8 | Sweep for rows stalled in `processing` (a killed worker must not strand a student) | `TODO` |
+| O3.9 | Remove the synchronous path once no client uses it | `TODO` |
+
+**Connection budget — decide before O3.5.** The worker currently opens no
+database pool. Giving it one spends from the same ceiling of 20. It still wins,
+because worker concurrency is a number we choose while concurrent students are
+not, but the pools must be sized together rather than independently.
+
+**Open design questions** (O3.7): does Next unlock on *accepted* or
+*transcribed*; where does a follow-up question go when it arrives after the
+student has moved on; what happens when transcription fails after the upload
+already succeeded; and may a student submit while attempts are still processing.
+
 ## Seam 2 — server-owned interview state with idempotency
 
 Root cause of frozen buttons and changing questions.
