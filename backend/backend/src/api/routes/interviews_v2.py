@@ -495,11 +495,12 @@ async def generate_questions_v2(
                 for q in selected:
                     items.append({
                         "text": q.question_text,
-                        "topic": "General",
-                        "category": "tech",
+                        "topic": getattr(q, "question_type", None) or "General",
+                        "category": getattr(q, "category", None) or "tech",
                         "followUpStrategy": FOLLOW_UP_STRATEGY,
                         "audioUrl": getattr(q, "audio_url", None),
                         "job_profile_question_id": q.id,
+                        "expected_answer": getattr(q, "expected_answer", None),
                     })
 
         if not questions:
@@ -763,10 +764,11 @@ async def generate_non_tech_questions_v2(
                 for q in selected:
                     questions_data.append({
                         "text": q.question_text,
-                        "topic": "General",
-                        "category": "general",
+                        "topic": getattr(q, "question_type", None) or "General",
+                        "category": getattr(q, "category", None) or "general",
                         "audio_url": getattr(q, "audio_url", None),
                         "job_profile_question_id": q.id,
+                        "expected_answer": getattr(q, "expected_answer", None),
                     })
 
         if not questions_data:
@@ -1388,6 +1390,8 @@ async def create_structure_practice_session(
         # Generate questions based on difficulty
         try:
             role = syllabus_service._role_manager.derive_role(track)
+            if not role:
+                raise ValueError(f"Could not derive a valid role for track '{track}'")
         except ValueError as exc:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_400_BAD_REQUEST,

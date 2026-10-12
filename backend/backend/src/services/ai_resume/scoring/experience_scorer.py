@@ -299,7 +299,6 @@ class ExperienceScorer:
 
         calculated_exp_score = round((base_experience_index / 100.0) * exp_weight, 1)
         calculated_proj_score = round((project_score_out_of_35 / 35.0) * proj_weight, 1)
-
         combined_score = round(calculated_exp_score + calculated_proj_score, 1)
 
         # Format human-readable duration

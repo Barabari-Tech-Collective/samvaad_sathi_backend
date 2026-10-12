@@ -3,9 +3,11 @@ import time
 from collections import defaultdict, deque
 from threading import Lock
 
+from typing import Optional
+
 import fastapi
 
-from src.api.dependencies.auth import get_current_user
+from src.api.dependencies.auth import get_current_user, get_optional_current_user
 from src.models.db.user import User
 from src.repository.redis_client import async_redis
 
@@ -81,6 +83,32 @@ def rate_limiter(*, key_prefix: str, limit: int, window_seconds: int):
 
     async def _check(current_user: User = fastapi.Depends(get_current_user)) -> None:
         await _enforce(f"ratelimit:{key_prefix}:{current_user.id}", limit, window_seconds)
+
+    return _check
+
+
+def hybrid_rate_limiter(*, key_prefix: str, limit: int, window_seconds: int):
+    """Rate limit using user_id when authenticated, client IP otherwise.
+
+    Suitable for endpoints that allow both authenticated and anonymous access.
+    """
+
+    async def _check(
+        request: fastapi.Request,
+        current_user: Optional[User] = fastapi.Depends(get_optional_current_user),
+    ) -> None:
+        if current_user:
+            key = f"ratelimit:{key_prefix}:{current_user.id}"
+        else:
+            forwarded = request.headers.get("x-forwarded-for")
+            if forwarded:
+                client_ip = forwarded.split(",")[0].strip()
+            elif request.client:
+                client_ip = request.client.host
+            else:
+                client_ip = "unknown"
+            key = f"ratelimit:{key_prefix}:{client_ip}"
+        await _enforce(key, limit, window_seconds)
 
     return _check
 

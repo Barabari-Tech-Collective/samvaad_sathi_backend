@@ -9,6 +9,7 @@ import pydantic
 from typing import Dict, List, Any, Tuple
 import sqlalchemy
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.config.manager import settings
 from src.models.db.question_attempt import QuestionAttempt
@@ -237,6 +238,7 @@ class AnalysisAggregationService:
         stmt = (
             sqlalchemy.select(QuestionAttempt)
             .join(QuestionAttempt.interview)
+            .options(selectinload(QuestionAttempt.question))
             .where(
                 QuestionAttempt.id == question_attempt_id,
                 QuestionAttempt.interview.has(user_id=user_id)
@@ -392,11 +394,16 @@ class AnalysisAggregationService:
                   "DOMAIN LLM START | Attempt=%s",
                   question_attempt_id,
                 )
+                expected_answer = (
+                    getattr(question_attempt.question, "expected_answer", None)
+                    if question_attempt.question else None
+                )
                 # Call real LLM domain analysis
                 analysis, llm_error, latency_ms, llm_model = await analyze_domain_with_llm(
                     user_profile=profile,
                     question_text=getattr(question_attempt, "question_text", None),
                     transcription=transcription_text,
+                    expected_answer=expected_answer,
                 )
 
                 logger.info(

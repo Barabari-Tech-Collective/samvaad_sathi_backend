@@ -4,10 +4,10 @@ import asyncio
 from loguru import logger
 
 # Regex to find common URLs in resume text, including specific professional domains without http
-URL_PATTERN = re.compile(r'https?://[^\s<>"]+|www\.[^\s<>"]+|(?:github\.com|linkedin\.com/in|gitlab\.com|bitbucket\.org)/[^\s<>"]+')
+URL_PATTERN = re.compile(r'https?://[^\s<>"]+|www\.[^\s<>"]+|(?:github\.com|linkedin\.com/in|gitlab\.com|bitbucket\.org|vercel\.app|netlify\.app|onrender\.com|herokuapp\.com)/?[^\s<>"]*')
 
 # We will focus validation primarily on professional profiles.
-PROFESSIONAL_DOMAINS = ["github.com", "linkedin.com", "gitlab.com", "bitbucket.org"]
+PROFESSIONAL_DOMAINS = ["github.com", "linkedin.com", "gitlab.com", "bitbucket.org", "vercel.app", "netlify.app", "onrender.com", "herokuapp.com"]
 
 def extract_professional_urls(text: str) -> list[str]:
     """

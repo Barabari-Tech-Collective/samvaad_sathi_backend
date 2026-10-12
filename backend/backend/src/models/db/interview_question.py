@@ -36,6 +36,7 @@ class InterviewQuestion(Base):  # type: ignore
     audio_url: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=512), nullable=True
     )
+    expected_answer: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True), nullable=False, server_default=sqlalchemy_functions.now()
     )

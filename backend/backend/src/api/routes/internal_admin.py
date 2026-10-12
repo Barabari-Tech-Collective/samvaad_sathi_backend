@@ -17,10 +17,11 @@ import secrets
 import fastapi
 import pydantic
 
+from src.api.dependencies.admin import is_admin_user
 from src.api.dependencies.repository import get_repository
 from src.config.manager import settings
 from src.repository.crud.user import UserCRUDRepository
-from src.utilities.exceptions.database import EntityDoesNotExist
+from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
 
 router = fastapi.APIRouter(prefix="/internal/super-admin", tags=["users"])
 
@@ -47,7 +48,14 @@ async def set_admin_status(
     try:
         user = await user_repo.set_admin_status(email=payload.email, is_admin=payload.is_admin)
     except EntityDoesNotExist:
-        raise fastapi.HTTPException(status_code=404, detail=f"No Samvaad Saathi account found for {payload.email}")
+        # User hasn't logged into Samvaad yet — create the row now so the flag
+        # is set before their first login rather than requiring a second call.
+        name = payload.email.split("@")[0]
+        try:
+            user = await user_repo.create_user(email=payload.email, password="", name=name)
+        except EntityAlreadyExists:
+            user = await user_repo.get_user_by_email(email=payload.email)
+        user = await user_repo.set_admin_status(email=payload.email, is_admin=payload.is_admin)
 
     return {"email": user.email, "is_admin": is_admin_user(user)}
 

@@ -9,6 +9,7 @@ is briefly down. This pool fails fast instead so enqueueing can stay best-effort
 import logging
 
 from arq.connections import ArqRedis, RedisSettings, create_pool
+from arq.jobs import Job as ArqJob
 
 from src.config.manager import settings
 
@@ -38,16 +39,47 @@ async def _get_pool() -> ArqRedis | None:
         return None
 
 
-async def enqueue_job(function_name: str, **kwargs) -> bool:
-    """Best-effort enqueue. Returns True if queued, False otherwise (Redis
-    down, or the pool is already known-broken) - never raises, so a Redis
-    outage can never fail the caller's request."""
+async def enqueue_job(function_name: str, **kwargs) -> str | None:
+    """Best-effort enqueue. Returns the job_id string if queued, None otherwise
+    (Redis down, or the pool is already known-broken) - never raises, so a Redis
+    outage can never fail the caller's request.
+
+    Existing callers that do ``if not await enqueue_job(...)`` still work because
+    None is falsy and a job_id string is truthy.
+    """
     pool = await _get_pool()
     if pool is None:
-        return False
+        return None
     try:
-        await pool.enqueue_job(function_name, **kwargs)
-        return True
+        job = await pool.enqueue_job(function_name, **kwargs)
+        return job.job_id if job else None
     except Exception as exc:
         logger.warning("Failed to enqueue arq job %s: %s", function_name, exc)
-        return False
+        return None
+
+
+async def get_job_status(job_id: str) -> dict:
+    """Return the current status of an arq job as a plain dict.
+
+    Possible ``status`` values mirror arq's JobStatus enum:
+    ``queued``, ``in_progress``, ``complete``, ``deferred``, ``not_found``, ``failed``.
+    """
+    pool = await _get_pool()
+    if pool is None:
+        return {"status": "unknown", "error": "Redis unavailable"}
+    try:
+        job = ArqJob(job_id, pool)
+        status = await job.status()
+        result: dict = {"status": status.value}
+        if status.value == "complete":
+            info = await job.result_info()
+            if info is not None:
+                if info.success:
+                    result["result"] = info.result
+                else:
+                    result["status"] = "failed"
+                    result["error"] = str(info.result)
+        return result
+    except Exception as exc:
+        logger.warning("Failed to get arq job status for %s: %s", job_id, exc)
+        return {"status": "unknown", "error": str(exc)}

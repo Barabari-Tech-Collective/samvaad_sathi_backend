@@ -59,6 +59,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         additional_context: Optional[str] = None,
         category: Optional[str] = None,
         employment_type: Optional[str] = None,
+        created_by: Optional[int] = None,
     ) -> JobProfile:
         new_profile = JobProfile(
             job_name=job_name,
@@ -70,6 +71,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             category=category,
             employment_type=employment_type,
             status=JobProfileStatus.DRAFT,
+            created_by=created_by,
         )
         self.async_session.add(new_profile)
         await self.async_session.commit()
@@ -265,6 +267,14 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
     async def delete_job_profile_question(self, question: JobProfileQuestion) -> None:
         await self.async_session.delete(question)
         await self.async_session.commit()
+
+    async def delete_all_job_profile_questions(self, job_profile_id: int) -> int:
+        """Delete every question for a profile. Returns the number deleted."""
+        from src.models.db.job_profile_question import JobProfileQuestion as JPQ
+        stmt = sqlalchemy.delete(JPQ).where(JPQ.job_profile_id == job_profile_id)
+        result = await self.async_session.execute(stmt)
+        await self.async_session.commit()
+        return result.rowcount
 
     async def submit_profile(self, *, job_profile_id: int) -> Optional[JobProfile]:
         import datetime
