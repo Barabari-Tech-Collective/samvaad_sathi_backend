@@ -160,6 +160,21 @@ async def generate_questions(
         if interview is None:
             raise fastapi.HTTPException(status_code=fastapi.status.HTTP_400_BAD_REQUEST, detail="No active interview to generate questions for")
 
+    # This endpoint has no job-profile awareness: it goes straight to the
+    # syllabus and the LLM. Serving a curated interview from here would assess a
+    # student against a facilitator's role on questions the facilitator never
+    # wrote - and because question sets are immutable once persisted, whichever
+    # generator ran first would decide that permanently. The student app only
+    # calls the v2 generator; this guards the endpoint against other callers.
+    if getattr(interview, "job_profile_id", None):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail=(
+                "This interview is based on a facilitator's role and must be generated "
+                "through /v2/interviews/generate-questions, which serves their published questions."
+            ),
+        )
+
     # Serialize against the other generators (interviews_v2) before reading, or
     # two requests both see no questions and both insert a full set.
     await lock_question_generation(question_repo.async_session, interview_id=interview.id)

@@ -42,6 +42,12 @@ from src.repository.crud.structure_practice import (
     StructurePracticeCRUDRepository,
     StructurePracticeAnswerCRUDRepository,
 )
+from src.services.interview_eligibility import (
+    DIFFICULTIES,
+    is_valid_difficulty,
+    select_published_questions,
+    unavailable_reason,
+)
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.question_snapshot import lock_question_generation, question_items_from_persisted
 from src.services.static_questions import get_static_questions
@@ -74,6 +80,9 @@ from src.services.analytics_events import track_analytics_event
 logger = logging.getLogger(__name__)
 FOLLOW_UP_STRATEGY = "llm_transcription_based"
 FULL_STACK_ROLE = "Full Stack Developer"
+#: Questions served from a facilitator's published bank per curated interview.
+#: Matches MINIMUM_QUESTIONS_PER_LEVEL so every offered level can fill a sitting.
+CURATED_QUESTION_COUNT = 5
 # Only the first N base questions of an interview may spawn a follow-up.
 # Applies to every track - tech and non-tech alike, per product decision.
 MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS = 2
@@ -291,8 +300,27 @@ async def create_or_resume_interview_v2(
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> InterviewInResponse:
+    difficulty = (payload.difficulty or "medium").lower()
+    # Refuse rather than coerce. This used to silently fall back to medium, so a
+    # typo started a different interview than the student asked for - and on a
+    # curated profile, a level the facilitator may not have published at all.
+    if not is_valid_difficulty(difficulty):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown difficulty '{difficulty}'. Choose one of: {', '.join(DIFFICULTIES)}.",
+        )
+
     active = await interview_repo.get_active_by_user(user_id=current_user.id)
-    if active is not None and active.track == payload.track and active.job_profile_id == payload.job_profile_id:
+    # Difficulty is part of an interview's identity, not a detail of it. Without
+    # it here, a student holding an active easy interview who started a medium
+    # one was silently resumed into the easy one, and the response reported the
+    # difficulty as easy - a level they had not chosen.
+    if (
+        active is not None
+        and active.track == payload.track
+        and active.job_profile_id == payload.job_profile_id
+        and active.difficulty == difficulty
+    ):
         res = InterviewInResponse(
             interview_id=active.id,
             track=active.track,
@@ -311,15 +339,11 @@ async def create_or_resume_interview_v2(
 
         return res
 
-    difficulty = (payload.difficulty or "medium").lower()
-    if difficulty not in ("easy", "medium", "hard", "expert"):
-        difficulty = "medium"
-        
     if payload.track == FULL_STACK_ROLE and difficulty == "medium" and getattr(payload, "use_resume", True):
         resume_text = getattr(current_user, "resume_text", None)
         if not resume_text or not str(resume_text).strip():
             raise fastapi.HTTPException(
-                status_code=fastapi.status.HTTP_400_BAD_REQUEST, 
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
                 detail="Cannot use resume for interview: No resume is saved to your profile."
             )
 
@@ -327,6 +351,15 @@ async def create_or_resume_interview_v2(
         job_profile = await job_profile_repo.get_by_id(job_profile_id=payload.job_profile_id)
         if job_profile is None:
             raise fastapi.HTTPException(status_code=404, detail="Job profile not found")
+
+        # A curated interview is an assessment against questions a facilitator
+        # published for this level. If there are none, the honest answer is no -
+        # not a set the LLM invented, which is what used to happen downstream.
+        refusal = unavailable_reason(job_profile, difficulty)
+        if refusal is not None:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_409_CONFLICT, detail=refusal
+            )
 
     interview = await interview_repo.create_interview(user_id=current_user.id, track=payload.track, difficulty=difficulty, job_profile_id=payload.job_profile_id)
     await track_analytics_event(
@@ -465,40 +498,62 @@ async def generate_questions_v2(
         llm_model = "static"
         items = None
         
-        if getattr(interview, "job_profile_id", None):
-            difficulty_map = {"easy": 1, "medium": 2, "hard": 3, "expert": 4}
-            mapped_level = difficulty_map.get(interview.difficulty, 2)
+        is_curated = bool(getattr(interview, "job_profile_id", None))
+        if is_curated:
             admin_questions = await job_profile_repo.get_job_profile_questions(interview.job_profile_id)
-            level_questions = [q for q in admin_questions if q.level == mapped_level]
-            if level_questions:
-                # Get the number of previous interviews the user took for this specific profile and difficulty
-                past_interview_count = await interview_repo.count_user_interviews_by_profile_and_difficulty(
-                    user_id=current_user.id,
-                    job_profile_id=interview.job_profile_id,
-                    difficulty=interview.difficulty,
-                    current_interview_id=interview.id
+            # Different slice each retake, so a student resitting the same level
+            # does not get the same opening five.
+            past_interview_count = await interview_repo.count_user_interviews_by_profile_and_difficulty(
+                user_id=current_user.id,
+                job_profile_id=interview.job_profile_id,
+                difficulty=interview.difficulty,
+                current_interview_id=interview.id
+            )
+            selected = select_published_questions(
+                admin_questions,
+                difficulty=interview.difficulty,
+                count=CURATED_QUESTION_COUNT,
+                offset=past_interview_count * CURATED_QUESTION_COUNT,
+            )
+            if not selected:
+                # Creation already refuses this, so reaching here means the
+                # profile changed under an in-flight interview, or a client
+                # reached the generator directly. Either way, generating is the
+                # one thing we must not do: the student would be assessed
+                # against this facilitator's role on questions the facilitator
+                # never wrote, with nothing in the report saying so.
+                logger.warning(
+                    "Refusing to generate for a curated interview with no published questions "
+                    "| Interview=%s | JobProfile=%s | Difficulty=%s",
+                    interview.id,
+                    interview.job_profile_id,
+                    interview.difficulty,
                 )
-                
-                # Pick 5 questions sequentially
-                start_idx = (past_interview_count * 5) % len(level_questions)
-                selected = []
-                for i in range(min(5, len(level_questions))):
-                    idx = (start_idx + i) % len(level_questions)
-                    selected.append(level_questions[idx])
-                
-                questions = [q.question_text for q in selected]
-                items = []
-                for q in selected:
-                    items.append({
-                        "text": q.question_text,
-                        "topic": getattr(q, "question_type", None) or "General",
-                        "category": getattr(q, "category", None) or "tech",
-                        "followUpStrategy": FOLLOW_UP_STRATEGY,
-                        "audioUrl": getattr(q, "audio_url", None),
-                        "job_profile_question_id": q.id,
-                        "expected_answer": getattr(q, "expected_answer", None),
-                    })
+                raise fastapi.HTTPException(
+                    status_code=fastapi.status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"The {interview.difficulty} level for this role is no longer available. "
+                        "Please pick another level or check back once your facilitator has added questions."
+                    ),
+                )
 
+            questions = [q.question_text for q in selected]
+            llm_model = "facilitator_published"
+            items = [
+                {
+                    "text": q.question_text,
+                    "topic": getattr(q, "question_type", None) or "General",
+                    "category": getattr(q, "category", None) or "tech",
+                    "followUpStrategy": FOLLOW_UP_STRATEGY,
+                    "audioUrl": getattr(q, "audio_url", None),
+                    "job_profile_question_id": q.id,
+                    "expected_answer": getattr(q, "expected_answer", None),
+                }
+                for q in selected
+            ]
+
+        # Generation is for free practice only. An interview carrying a job
+        # profile never reaches it - see the refusal above.
         if not questions:
             questions, llm_error, latency_ms, llm_model, items = await generate_full_stack_questions_with_llm(
                 domain=interview.track,
