@@ -38,6 +38,12 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: backend/backend/requirements.txt
+      # pycairo builds from source and needs cairo's headers; there is no wheel.
+      # Nothing declared this, so it only ever worked on machines that happened
+      # to have cairo already - rebuilding the production host today would fail
+      # the same way this run did.
+      - name: Install system libraries that pycairo builds against
+        run: sudo apt-get update && sudo apt-get install -y libcairo2-dev pkg-config
       - run: pip install -r backend/backend/requirements.txt
       - name: Compile application
         run: python -m compileall -q backend/backend/src
