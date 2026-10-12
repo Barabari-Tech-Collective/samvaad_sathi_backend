@@ -188,7 +188,13 @@ async def upload_answer_audio_to_s3(
             object_key,
         )
         return object_key
-    except ClientError as error:
+    except Exception as error:  # noqa: BLE001
+        # Deliberately broad. Catching only ClientError let NoCredentialsError
+        # and EndpointConnectionError - both BotoCoreError, not ClientError -
+        # escape into the upload route, which treats any exception as a save
+        # failure and answers 503. Missing or expired credentials would then
+        # cost a student their answer over a storage problem that does not
+        # affect transcription at all.
         logger.error(
             "Failed to store answer audio | QuestionAttempt=%s | %s",
             question_attempt_id,
@@ -211,7 +217,10 @@ async def fetch_answer_audio_from_s3(object_key: str) -> Optional[bytes]:
 
     try:
         return await asyncio.get_running_loop().run_in_executor(None, _get)
-    except ClientError as error:
+    except Exception as error:  # noqa: BLE001
+        # Broad for the same reason as the upload above: credential and
+        # endpoint failures are BotoCoreError rather than ClientError, and the
+        # worker must record a transcription failure rather than crash.
         logger.error("Failed to read answer audio | Key=%s | %s", object_key, error)
         return None
 

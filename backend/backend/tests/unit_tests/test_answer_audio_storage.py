@@ -97,6 +97,35 @@ async def test_storage_failure_reports_rather_than_raises(s3):
 
 
 @pytest.mark.anyio
+async def test_missing_credentials_report_rather_than_raise(s3):
+    """NoCredentialsError is a BotoCoreError, not a ClientError.
+
+    Catching only ClientError let it escape into the upload route, which treats
+    any exception as a save failure and answers 503 - so expired credentials
+    would have cost students their answers over a storage problem that does not
+    affect transcription. CI caught this because it has no AWS credentials.
+    """
+    from botocore.exceptions import NoCredentialsError
+
+    s3.put_object.side_effect = NoCredentialsError()
+    key = await s3_service.upload_answer_audio_to_s3(
+        audio_bytes=b"x", user_id=7, question_attempt_id=42
+    )
+    assert key is None
+
+
+@pytest.mark.anyio
+async def test_endpoint_failure_reports_rather_than_raises(s3):
+    from botocore.exceptions import EndpointConnectionError
+
+    s3.put_object.side_effect = EndpointConnectionError(endpoint_url="https://s3")
+    key = await s3_service.upload_answer_audio_to_s3(
+        audio_bytes=b"x", user_id=7, question_attempt_id=42
+    )
+    assert key is None
+
+
+@pytest.mark.anyio
 async def test_unconfigured_s3_reports_rather_than_raises(monkeypatch):
     monkeypatch.setattr(s3_service, "s3_client", None)
     key = await s3_service.upload_answer_audio_to_s3(

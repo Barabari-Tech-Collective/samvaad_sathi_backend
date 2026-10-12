@@ -6,6 +6,8 @@ student saw a dead "Continue" button and nothing explained it. A deployed
 environment must refuse to start, and the SSO route must refuse to redirect.
 """
 
+import logging
+
 import fastapi
 import pytest
 
@@ -36,11 +38,35 @@ def test_deployed_environment_refuses_to_start_without_auth_service(settings_stu
         verify_sso_configuration()
 
 
-def test_local_development_starts_but_reports_the_gap(settings_stub, caplog):
+def test_local_development_starts_but_reports_the_gap(settings_stub):
+    """Captured with an explicit handler rather than caplog.
+
+    initialize_backend_application() calls logging.basicConfig(force=True),
+    which drops every root handler - including the one caplog installs. Any
+    test that builds the app therefore silently disarms caplog for whatever
+    runs afterwards, so this assertion passed locally and failed in CI purely
+    on test ordering. Attaching to the emitting logger is independent of that.
+    """
     settings_stub.ENVIRONMENT = Environment.DEVELOPMENT.value
-    with caplog.at_level("ERROR"):
+
+    records: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("src.main")
+    handler = Capture(level=logging.ERROR)
+    logger.addHandler(handler)
+    previous_level = logger.level
+    logger.setLevel(logging.ERROR)
+    try:
         verify_sso_configuration()
-    assert "AUTH_SERVICE_BASE_URL" in caplog.text
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+    assert any("AUTH_SERVICE_BASE_URL" in message for message in records)
 
 
 @pytest.mark.parametrize("environment", [e.value for e in Environment])

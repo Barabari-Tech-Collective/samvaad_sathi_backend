@@ -17,6 +17,10 @@ settings = {
     "HASHING_ALGORITHM_LAYER_2": "argon2", "HASHING_SALT": "ci-only",
     "JWT_ALGORITHM": "HS256", "SESSION_SECRET_KEY": "ci-only-not-a-deployment-secret",
     "OPENAI_API_KEY": "ci-only", "LOKI_URL": "", "RABBITMQ_URL": "",
+    # Managed Postgres requires TLS, so DB_SSL_ENABLED defaults to true. The CI
+    # service container speaks plaintext and rejects the upgrade, which failed
+    # the migration gate before it could execute a single statement.
+    "DB_SSL_ENABLED": "False",
 }
 os.environ.update(settings)
 sys.path.insert(0, str(ROOT / "backend/backend"))
