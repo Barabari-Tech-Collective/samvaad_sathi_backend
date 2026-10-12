@@ -20,7 +20,25 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         return query.scalar()  # type: ignore
 
     async def create_interview(self, *, user_id: int, track: str, difficulty: str = "medium", job_profile_id: int | None = None) -> Interview:
-        new_interview = Interview(user_id=user_id, track=track, difficulty=difficulty, status="active", job_profile_id=job_profile_id)
+        # Derived here, not accepted as a parameter, so every caller - v1, v2,
+        # the non-tech flow - gets a correct snapshot without each having to
+        # remember to look it up and pass it through themselves.
+        interview_mode = "practice"
+        if job_profile_id is not None:
+            from src.models.db.job_profile import JobProfile
+
+            profile = await self.async_session.get(JobProfile, job_profile_id)
+            if profile is not None:
+                interview_mode = profile.interview_mode
+
+        new_interview = Interview(
+            user_id=user_id,
+            track=track,
+            difficulty=difficulty,
+            status="active",
+            job_profile_id=job_profile_id,
+            interview_mode=interview_mode,
+        )
         self.async_session.add(new_interview)
         await self.async_session.commit()
         await self.async_session.refresh(new_interview)

@@ -329,6 +329,7 @@ async def create_or_resume_interview_v2(
             status=active.status,
             created_at=active.created_at,
             resumed=True,
+            interview_mode=active.interview_mode,
         )
 
         # Resumed Interview Response
@@ -384,6 +385,7 @@ async def create_or_resume_interview_v2(
         status=interview.status,
         created_at=interview.created_at,
         resumed=False,
+        interview_mode=interview.interview_mode,
     )
 
     # =========================================================================

@@ -59,6 +59,7 @@ async def create_or_resume_interview(
             status=active.status,
             created_at=active.created_at,
             resumed=True,
+            interview_mode=active.interview_mode,
         )
 
     difficulty = (payload.difficulty or "medium").lower()
@@ -86,8 +87,9 @@ async def create_or_resume_interview(
         status=interview.status,
         created_at=interview.created_at,
         resumed=False,
+        interview_mode=interview.interview_mode,
     )
-    
+
     logger.info(
         "POST /interviews/create NEW RESPONSE | User=%s | Interview=%s | Response=\n%s",
         current_user.id,

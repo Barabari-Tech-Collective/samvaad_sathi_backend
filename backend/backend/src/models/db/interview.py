@@ -29,6 +29,16 @@ class Interview(Base):  # type: ignore
     job_profile_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
         sqlalchemy.ForeignKey("job_profile.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # A snapshot of JobProfile.interview_mode at the moment this interview was
+    # created, not a live read of it. job_profile_id goes NULL on SET NULL if
+    # the profile is later deleted, and a facilitator can edit a published
+    # profile's mode at any time - without this column, either event would
+    # retroactively reclassify every interview already sat against that role,
+    # in history and in analytics, after the fact. "practice" for an interview
+    # with no job profile at all: free generation is practice by definition.
+    interview_mode: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=16), nullable=False, server_default="practice", index=True
+    )
 
     user = relationship("User", back_populates="interviews")
     job_profile = relationship("JobProfile")
