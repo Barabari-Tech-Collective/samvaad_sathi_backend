@@ -43,6 +43,7 @@ from src.repository.crud.structure_practice import (
     StructurePracticeAnswerCRUDRepository,
 )
 from src.services.llm import generate_interview_questions_with_llm
+from src.services.question_snapshot import lock_question_generation, question_items_from_persisted
 from src.services.static_questions import get_static_questions
 from src.services.full_stack_interview_questions import generate_full_stack_questions_with_llm
 from src.services.syllabus_service import syllabus_service
@@ -399,12 +400,7 @@ async def generate_questions_v2(
             detail="This endpoint does not support non-tech interview tracks. Use /v2/interviews/non-tech/generate-questions instead.",
         )
 
-    import sqlalchemy
-    # Acquire advisory lock on interview ID to prevent concurrent generation
-    # Using bound parameters for production-level SQL injection prevention
-    await question_repo.async_session.execute(
-        sqlalchemy.text("SELECT pg_advisory_xact_lock(:id)").bindparams(id=interview.id)
-    )
+    await lock_question_generation(question_repo.async_session, interview_id=interview.id)
 
     existing = await question_repo.list_by_interview(interview_id=interview.id)
     persisted = existing
@@ -550,11 +546,24 @@ async def generate_questions_v2(
         if tasks_to_run:
             background_tasks.add_task(_background_generate_and_upload_tts, tasks_to_run)
 
-        # Double check to prevent race condition double-insertion
+        # The advisory lock above should make this unreachable. It is kept as a
+        # guard for the day someone adds a fourth writer and forgets to lock:
+        # discarding this request's generated text is always right, because the
+        # rows already in the database are what every later read will return.
         existing_again = await question_repo.list_by_interview(interview_id=interview.id)
         if existing_again:
-            logger.warning(f"Race condition detected: questions already exist for interview {interview.id}. Skipping insert.")
+            logger.warning(
+                "Concurrent generation detected despite advisory lock | Interview=%s | "
+                "Discarding %d generated questions in favour of the %d already persisted",
+                interview.id,
+                len(questions_data),
+                len(existing_again),
+            )
             persisted = existing_again
+            # This request generated nothing that the student will see, so the
+            # LLM metadata below would describe discarded work.
+            cached = True
+            llm_error, latency_ms, llm_model = None, None, None
         else:
             persisted = await question_repo.create_batch(
                 interview_id=interview.id,
@@ -569,29 +578,14 @@ async def generate_questions_v2(
             track=interview.track,
         )
         _validate_supplements_response(items=supplements_map, source="generate-questions")
-        response_items: list[dict[str, object]] = []
-        for idx, question_obj in enumerate(persisted):
-            structured = items[idx] if items and idx < len(items) else None
-            response_items.append(
-                {
-                    "interviewQuestionId": question_obj.id,
-                    "text": (structured or {}).get("text") or question_obj.text,
-                    "topic": (structured or {}).get("topic") or question_obj.topic,
-                    "difficulty": (structured or {}).get("difficulty"),
-                    "category": (structured or {}).get("category") or question_obj.category,
-                    "isFollowUp": question_obj.is_follow_up,
-                    "parentQuestionId": question_obj.parent_question_id,
-                    "followUpStrategy": question_obj.follow_up_strategy,
-                    "supplement": supplements_map.get(question_obj.id),
-                    "audioUrl": question_obj.audio_url,
-                }
-            )
         qs = {
-            "questions": [q["text"] for q in questions_data],
+            "questions": [q.text for q in persisted],
             "llm_error": llm_error,
             "latency_ms": latency_ms,
             "llm_model": llm_model,
-            "items": response_items,
+            "items": question_items_from_persisted(
+                persisted, difficulty=interview.difficulty, supplements=supplements_map
+            ),
         }
     else:
         # For cached/interrupted interviews, ensure follow-up questions have parent pointers
@@ -607,27 +601,14 @@ async def generate_questions_v2(
             track=interview.track,
         )
         _validate_supplements_response(items=supplements_map, source="generate-questions-cached")
-        response_items = [
-            {
-                "interviewQuestionId": q.id,
-                "text": q.text,
-                "topic": q.topic,
-                "difficulty": None,
-                "category": q.category,
-                "isFollowUp": q.is_follow_up,
-                "parentQuestionId": q.parent_question_id,
-                "followUpStrategy": q.follow_up_strategy,
-                "supplement": supplements_map.get(q.id),
-                "audioUrl": q.audio_url,
-            }
-            for q in existing
-        ]
         qs = {
             "questions": [q.text for q in existing],
             "llm_error": None,
             "latency_ms": None,
             "llm_model": None,
-            "items": response_items,
+            "items": question_items_from_persisted(
+                existing, difficulty=interview.difficulty, supplements=supplements_map
+            ),
         }
 
     raw_items = qs.get("items")
@@ -734,6 +715,10 @@ async def generate_non_tech_questions_v2(
             },
         )
 
+    # After the interview-creation commit above, never before it: a commit ends
+    # the transaction the lock is scoped to and would release it mid-generation.
+    await lock_question_generation(question_repo.async_session, interview_id=interview.id)
+
     existing = await question_repo.list_by_interview(interview_id=interview.id)
     persisted = existing
     cached = bool(existing)
@@ -804,28 +789,14 @@ async def generate_non_tech_questions_v2(
             track=interview.track,
         )
         _validate_supplements_response(items=supplements_map, source="generate-non-tech-questions")
-        response_items: list[dict[str, object]] = []
-        for question_obj in persisted:
-            response_items.append(
-                {
-                    "interviewQuestionId": question_obj.id,
-                    "text": question_obj.text,
-                    "topic": question_obj.topic,
-                    "difficulty": difficulty,
-                    "category": question_obj.category,
-                    "isFollowUp": question_obj.is_follow_up,
-                    "parentQuestionId": question_obj.parent_question_id,
-                    "followUpStrategy": question_obj.follow_up_strategy,
-                    "supplement": supplements_map.get(question_obj.id),
-                    "audioUrl": question_obj.audio_url,
-                }
-            )
         qs = {
-            "questions": [q["text"] for q in questions_data],
+            "questions": [q.text for q in persisted],
             "llm_error": None,
             "latency_ms": 0,
             "llm_model": f"blueprint_static_{NON_TECH_BLUEPRINT_VERSION}",
-            "items": response_items,
+            "items": question_items_from_persisted(
+                persisted, difficulty=difficulty, supplements=supplements_map
+            ),
         }
     else:
         await _backfill_follow_up_parents(
@@ -840,27 +811,14 @@ async def generate_non_tech_questions_v2(
             track=interview.track,
         )
         _validate_supplements_response(items=supplements_map, source="generate-non-tech-questions-cached")
-        response_items = [
-            {
-                "interviewQuestionId": q.id,
-                "text": q.text,
-                "topic": q.topic,
-                "difficulty": difficulty,
-                "category": q.category,
-                "isFollowUp": q.is_follow_up,
-                "parentQuestionId": q.parent_question_id,
-                "followUpStrategy": q.follow_up_strategy,
-                "supplement": supplements_map.get(q.id),
-                "audioUrl": q.audio_url,
-            }
-            for q in existing
-        ]
         qs = {
             "questions": [q.text for q in existing],
             "llm_error": None,
             "latency_ms": None,
             "llm_model": None,
-            "items": response_items,
+            "items": question_items_from_persisted(
+                existing, difficulty=difficulty, supplements=supplements_map
+            ),
         }
 
     raw_items = qs.get("items")

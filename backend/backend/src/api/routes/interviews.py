@@ -12,6 +12,7 @@ from src.repository.crud.interview_question import InterviewQuestionCRUDReposito
 from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
+from src.services.question_snapshot import lock_question_generation, question_items_from_persisted
 from src.services.syllabus_service import syllabus_service
 from src.services.whisper import strip_word_level_data
 from src.services.static_questions import get_static_questions
@@ -159,6 +160,10 @@ async def generate_questions(
         if interview is None:
             raise fastapi.HTTPException(status_code=fastapi.status.HTTP_400_BAD_REQUEST, detail="No active interview to generate questions for")
 
+    # Serialize against the other generators (interviews_v2) before reading, or
+    # two requests both see no questions and both insert a full set.
+    await lock_question_generation(question_repo.async_session, interview_id=interview.id)
+
     # Check if questions already exist for this interview (idempotent)
     existing = await question_repo.list_by_interview(interview_id=interview.id)
     persisted = existing
@@ -265,50 +270,22 @@ async def generate_questions(
             questions_data=questions_data,
             resume_used=payload.use_resume
         )
-        
-        # Prepare response data for newly generated questions
-        response_items = []
-        for idx, question_obj in enumerate(persisted):
-            structured = items[idx] if items and idx < len(items) else None
-            response_items.append({
-                "interviewQuestionId": question_obj.id,
-                "text": (structured or {}).get("text") or question_obj.text,
-                "topic": (structured or {}).get("topic") or question_obj.topic,
-                "difficulty": (structured or {}).get("difficulty"),
-                "category": (structured or {}).get("category") or question_obj.category,
-                "isFollowUp": getattr(question_obj, "is_follow_up", False),
-                "parentQuestionId": getattr(question_obj, "parent_question_id", None),
-                "followUpStrategy": getattr(question_obj, "follow_up_strategy", None),
-            })
 
         qs = {
-            "questions": questions,
+            "questions": [q.text for q in persisted],
             "llm_error": llm_error,
             "latency_ms": latency_ms,
             "llm_model": llm_model,
-            "items": response_items,
+            "items": question_items_from_persisted(persisted, difficulty=interview.difficulty),
         }
     else:
         # Questions already exist, prepare response data from existing questions
-        existing_items = [
-            {
-                "interviewQuestionId": q.id,
-                "text": q.text,
-                "topic": q.topic,
-                "difficulty": None,
-                "category": q.category,
-                "isFollowUp": getattr(q, "is_follow_up", False),
-                "parentQuestionId": getattr(q, "parent_question_id", None),
-                "followUpStrategy": getattr(q, "follow_up_strategy", None),
-            }
-            for q in existing
-        ]
         qs = {
             "questions": [q.text for q in existing],
             "llm_error": None,
             "latency_ms": None,
             "llm_model": None,
-            "items": existing_items,
+            "items": question_items_from_persisted(existing, difficulty=interview.difficulty),
         }
 
     response = GeneratedQuestionsInResponse(
