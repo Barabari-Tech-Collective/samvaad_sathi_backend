@@ -13,9 +13,9 @@ jobs:
     timeout-minutes: 15
     services:
       # Gives the migration gate a real, empty database to build from scratch.
-      # TODO: pin to the same major version production runs once confirmed.
+      # Pinned to 17 to match production, which is Aiven PostgreSQL 17.11.
       postgres:
-        image: postgres:16
+        image: postgres:17
         env:
           POSTGRES_USER: ci
           POSTGRES_PASSWORD: ci-only-password
