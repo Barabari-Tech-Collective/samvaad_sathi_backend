@@ -1,6 +1,8 @@
 import fastapi
 import time
 import logging
+from pathlib import Path
+
 from fastapi import Form, UploadFile, File
 
 from src.api.dependencies.auth import get_current_user
@@ -14,6 +16,7 @@ from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.services.audio_processor import validate_audio_file, save_audio_file, get_audio_duration_estimate, cleanup_temp_audio_file
 from src.services.whisper import transcribe_audio_with_whisper, validate_transcription_language, extract_word_count, strip_word_level_data
 from src.services.follow_up import FollowUpService
+from src.services.s3_service import upload_answer_audio_to_s3
 
 
 router = fastapi.APIRouter(prefix="", tags=["audio"])
@@ -141,8 +144,31 @@ async def transcribe_audio_answer(
         time.perf_counter() - save_audio_start,
         audio_url,
         )
-        # Note: audio_url is just a reference name for database storage
-        # temp_file_path is the actual temporary file that will be cleaned up
+        # save_audio_file only produces a temporary file and a reference name,
+        # and the temporary file is deleted before this request returns. Stored
+        # on its own, the recording would be unrecoverable: a failed
+        # transcription would lose the answer for good, it could never be
+        # re-transcribed after a provider outage, and a disputed score could not
+        # be checked against what the student actually said. It is also what
+        # lets transcription move off the request path later - a background
+        # worker needs something to fetch.
+        stored_key = await upload_answer_audio_to_s3(
+            audio_bytes=audio_bytes,
+            user_id=current_user.id,
+            question_attempt_id=question_attempt_id_int,
+            extension=Path(file_metadata["filename"]).suffix.lower() or ".wav",
+        )
+        if stored_key:
+            audio_url = stored_key
+        else:
+            # Transcription still runs from the temporary file below, so the
+            # answer is not lost right now - only its recoverability is. Worth
+            # an error rather than failing a student's upload over it.
+            logger.error(
+                "Answer audio was not stored durably | QuestionAttempt=%s | "
+                "Transcription will proceed but the recording cannot be recovered",
+                question_attempt_id_int,
+            )
     except Exception as e:
         save_error = str(e)
 
