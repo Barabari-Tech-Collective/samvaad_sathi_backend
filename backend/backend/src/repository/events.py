@@ -103,6 +103,48 @@ async def initialize_db_tables(connection: AsyncConnection) -> None:
                 text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false')
             )
 
+            # Transcription moved to the arq worker, so the model now declares a
+            # status the upload response used to carry. Production's
+            # alembic_version names a revision absent from the chain, so the
+            # migration adding these cannot run there yet (see TASKS.md C2) - and
+            # without the columns every question_attempt query would fail, because
+            # SQLAlchemy names them in its SELECT. Remove once C2 is resolved and
+            # migrations are authoritative.
+            await connection.execute(
+                text(
+                    "ALTER TABLE question_attempt ADD COLUMN IF NOT EXISTS "
+                    "transcription_status VARCHAR(16) NOT NULL DEFAULT 'pending'"
+                )
+            )
+            await connection.execute(
+                text(
+                    "ALTER TABLE question_attempt ADD COLUMN IF NOT EXISTS "
+                    "transcription_error TEXT"
+                )
+            )
+            await connection.execute(
+                text(
+                    "ALTER TABLE question_attempt ADD COLUMN IF NOT EXISTS "
+                    "transcription_updated_at TIMESTAMPTZ"
+                )
+            )
+            await connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_question_attempt_transcription_status "
+                    "ON question_attempt (transcription_status)"
+                )
+            )
+            # Answers already transcribed must not look unprocessed, or a client
+            # would poll for work that is never queued. Scoped to rows still at the
+            # default so it cannot overwrite a live job's status on restart.
+            await connection.execute(
+                text(
+                    "UPDATE question_attempt SET transcription_status = 'transcribed', "
+                    "transcription_updated_at = created_at "
+                    "WHERE transcription IS NOT NULL AND transcription_status = 'pending'"
+                )
+            )
+
             # Composite indexes backing the two hottest interview queries
             # (active-interview lookup, history pagination). Same rationale: the
             # migration is authoritative, this keeps un-migrated environments fast
