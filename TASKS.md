@@ -34,17 +34,50 @@ No staging environment exists. Local and CI are the only gates before production
 
 ## Critical findings — unresolved
 
-### C1. Database connection ceiling is nearly exhausted · `TODO`
-`max_connections = 20`, **17 already in use** at ordinary load. Three spare.
+### C1. About 15 students can answer at once, platform-wide · `TODO`
 
-The API pool and the arq worker pool both point at the same instance. A modest
-burst of concurrent interviews exhausts it and every request fails. This is the
-most likely explanation for intermittent, unreproducible production breakage,
-and it will not survive a campus drive.
+**This is the concurrency limit behind "it breaks when several students use it".**
 
-Next: read `DB_POOL_SIZE`, `DB_MAX_POOL_CON`, `DB_POOL_OVERFLOW` from production
-and compare the total against 20. Then either size the pools to fit or move the
-Aiven plan up.
+Measured on production:
+
+| | |
+|---|---|
+| `max_connections` | 20 (Aiven reserves ~3 → **~17 usable**) |
+| In use at ordinary load | 17 |
+| `BACKEND_SERVER_WORKERS` | 1 |
+| `DB_POOL_SIZE` + `DB_POOL_OVERFLOW` | 5 + 10 = **15 peak** |
+| arq worker | opens no database pool (HTTP to Barabari only) |
+
+The ceiling alone would be survivable. What makes it bite is **how long each
+connection is held**:
+
+1. `get_async_session` opens a session for the whole request.
+2. `get_current_user` queries on every authenticated request, so SQLAlchemy
+   checks a connection out of the pool immediately.
+3. `POST /audio/transcribe` then runs Whisper **synchronously** — deliberately,
+   because the interview cannot proceed without the transcript — and may follow
+   it with an LLM follow-up generation.
+4. The session is not closed until the request ends, so that connection is
+   pinned for the entire duration of both AI calls.
+
+So a connection is held for seconds to tens of seconds per answer upload, and
+there are only ~15. The 16th concurrent upload waits on the pool and then fails
+once `pool_timeout` (`DB_TIMEOUT`) elapses.
+
+A campus drive with 50 students answering together gets roughly 15 served and
+the rest timing out, intermittently, with no clear error. That matches the
+reported symptoms precisely.
+
+Fix options, cheapest first:
+- Raise the Aiven connection limit — buys headroom, fixes nothing structural.
+- **Stop holding a connection across external AI calls**: use short-lived
+  sessions around each database operation instead of one request-long session.
+  Contained, and removes the bottleneck rather than widening it.
+- Move transcription to the arq worker, return `202`, poll for status. The
+  durable fix, and already the audit's recommendation. Largest change.
+
+Still to confirm: production's `DB_TIMEOUT`, which sets how long the 16th
+request waits before failing.
 
 ### C2. Production's Alembic revision does not exist · `TODO`
 `alembic_version = 7ddc54281fe2`. That revision is **not among the 45** in the
