@@ -88,3 +88,21 @@ async def get_current_super_admin_user(
             detail="Super Administrator access required.",
         )
     return current_user
+
+
+async def is_team_authorized_user(user: User, team_id: int, session) -> bool:
+    """True if user is Super Admin, Global Admin, or an active member/lead of the specific team."""
+    if is_admin_user(user) or is_super_admin_user(user):
+        return True
+    
+    # Check if user is an active member or lead of this specific team
+    from sqlalchemy import select
+    from src.models.db.team_member import TeamMember
+    stmt = select(TeamMember).where(
+        TeamMember.team_id == team_id,
+        TeamMember.user_id == user.id,
+        TeamMember.status == "active"
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none() is not None
+

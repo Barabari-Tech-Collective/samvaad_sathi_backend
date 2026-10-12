@@ -3,7 +3,8 @@ import datetime
 from typing import List
 from sqlalchemy.exc import IntegrityError
 
-from src.api.dependencies.admin import get_current_admin_user, get_current_super_admin_user
+from src.api.dependencies.admin import get_current_admin_user, get_current_super_admin_user, is_team_authorized_user
+from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.teams_v2 import (
     TeamResponse,
@@ -26,10 +27,25 @@ router = fastapi.APIRouter(prefix="/v2/teams", tags=["teams-v2"])
     summary="Get all teams",
 )
 async def get_all_teams(
+    status: str = fastapi.Query("active", description="Status of the team (active/deleted)"),
+    current_user: User = fastapi.Depends(get_current_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+) -> List[TeamResponse]:
+    teams = await team_repo.get_all_teams(status=status)
+    return [TeamResponse(**t) for t in teams]
+
+@router.get(
+    path="/recycle-bin",
+    name="teams:get_team_recycle_bin",
+    response_model=List[TeamResponse],
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Get deleted teams for recycle bin",
+)
+async def get_team_recycle_bin(
     current_user: User = fastapi.Depends(get_current_admin_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ) -> List[TeamResponse]:
-    teams = await team_repo.get_all_teams()
+    teams = await team_repo.get_all_teams(status="deleted")
     return [TeamResponse(**t) for t in teams]
 
 @router.post(
@@ -51,7 +67,7 @@ async def create_team(
     path="/{team_id}",
     name="teams:delete",
     status_code=fastapi.status.HTTP_204_NO_CONTENT,
-    summary="Delete a team",
+    summary="Delete a team (move to recycle bin)",
 )
 async def delete_team(
     team_id: int,
@@ -60,10 +76,42 @@ async def delete_team(
 ):
     result = await team_repo.delete_team(team_id)
     if result == "has_members":
-        raise fastapi.HTTPException(status_code=400, detail="Cannot delete team. Please remove or transfer all members first.")
+        raise fastapi.HTTPException(status_code=400, detail="Cannot delete team. Please remove or transfer all active members first.")
     elif result == "not_found":
         raise fastapi.HTTPException(status_code=404, detail="Team not found")
     
+    return None
+
+@router.patch(
+    path="/{team_id}/restore",
+    name="teams:restore_team",
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Restore team from recycle bin",
+)
+async def restore_team(
+    team_id: int,
+    current_user: User = fastapi.Depends(get_current_super_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+):
+    success = await team_repo.restore_team(team_id)
+    if not success:
+        raise fastapi.HTTPException(status_code=404, detail="Team not found")
+    return {"message": "Team restored successfully"}
+
+@router.delete(
+    path="/{team_id}/permanent",
+    name="teams:permanent_delete_team",
+    status_code=fastapi.status.HTTP_204_NO_CONTENT,
+    summary="Permanently delete team",
+)
+async def permanent_delete_team(
+    team_id: int,
+    current_user: User = fastapi.Depends(get_current_super_admin_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+):
+    success = await team_repo.permanent_delete_team(team_id)
+    if not success:
+        raise fastapi.HTTPException(status_code=404, detail="Team not found")
     return None
 
 @router.get(
@@ -92,9 +140,14 @@ async def get_active_members(
 async def add_member(
     team_id: int,
     member_data: TeamMemberCreate,
-    current_user: User = fastapi.Depends(get_current_admin_user),
+    current_user: User = fastapi.Depends(get_current_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ) -> TeamMemberResponse:
+    if not await is_team_authorized_user(current_user, team_id, team_repo.async_session):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to manage members in this team.",
+        )
     try:
         member = await team_repo.add_team_member(team_id, member_data)
         return TeamMemberResponse(**member)
@@ -115,9 +168,14 @@ async def add_member(
 )
 async def get_recycle_bin(
     team_id: int,
-    current_user: User = fastapi.Depends(get_current_admin_user),
+    current_user: User = fastapi.Depends(get_current_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ) -> List[TeamMemberRecycleBinResponse]:
+    if not await is_team_authorized_user(current_user, team_id, team_repo.async_session):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view this team's recycle bin.",
+        )
     members = await team_repo.get_team_members(team_id, status='deleted')
     return [TeamMemberRecycleBinResponse(**m) for m in members]
 
@@ -130,9 +188,14 @@ async def get_recycle_bin(
 async def soft_delete_member(
     team_id: int,
     member_id: int,
-    current_user: User = fastapi.Depends(get_current_admin_user),
+    current_user: User = fastapi.Depends(get_current_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ):
+    if not await is_team_authorized_user(current_user, team_id, team_repo.async_session):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to delete members in this team.",
+        )
     success = await team_repo.soft_delete_member(team_id, member_id)
     if not success:
         raise fastapi.HTTPException(status_code=404, detail="Member not found")
@@ -149,9 +212,14 @@ async def update_member(
     team_id: int,
     member_id: int,
     member_data: TeamMemberUpdate,
-    current_user: User = fastapi.Depends(get_current_admin_user),
+    current_user: User = fastapi.Depends(get_current_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ) -> TeamMemberResponse:
+    if not await is_team_authorized_user(current_user, team_id, team_repo.async_session):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to update members in this team.",
+        )
     try:
         updated_member = await team_repo.update_team_member(team_id, member_id, member_data)
         if not updated_member:
@@ -172,9 +240,14 @@ async def update_member(
 async def restore_member(
     team_id: int,
     member_id: int,
-    current_user: User = fastapi.Depends(get_current_admin_user),
+    current_user: User = fastapi.Depends(get_current_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ):
+    if not await is_team_authorized_user(current_user, team_id, team_repo.async_session):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to restore members in this team.",
+        )
     success = await team_repo.restore_member(team_id, member_id)
     if not success:
         raise fastapi.HTTPException(status_code=404, detail="Member not found")
@@ -189,9 +262,14 @@ async def restore_member(
 async def permanent_delete_member(
     team_id: int,
     member_id: int,
-    current_user: User = fastapi.Depends(get_current_admin_user),
+    current_user: User = fastapi.Depends(get_current_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ):
+    if not await is_team_authorized_user(current_user, team_id, team_repo.async_session):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to permanently delete members in this team.",
+        )
     success = await team_repo.permanent_delete_member(team_id, member_id)
     if not success:
         raise fastapi.HTTPException(status_code=404, detail="Member not found")

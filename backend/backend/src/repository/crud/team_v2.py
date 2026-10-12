@@ -7,17 +7,24 @@ from src.models.db.team import Team
 from src.models.db.team_member import TeamMember
 from src.models.db.user import User
 from src.models.schemas.teams_v2 import TeamCreate, TeamMemberCreate, TeamMemberUpdate
+from src.securities.hashing.password import pwd_generator
 
 class TeamCRUDRepository(BaseCRUDRepository):
     
-    async def get_all_teams(self) -> list[dict]:
-        """Fetch all teams with their active member counts."""
+    async def get_all_teams(self, status: str = "active") -> list[dict]:
+        """Fetch all teams with their active member counts, filtered by status."""
         stmt = (
             select(
                 Team,
                 func.count(TeamMember.id).filter(TeamMember.status == 'active').label("memberCount")
             )
             .outerjoin(TeamMember, Team.id == TeamMember.team_id)
+        )
+        if status:
+            stmt = stmt.where(Team.status == status)
+
+        stmt = (
+            stmt
             .group_by(Team.id)
             .order_by(Team.created_at.desc())
         )
@@ -56,12 +63,12 @@ class TeamCRUDRepository(BaseCRUDRepository):
         }
 
     async def delete_team(self, team_id: int) -> str:
-        # Check if the team has any members (active or deleted)
-        stmt = select(func.count(TeamMember.id)).where(TeamMember.team_id == team_id)
+        # Check if the team has any active members
+        stmt = select(func.count(TeamMember.id)).where(TeamMember.team_id == team_id, TeamMember.status == 'active')
         result = await self.async_session.execute(stmt)
-        member_count = result.scalar() or 0
+        active_member_count = result.scalar() or 0
         
-        if member_count > 0:
+        if active_member_count > 0:
             return "has_members"
             
         stmt_team = select(Team).where(Team.id == team_id)
@@ -71,9 +78,34 @@ class TeamCRUDRepository(BaseCRUDRepository):
         if not team:
             return "not_found"
             
-        await self.async_session.delete(team)
+        # Soft-delete the team by updating status to 'deleted'
+        team.status = "deleted"
         await self.async_session.commit()
         return "success"
+
+    async def restore_team(self, team_id: int) -> bool:
+        stmt_team = select(Team).where(Team.id == team_id)
+        result_team = await self.async_session.execute(stmt_team)
+        team = result_team.scalar_one_or_none()
+        
+        if not team:
+            return False
+            
+        team.status = "active"
+        await self.async_session.commit()
+        return True
+
+    async def permanent_delete_team(self, team_id: int) -> bool:
+        stmt_team = select(Team).where(Team.id == team_id)
+        result_team = await self.async_session.execute(stmt_team)
+        team = result_team.scalar_one_or_none()
+        
+        if not team:
+            return False
+            
+        await self.async_session.delete(team)
+        await self.async_session.commit()
+        return True
 
     async def get_team_members(self, team_id: int, status: str = 'active') -> list[dict]:
         stmt = (
@@ -112,21 +144,24 @@ class TeamCRUDRepository(BaseCRUDRepository):
         user = result.scalar_one_or_none()
         
         if not user:
-            # Note: in real production, password hashing should be applied here.
-            # Assuming dummy hash or handled prior if creating on the fly.
+            raw_password = member_data.password or "Welcome@123"
+            hashed_pw = pwd_generator.generate_hashed_password(hash_salt="", new_password=raw_password)
             user = User(
                 email=member_data.email,
                 name=member_data.name,
-                password_hash="to_be_set_or_random", 
-                is_onboarded=False
+                password_hash=hashed_pw, 
+                is_onboarded=False,
+                is_admin=False  # Regular team members should NOT be global admins
             )
             self.async_session.add(user)
             await self.async_session.flush()
         else:
-            # Update name if user already exists
+            # Update name and password if user already exists
             if member_data.name and user.name != member_data.name:
                 user.name = member_data.name
-                await self.async_session.flush()
+            if member_data.password:
+                user.password_hash = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password)
+            await self.async_session.flush()
 
         new_member = TeamMember(
             team_id=team_id,
@@ -216,6 +251,8 @@ class TeamCRUDRepository(BaseCRUDRepository):
                 user.name = member_data.name
             if member_data.email:
                 user.email = member_data.email
+            if member_data.password:
+                user.password_hash = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password)
             
         await self.async_session.commit()
         await self.async_session.refresh(member)
