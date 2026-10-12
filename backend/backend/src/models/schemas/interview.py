@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from typing import Literal
 
 import pydantic
 
@@ -127,6 +128,10 @@ class GeneratedQuestionsInResponse(BaseSchemaModel):
     llm_model: str | None = None
     llm_latency_ms: int | None = None
     llm_error: str | None = None
+    interview_mode: str = pydantic.Field(
+        default="practice",
+        description="Snapshotted on the interview at creation. See Interview.interview_mode.",
+    )
 
 
 class StructurePracticeQuestionsResponse(BaseSchemaModel):
@@ -207,6 +212,23 @@ class QuestionAttemptsListResponse(BaseSchemaModel):
 
 class CompleteInterviewRequest(BaseSchemaModel):
     interview_id: int
+
+
+#: What the client is allowed to report. Anything else is a 422, not a free-text
+#: reason field - the facilitator-visible remark reads from a fixed, known set.
+ProctoringViolationReason = Literal["tab_switch", "fullscreen_exit"]
+
+
+class ReportProctoringViolationRequest(BaseSchemaModel):
+    interview_id: int
+    reason: ProctoringViolationReason
+
+
+class ProctoringViolationResponse(BaseSchemaModel):
+    interview_id: int
+    status: str
+    proctoring_terminated: bool
+    proctoring_violation_reason: str | None = None
 
 
 class ResumeInterviewRequest(BaseSchemaModel):

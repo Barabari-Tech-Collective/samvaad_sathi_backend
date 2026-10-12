@@ -6,7 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
-from src.models.schemas.interview import InterviewCreate, InterviewInResponse, GeneratedQuestionsInResponse, InterviewsListResponse, InterviewItem, QuestionsListResponse, QuestionAttemptsListResponse, QuestionAttemptItem, GenerateQuestionsRequest, CreateAttemptResponse, InterviewQuestionOut, CompleteInterviewRequest, CreateAttemptRequest, InterviewItemWithSummary, InterviewsListWithSummaryResponse, ResumeInterviewResponse, ResumeInterviewRequest
+from src.models.schemas.interview import InterviewCreate, InterviewInResponse, GeneratedQuestionsInResponse, InterviewsListResponse, InterviewItem, QuestionsListResponse, QuestionAttemptsListResponse, QuestionAttemptItem, GenerateQuestionsRequest, CreateAttemptResponse, InterviewQuestionOut, CompleteInterviewRequest, CreateAttemptRequest, InterviewItemWithSummary, InterviewsListWithSummaryResponse, ResumeInterviewResponse, ResumeInterviewRequest, ReportProctoringViolationRequest, ProctoringViolationResponse
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
@@ -316,6 +316,7 @@ async def generate_questions(
         llm_model=qs.get("llm_model"),  # type: ignore[union-attr]
         llm_latency_ms=qs.get("latency_ms"),  # type: ignore[union-attr]
         llm_error=qs.get("llm_error"),  # type: ignore[union-attr]
+        interview_mode=interview.interview_mode,
     )
     logger.info(
         "POST /interviews/generate-questions FULL RESPONSE PAYLOAD | Interview=%s | Cached=%s | Response=\n%s",
@@ -368,6 +369,82 @@ async def complete_interview(
         "status": updated.status if updated else None,
         "message": "Interview marked as completed" if updated else "No update performed",
     }
+
+
+@router.post(
+    path="/interviews/proctoring-violation",
+    name="interviews:report-proctoring-violation",
+    response_model=ProctoringViolationResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="End an assessment interview early due to a proctoring violation",
+    description=(
+        "Ends the specified interview immediately because the student left the "
+        "tab/window or exited fullscreen during a proctored assessment. Only "
+        "valid for an interview_mode='assessment' interview - mode is read from "
+        "the interview's own stored snapshot, not trusted from the client, so a "
+        "client that fakes this call for a practice interview has no effect."
+    ),
+)
+async def report_proctoring_violation(
+    payload: ReportProctoringViolationRequest,
+    current_user=fastapi.Depends(get_current_user),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
+):
+    interview = await interview_repo.get_by_id(interview_id=payload.interview_id)
+    if interview is None or interview.user_id != current_user.id:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+
+    if interview.interview_mode != "assessment":
+        # Practice is deliberately low-stakes - leaving the tab must never end
+        # one. A client that sends this for a practice interview either has a
+        # bug or is lying about the mode; either way, nothing happens.
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="Proctoring does not apply to a practice interview.",
+        )
+
+    if interview.status in ("terminated", "completed"):
+        # Idempotent: a retried request (flaky network, duplicate event) must
+        # not error, and must not downgrade an interview that finished
+        # normally into a terminated one.
+        return ProctoringViolationResponse(
+            interview_id=interview.id,
+            status=interview.status,
+            proctoring_terminated=interview.proctoring_terminated,
+            proctoring_violation_reason=interview.proctoring_violation_reason,
+        )
+
+    if interview.status != "active":
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Only an active interview can be ended for a proctoring violation.",
+        )
+
+    updated = await interview_repo.mark_terminated_for_proctoring(
+        interview_id=interview.id, reason=payload.reason
+    )
+    if updated is None:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+
+    await track_analytics_event(
+        interview_repo.async_session,
+        event_type="interview_proctoring_terminated",
+        user_id=current_user.id,
+        interview_id=updated.id,
+        event_data={
+            "track": updated.track,
+            "difficulty": updated.difficulty,
+            "reason": payload.reason,
+            "api": "interviews.report_proctoring_violation",
+        },
+    )
+
+    return ProctoringViolationResponse(
+        interview_id=updated.id,
+        status=updated.status,
+        proctoring_terminated=updated.proctoring_terminated,
+        proctoring_violation_reason=updated.proctoring_violation_reason,
+    )
 
 
 @router.get(
