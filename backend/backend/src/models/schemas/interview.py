@@ -243,6 +243,14 @@ class ResumeInterviewResponse(BaseSchemaModel):
     total_questions: int = pydantic.Field(description="Total number of questions in the interview")
     attempted_questions: int = pydantic.Field(description="Number of questions with attempts")
     remaining_questions: int = pydantic.Field(description="Number of questions without attempts")
+    interview_mode: str = pydantic.Field(
+        default="practice",
+        description=(
+            "Snapshotted on the interview at creation. A resume can't rely on the "
+            "URL the client happened to arrive with, so this is how the client "
+            "learns whether to activate proctoring when continuing a sitting."
+        ),
+    )
 
 
 class QuestionSupplementsResponse(BaseSchemaModel):

@@ -880,6 +880,7 @@ async def resume_interview(
         total_questions=total_questions,
         attempted_questions=attempted_count,
         remaining_questions=len(questions_without_attempts),
+        interview_mode=interview.interview_mode,
     )
 
 
