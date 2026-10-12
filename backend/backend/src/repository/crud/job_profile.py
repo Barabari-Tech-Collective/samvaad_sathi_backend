@@ -83,6 +83,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         additional_context: Optional[str] = None,
         category: Optional[str] = None,
         employment_type: Optional[str] = None,
+        interview_mode: str = "assessment",
         created_by: Optional[int] = None,
     ) -> JobProfile:
         new_profile = JobProfile(
@@ -94,6 +95,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             additional_context=additional_context,
             category=category,
             employment_type=employment_type,
+            interview_mode=interview_mode,
             status=JobProfileStatus.DRAFT,
             created_by=created_by,
         )

@@ -14,6 +14,22 @@ class JobProfileStatus(str, _Enum):
     PUBLISHED = "published"
     CHANGES_REQUESTED = "changes_requested"
 
+
+class JobProfileInterviewMode(str, _Enum):
+    """Who the result is for, chosen by the facilitator at creation.
+
+    A role's questions are the facilitator's either way - this never relaxes
+    question integrity (see interview_eligibility.py, which does not branch on
+    this field at all). It only decides which entry point on the student side
+    surfaces the role, and whether a completed interview is something a
+    reviewer evaluates for shortlisting. PRACTICE is never scored or shared;
+    ASSESSMENT is.
+    """
+
+    PRACTICE = "practice"
+    ASSESSMENT = "assessment"
+
+
 class JobProfile(Base):
     __tablename__ = "job_profile"
 
@@ -27,6 +43,12 @@ class JobProfile(Base):
     category: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(length=160), nullable=True)
     employment_type: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(length=64), nullable=True)
     status: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(length=32), nullable=False, server_default="draft")
+    # Existing rows default to "assessment": every job profile created before
+    # this field existed was, in effect, an assessment - nothing else was ever
+    # offered - so this is the only backfill that does not change behaviour.
+    interview_mode: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=16), nullable=False, server_default="assessment", index=True
+    )
     admin_comment: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
     submitted_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True), nullable=True)
     
