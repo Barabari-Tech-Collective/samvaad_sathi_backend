@@ -1094,6 +1094,8 @@ async def get_student_interviews(
             # only thing that tells a facilitator which kind of sitting a score
             # came from: a scouting signal to act on, or a formal record.
             "interview_mode": interview.interview_mode,
+            "proctoring_terminated": interview.proctoring_terminated,
+            "proctoring_violation_reason": interview.proctoring_violation_reason,
         }
         for interview, report, summary_report in rows
     ]
@@ -1408,6 +1410,8 @@ async def get_interviews_table(
             # Both are scored the same way - this is the only field that tells
             # a facilitator which kind of sitting a row came from.
             "interview_mode": interview.interview_mode,
+            "proctoring_terminated": interview.proctoring_terminated,
+            "proctoring_violation_reason": interview.proctoring_violation_reason,
         })
     return TablePageResponse(table_type="interviews", items=items, page=page, limit=limit, total=total)
 
@@ -1817,6 +1821,15 @@ async def get_interview_detail_summary(
         # Scored identically to Assessment - this is the only card that tells a
         # reviewer whether this sitting is a scouting signal or a formal record.
         KpiCard(key="interview_mode", label="Interview Mode", value=metrics.get("interview_mode")),
+        KpiCard(
+            key="proctoring_remark",
+            label="Proctoring",
+            value=(
+                f"Ended early - {metrics.get('proctoring_violation_reason')}"
+                if metrics.get("proctoring_terminated")
+                else "No violation"
+            ),
+        ),
     ]
     return DashboardOverviewResponse(kpis=kpis)
 

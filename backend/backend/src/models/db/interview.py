@@ -39,6 +39,18 @@ class Interview(Base):  # type: ignore
     interview_mode: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=16), nullable=False, server_default="practice", index=True
     )
+    # Set only by the proctoring-violation endpoint, and only for an
+    # interview_mode="assessment" interview - a student leaving the tab or
+    # exiting fullscreen during a formal sitting ends it immediately. True
+    # here is itself the facilitator-visible remark; the reason names which
+    # violation did it. completed_at doubles as "when the violation fired";
+    # no separate timestamp column for a fact the status change already dates.
+    proctoring_terminated: SQLAlchemyMapped[bool] = sqlalchemy_mapped_column(
+        sqlalchemy.Boolean, nullable=False, server_default=sqlalchemy.false(), index=True
+    )
+    proctoring_violation_reason: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=32), nullable=True
+    )
 
     user = relationship("User", back_populates="interviews")
     job_profile = relationship("JobProfile")
