@@ -79,18 +79,23 @@ Fix options, cheapest first:
 Still to confirm: production's `DB_TIMEOUT`, which sets how long the 16th
 request waits before failing.
 
-### C2. Production's Alembic revision does not exist · `TODO`
-`alembic_version = 7ddc54281fe2`. That revision is **not among the 45** in the
-chain. `alembic upgrade head` against production fails immediately with
-"Can't locate revision identified by '7ddc54281fe2'".
-
-So production cannot currently be migrated at all. Its schema came from
+### C2. Production's Alembic revision does not exist · `READY TO FIX`
+`alembic_version = 7ddc54281fe2`. That revision is **not among the 46** in the
+chain, so `alembic upgrade head` against production fails immediately with
+"Can't locate revision identified by '7ddc54281fe2'". Its schema came from
 `create_all` plus hand-written `ALTER` statements; the version row is a fossil.
 
-Must be resolved before any migration-based deploy. Likely path: confirm
-production's schema matches the model, then `alembic stamp` it to the correct
-revision. Needs care — stamping the wrong revision silently skips real
-migrations.
+**Verified 2026-10-12:** production's schema matches the models exactly, except
+the three `question_attempt.transcription_*` columns added in this branch.
+Stamping is therefore safe — there are no unapplied migrations that stamping
+would wrongly mark as done.
+
+Fix: set `alembic_version` to `7af582260700`, the head *before* this branch's
+migration. `alembic upgrade head` then applies only `a1c4e7b92f08`.
+
+A single-row UPDATE, no DDL, trivially reversible — record `7ddc54281fe2`
+first. Runtime-neutral: startup only checks that the table exists, never its
+value.
 
 ### C3. 796 duplicate question attempts in production · `TODO`
 796 distinct `(interview_id, question_id)` groups have more than one row.

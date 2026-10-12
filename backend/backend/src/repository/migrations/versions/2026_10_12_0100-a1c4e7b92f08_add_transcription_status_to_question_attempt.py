@@ -14,7 +14,6 @@ Create Date: 2026-10-12 01:00:00.000000
 """
 
 from alembic import op
-import sqlalchemy as sa
 
 revision = "a1c4e7b92f08"
 down_revision = "7af582260700"
@@ -23,41 +22,41 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "question_attempt",
-        sa.Column(
-            "transcription_status",
-            sa.String(length=16),
-            nullable=False,
-            server_default="pending",
-        ),
+    # IF NOT EXISTS throughout, rather than op.add_column, because startup also
+    # patches these columns in: production cannot be migrated yet, and without
+    # the patch every question_attempt query would fail the moment the model
+    # ships. The app therefore adds them on boot, and a plain add_column would
+    # then abort this migration with DuplicateColumn. Whichever mechanism runs
+    # first, the other must be a no-op - the same collision that left
+    # interview.difficulty unmigratable.
+    op.execute(
+        "ALTER TABLE question_attempt ADD COLUMN IF NOT EXISTS "
+        "transcription_status VARCHAR(16) NOT NULL DEFAULT 'pending'"
     )
-    op.add_column(
-        "question_attempt", sa.Column("transcription_error", sa.Text(), nullable=True)
+    op.execute(
+        "ALTER TABLE question_attempt ADD COLUMN IF NOT EXISTS transcription_error TEXT"
     )
-    op.add_column(
-        "question_attempt",
-        sa.Column("transcription_updated_at", sa.DateTime(timezone=True), nullable=True),
+    op.execute(
+        "ALTER TABLE question_attempt ADD COLUMN IF NOT EXISTS "
+        "transcription_updated_at TIMESTAMPTZ"
     )
     # Answers already transcribed must not look unprocessed, or a client polling
-    # an older attempt would wait for work that will never be queued.
+    # an older attempt would wait for work that will never be queued. Scoped to
+    # rows still at the default so a live job's status cannot be overwritten.
     op.execute(
         "UPDATE question_attempt SET transcription_status = 'transcribed', "
-        "transcription_updated_at = created_at WHERE transcription IS NOT NULL"
+        "transcription_updated_at = created_at "
+        "WHERE transcription IS NOT NULL AND transcription_status = 'pending'"
     )
     # Supports the worker's sweep for rows stalled in pending/processing.
-    op.create_index(
-        op.f("ix_question_attempt_transcription_status"),
-        "question_attempt",
-        ["transcription_status"],
-        unique=False,
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_question_attempt_transcription_status "
+        "ON question_attempt (transcription_status)"
     )
 
 
 def downgrade() -> None:
-    op.drop_index(
-        op.f("ix_question_attempt_transcription_status"), table_name="question_attempt"
-    )
-    op.drop_column("question_attempt", "transcription_updated_at")
-    op.drop_column("question_attempt", "transcription_error")
-    op.drop_column("question_attempt", "transcription_status")
+    op.execute("DROP INDEX IF EXISTS ix_question_attempt_transcription_status")
+    op.execute("ALTER TABLE question_attempt DROP COLUMN IF EXISTS transcription_updated_at")
+    op.execute("ALTER TABLE question_attempt DROP COLUMN IF EXISTS transcription_error")
+    op.execute("ALTER TABLE question_attempt DROP COLUMN IF EXISTS transcription_status")
