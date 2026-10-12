@@ -640,6 +640,17 @@ async def create_question_attempt(
     if interview is None or interview.user_id != current_user.id:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
 
+    if interview.status != "active":
+        # The gap a proctoring termination would otherwise leave open: ending
+        # an interview client-side means nothing if the API still accepts new
+        # answers for it. "completed" is included too - this endpoint never
+        # checked status before, so a finished interview could already take
+        # new attempts via a direct call.
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="This interview has ended and can no longer accept answers.",
+        )
+
     # Verify question exists and belongs to the interview
     question = await question_repo.get_by_id(question_id=question_id)
     if question is None or question.interview_id != interview_id:

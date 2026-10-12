@@ -12,7 +12,7 @@ from src.api.routes import audio
 @pytest.fixture
 def dependencies(monkeypatch):
     repo = SimpleNamespace(
-        get_by_id_and_user=AsyncMock(return_value=SimpleNamespace(id=42)),
+        get_by_id_and_user=AsyncMock(return_value=SimpleNamespace(id=42, interview_id=99)),
         update_audio_transcription=AsyncMock(return_value=SimpleNamespace(id=42)),
         async_session=SimpleNamespace(rollback=AsyncMock()),
     )
@@ -32,10 +32,15 @@ def dependencies(monkeypatch):
 
 
 async def upload(repo):
+    # None of these tests vary interview status - they're all exercising the
+    # save/acknowledgement contract on an otherwise-normal active interview -
+    # so this stub is fixed here rather than threaded through every test.
+    interview_repo = SimpleNamespace(get_by_id=AsyncMock(return_value=SimpleNamespace(status="active")))
     return await audio.transcribe_audio_answer(
         question_attempt_id="42", language="en",
         file=SimpleNamespace(filename="recording.wav"),
         current_user=SimpleNamespace(id=7), question_repo=repo,
+        interview_repo=interview_repo,
     )
 
 
@@ -92,4 +97,30 @@ async def test_foreign_attempt_does_not_reach_transcription(dependencies):
         await upload(repo)
     assert exc.value.status_code == 404
     audio.transcribe_audio_with_whisper.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["terminated", "completed"])
+async def test_an_ended_interviews_attempt_cannot_be_transcribed(dependencies, monkeypatch, status):
+    """The other half of ending an interview actually meaning something.
+
+    A proctoring termination (or a normal completion) must not accept a late
+    answer for a question attempt that was already created before the
+    interview ended - otherwise ending it only stops *new* questions from
+    starting, not the one the student was on when they left.
+    """
+    repo, followup = dependencies
+    interview_repo = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=SimpleNamespace(status=status))
+    )
+    with pytest.raises(fastapi.HTTPException) as exc:
+        await audio.transcribe_audio_answer(
+            question_attempt_id="42", language="en",
+            file=SimpleNamespace(filename="recording.wav"),
+            current_user=SimpleNamespace(id=7), question_repo=repo,
+            interview_repo=interview_repo,
+        )
+    assert exc.value.status_code == 409
+    audio.transcribe_audio_with_whisper.assert_not_called()
+    followup.assert_not_called()
     followup.assert_not_called()

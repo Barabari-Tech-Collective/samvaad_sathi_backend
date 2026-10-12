@@ -30,6 +30,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 VIOLATION_PATH = "/api/interviews/proctoring-violation"
+ATTEMPT_PATH = "/api/interviews/question-attempts"
 OTHER_USER_ID = 999999
 
 
@@ -199,3 +200,36 @@ async def test_an_unknown_reason_is_rejected(app, database):
     response = await _post_violation(app, interview_id, reason="student_was_cheating_i_swear")
 
     assert response.status_code == 422
+
+
+async def test_a_terminated_interview_cannot_start_a_new_question(app, database):
+    """The other half of ending an interview actually meaning something.
+
+    Ending an interview client-side is theater if the API still lets the
+    student start a new question against it afterward. Covers
+    create_question_attempt specifically - test_answer_save_contract.py
+    covers the sibling case of submitting an answer for a question already
+    in progress when the interview ends.
+    """
+    from src.models.db.interview_question import InterviewQuestion
+
+    interview_id = await _create_interview(database, interview_mode="assessment")
+
+    sessionmaker = async_sessionmaker(bind=database, expire_on_commit=False)
+    async with sessionmaker() as session:
+        question = InterviewQuestion(
+            interview_id=interview_id, text="Describe your experience with REST APIs.",
+            order=1, status="pending",
+        )
+        session.add(question)
+        await session.commit()
+        question_id = question.id
+
+    await _post_violation(app, interview_id, reason="tab_switch")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://probe") as client:
+        response = await client.post(
+            ATTEMPT_PATH, json={"interviewId": interview_id, "questionId": question_id}
+        )
+
+    assert response.status_code == 409, response.text
