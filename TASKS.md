@@ -150,16 +150,43 @@ instead of one flag-day — this is what replaces having a staging environment.
 | O3.2 | Migration `a1c4e7b92f08`; chain still single-headed at 46 | `LOCAL` |
 | O3.3 | Idempotent startup patch for the new columns (needed while C2 blocks migrating production) | `LOCAL` |
 | O3.4 | `GET /audio/attempts/{id}/transcription` status endpoint, owner-scoped, 14 tests | `LOCAL` |
-| O3.5 | arq task that performs the transcription | `TODO` |
+| O3.0 | **Store answer audio durably before the request returns** | `TODO` — blocks O3.5 |
+| O3.4a | Worker connection pool, sized separately from the API's | `LOCAL` |
+| O3.5 | arq task that performs the transcription | `TODO` — blocked by O3.0 |
 | O3.6 | `POST /audio/transcribe` returns `202` when the client opts in; synchronous by default | `TODO` |
 | O3.7 | Frontend polls to a terminal status | `TODO` |
 | O3.8 | Sweep for rows stalled in `processing` (a killed worker must not strand a student) | `TODO` |
 | O3.9 | Remove the synchronous path once no client uses it | `TODO` |
 
-**Connection budget — decide before O3.5.** The worker currently opens no
-database pool. Giving it one spends from the same ceiling of 20. It still wins,
-because worker concurrency is a number we choose while concurrent students are
-not, but the pools must be sized together rather than independently.
+### O3.0 — answer audio is never stored (discovered 2026-10-12)
+
+`save_audio_file` writes a `tempfile.NamedTemporaryFile`; `cleanup_temp_audio_file`
+deletes it when the request ends. The `audio_url` column holds a generated name
+like `qa_42_abc123.wav` that points at nothing.
+
+A background worker therefore has nothing to fetch, and option 3 cannot work
+until this changes.
+
+It matters well beyond option 3. Today, if transcription fails the recording is
+gone permanently, an answer can never be re-transcribed after a provider
+outage, and a disputed score cannot be checked against what the student
+actually said.
+
+`src/services/s3_service.py` already provides `upload_audio_to_s3` and
+`get_presigned_url`, and is in production use for resumes and TTS audio — it is
+simply not wired into the answer path. So the change is contained.
+
+**Needs a product decision first:** durably storing student voice recordings is
+a privacy question, not only a technical one. Retention period, encryption at
+rest, consent wording, and deletion on request all have to be settled before
+this ships.
+
+**Connection budget.** The worker previously opened no database pool; O3.4a
+gives it its own, sized for concurrent jobs rather than concurrent requests,
+defaulting to a peak of 5. The API's 15 should come down correspondingly — once
+connections are no longer held across AI calls it does not need that many —
+keeping both totals under the ceiling of 20 with room for migrations and an
+admin session.
 
 **Open design questions** (O3.7): does Next unlock on *accepted* or
 *transcribed*; where does a follow-up question go when it arrives after the

@@ -44,6 +44,17 @@ class BackendBaseSettings(BaseSettings):
     DB_POSTGRES_PASSWORD: str = decouple.config("POSTGRES_PASSWORD", cast=str)  # type: ignore
     DB_POOL_SIZE: int = decouple.config("DB_POOL_SIZE", cast=int)  # type: ignore
     DB_POOL_OVERFLOW: int = decouple.config("DB_POOL_OVERFLOW", cast=int)  # type: ignore
+    # The arq worker keeps its own, smaller pool. It is sized for concurrent
+    # jobs - a number we choose - rather than concurrent HTTP requests, and it
+    # is spent from the same server-wide connection ceiling as the API pool
+    # above. Keep both totals comfortably under max_connections, leaving room
+    # for migrations and an admin session.
+    WORKER_DB_POOL_SIZE: int = decouple.config(
+        "WORKER_DB_POOL_SIZE", cast=int, default=2
+    )  # type: ignore
+    WORKER_DB_POOL_OVERFLOW: int = decouple.config(
+        "WORKER_DB_POOL_OVERFLOW", cast=int, default=3
+    )  # type: ignore
     DB_POSTGRES_PORT: int = decouple.config("POSTGRES_PORT", cast=int)  # type: ignore
     DB_POSTGRES_SCHEMA: str = decouple.config("POSTGRES_SCHEMA", cast=str)  # type: ignore
     DB_TIMEOUT: int = decouple.config("DB_TIMEOUT", cast=int)  # type: ignore
