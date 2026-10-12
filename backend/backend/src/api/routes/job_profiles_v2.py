@@ -131,6 +131,7 @@ async def create_job_profile(
         additional_context=payload.additional_context,
         category=payload.category,
         employment_type=payload.employment_type,
+        interview_mode=payload.interview_mode,
         created_by=current_user.id,
     )
     return JobProfileResponse.model_validate(profile)

@@ -5,6 +5,10 @@ import pydantic
 from src.models.schemas.base import BaseSchemaModel
 from src.models.db.job_profile import JobProfileStatus
 
+#: What JobProfile.interview_mode actually stores, as a type literal. Reused on
+#: both Create and Response rather than letting each schema invent its own copy.
+InterviewMode = Literal["practice", "assessment"]
+
 # --- feature/roles-page-api schemas ---
 class JobProfileBase(BaseSchemaModel):
     job_name: str = pydantic.Field(
@@ -27,6 +31,25 @@ class JobProfileBase(BaseSchemaModel):
         validation_alias=pydantic.AliasChoices("employmentType", "employment_type"),
         serialization_alias="employmentType"
     )
+    # Defaults to assessment so a client that omits this field - an older
+    # build of the dashboard, say - keeps creating exactly what it always
+    # created, rather than silently producing practice-only roles.
+    interview_mode: InterviewMode = pydantic.Field(
+        default="assessment",
+        alias="interviewMode",
+        validation_alias=pydantic.AliasChoices("interviewMode", "interview_mode"),
+        serialization_alias="interviewMode"
+    )
+
+    @pydantic.field_validator("interview_mode", mode="before")
+    @classmethod
+    def _default_missing_mode_to_assessment(cls, value: object) -> object:
+        # The `default=` above only fires when the field is absent. Reading an
+        # ORM row where it is present but None - a row the DB default never
+        # touched, such as an object built in memory and never flushed - must
+        # resolve the same way, or JobProfileResponse 500s on exactly the rows
+        # this field exists to make backward compatible.
+        return "assessment" if value is None else value
 
 class JobProfileCreateV2(JobProfileBase):
     pass
@@ -52,6 +75,15 @@ class JobProfileUpdateV2(BaseSchemaModel):
         alias="employmentType",
         validation_alias=pydantic.AliasChoices("employmentType", "employment_type"),
         serialization_alias="employmentType"
+    )
+    # Absent, rather than defaulted, because this is an update: omitting it
+    # must leave the existing mode alone, not reset a published role back to
+    # assessment. update_profile only writes keys sent with exclude_unset.
+    interview_mode: Optional[InterviewMode] = pydantic.Field(
+        default=None,
+        alias="interviewMode",
+        validation_alias=pydantic.AliasChoices("interviewMode", "interview_mode"),
+        serialization_alias="interviewMode"
     )
 
 class JobProfileResponse(JobProfileBase):
