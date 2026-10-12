@@ -79,7 +79,7 @@ Fix options, cheapest first:
 Still to confirm: production's `DB_TIMEOUT`, which sets how long the 16th
 request waits before failing.
 
-### C2. Production's Alembic revision does not exist · `READY TO FIX`
+### C2. Production's Alembic revision did not exist · `VERIFIED PROD` (2026-10-12)
 `alembic_version = 7ddc54281fe2`. That revision is **not among the 46** in the
 chain, so `alembic upgrade head` against production fails immediately with
 "Can't locate revision identified by '7ddc54281fe2'". Its schema came from
@@ -237,4 +237,4 @@ including failures, which are the most useful entries.
 
 | Date | What | Outcome |
 |---|---|---|
-| — | — | — |
+| 2026-10-12 | Stamped `alembic_version` `7ddc54281fe2` → `7af582260700` after confirming production's schema matches the models. Single-row UPDATE, no DDL, no code deployed. | **Success.** Verified by reading the value back. Migrations can run against production again. Revert with `UPDATE alembic_version SET version_num = '7ddc54281fe2';` |
