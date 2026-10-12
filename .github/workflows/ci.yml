@@ -2,7 +2,8 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [Manager-Arma-new-samvaad-10, staging, main]
+    # This repository's default branch is master; there is no main.
+    branches: [Manager-Arma-new-samvaad-10, staging, master]
   workflow_call:
 permissions:
   contents: read
@@ -10,6 +11,21 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      # Gives the migration gate a real, empty database to build from scratch.
+      # TODO: pin to the same major version production runs once confirmed.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: samvaad_schema_check
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,6 +43,11 @@ jobs:
         run: python -m compileall -q backend/backend/src
       - name: Run complete test suite with synthetic settings
         run: python ops/ci_tests.py -q --junitxml=test-results/backend.xml
+        env:
+          # Enables the migration gate: proves `alembic upgrade head` on an empty
+          # database reproduces exactly what the models declare. Without this the
+          # suite silently skips it and schema drift reaches production.
+          SCHEMA_TEST_DATABASE_URL: postgresql+psycopg2://ci:ci-only-password@localhost:5432/samvaad_schema_check
       - name: Check release runner syntax
         run: bash -n ops/ec2-release.sh
       - uses: actions/upload-artifact@v4
