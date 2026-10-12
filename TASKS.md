@@ -150,7 +150,10 @@ instead of one flag-day — this is what replaces having a staging environment.
 | O3.2 | Migration `a1c4e7b92f08`; chain still single-headed at 46 | `LOCAL` |
 | O3.3 | Idempotent startup patch for the new columns (needed while C2 blocks migrating production) | `LOCAL` |
 | O3.4 | `GET /audio/attempts/{id}/transcription` status endpoint, owner-scoped, 14 tests | `LOCAL` |
-| O3.0 | **Store answer audio durably before the request returns** | `TODO` — blocks O3.5 |
+| O3.0 | Store answer audio durably before the request returns | `LOCAL` |
+| O3.0a | Retention rule on the `answer-audio/` prefix | `TODO` — see below |
+| O3.0b | Consent wording covering voice recording storage | `TODO` — see below |
+| O3.0c | Delete a student's recordings on request | `TODO` — see below |
 | O3.4a | Worker connection pool, sized separately from the API's | `LOCAL` |
 | O3.5 | arq task that performs the transcription | `TODO` — blocked by O3.0 |
 | O3.6 | `POST /audio/transcribe` returns `202` when the client opts in; synchronous by default | `TODO` |
@@ -176,10 +179,28 @@ actually said.
 `get_presigned_url`, and is in production use for resumes and TTS audio — it is
 simply not wired into the answer path. So the change is contained.
 
-**Needs a product decision first:** durably storing student voice recordings is
-a privacy question, not only a technical one. Retention period, encryption at
-rest, consent wording, and deletion on request all have to be settled before
-this ships.
+**Done** (2026-10-12): recordings go to S3 before the response returns, as an
+object key rather than a public URL — personal data reachable only through a
+short-lived presigned URL — encrypted at rest with AES256, under a dedicated
+`Samvaad-Saathi/answer-audio/` prefix. Uploaded in a worker thread, because
+boto3 is synchronous and there is only one server process to stall. A storage
+failure is logged rather than raised: transcription still runs from the
+temporary file, so the cost is recoverability, not the student's answer.
+
+**Three obligations this creates, none of them code (O3.0a–c):**
+
+- **Retention.** Nothing deletes these recordings today, so they accumulate
+  indefinitely and the bill grows with them. The dedicated prefix exists so an
+  S3 lifecycle rule can expire them without touching resumes or TTS audio.
+  Someone has to choose the period.
+- **Consent.** Students are not currently told their voice is stored. For an
+  audience with limited technical literacy, "we keep your recording for N days
+  so your answer can be rechecked" needs saying in plain language, in the
+  onboarding flow, before the first recording.
+- **Deletion on request.** There is no way to erase one student's recordings.
+  Needed both as a matter of basic respect and for data-protection requests.
+
+None blocks O3.5, but they should not be left until after a campus rollout.
 
 **Connection budget.** The worker previously opened no database pool; O3.4a
 gives it its own, sized for concurrent jobs rather than concurrent requests,
