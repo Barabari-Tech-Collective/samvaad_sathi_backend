@@ -44,6 +44,7 @@ from src.repository.crud.structure_practice import (
 )
 from src.services.interview_eligibility import (
     DIFFICULTIES,
+    difficulty_to_serve,
     is_valid_difficulty,
     select_published_questions,
     unavailable_reason,
@@ -741,8 +742,20 @@ async def generate_non_tech_questions_v2(
     if job_profile is None:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Job profile not found")
 
+    # Recorded for analytics only. This flow shows the student no level picker,
+    # so whatever arrives here is a client default rather than a choice, and
+    # honouring it would be honouring a phantom.
     requested_difficulty = (payload.difficulty or "").lower().strip() if payload.difficulty else None
-    difficulty = NON_TECH_FIXED_DIFFICULTY
+
+    # Serve the level the facilitator actually published at. This used to pin
+    # the difficulty to NON_TECH_FIXED_DIFFICULTY and hardcode the question
+    # lookup to the matching level, so a facilitator who published at easy, hard
+    # or expert had their questions served to nobody - not rarely, never - while
+    # students silently got the generic blueprint. None means nothing was
+    # published for this role, where the blueprint is the honest answer rather
+    # than a substitute for curated content.
+    served_difficulty = difficulty_to_serve(job_profile, preferred=NON_TECH_FIXED_DIFFICULTY)
+    difficulty = served_difficulty or NON_TECH_FIXED_DIFFICULTY
 
     normalized_job_name = _normalize_non_tech_job_name(job_profile.job_name)
     track = f"Non-Tech: {normalized_job_name}"
@@ -788,29 +801,32 @@ async def generate_non_tech_questions_v2(
 
         questions_data = None
         if getattr(interview, "job_profile_id", None):
-            difficulty_map = {"easy": 1, "medium": 2, "hard": 3, "expert": 4}
-            mapped_level = difficulty_map.get(interview.difficulty, 2)
             admin_questions = await job_profile_repo.get_job_profile_questions(interview.job_profile_id)
-            level_questions = [q for q in admin_questions if q.level == mapped_level]
-            if level_questions:
-                # Pick 5 questions sequentially
-                start_idx = (past_interview_count * 5) % len(level_questions)
-                selected = []
-                for i in range(min(5, len(level_questions))):
-                    idx = (start_idx + i) % len(level_questions)
-                    selected.append(level_questions[idx])
-                
-                questions_data = []
-                for q in selected:
-                    questions_data.append({
-                        "text": q.question_text,
-                        "topic": getattr(q, "question_type", None) or "General",
-                        "category": getattr(q, "category", None) or "general",
-                        "audio_url": getattr(q, "audio_url", None),
-                        "job_profile_question_id": q.id,
-                        "expected_answer": getattr(q, "expected_answer", None),
-                    })
+            # The interview's own difficulty, which difficulty_to_serve set to a
+            # level this facilitator published at - so their questions are found
+            # wherever they filed them, not only at medium.
+            selected = select_published_questions(
+                admin_questions,
+                difficulty=interview.difficulty,
+                count=CURATED_QUESTION_COUNT,
+                offset=past_interview_count * CURATED_QUESTION_COUNT,
+            )
+            questions_data = [
+                {
+                    "text": q.question_text,
+                    "topic": getattr(q, "question_type", None) or "General",
+                    "category": getattr(q, "category", None) or "general",
+                    "audio_url": getattr(q, "audio_url", None),
+                    "job_profile_question_id": q.id,
+                    "expected_answer": getattr(q, "expected_answer", None),
+                }
+                for q in selected
+            ] or None
 
+        # Blueprint only when the facilitator published nothing usable for this
+        # role. Never mixed with curated questions: a sitting is either the
+        # facilitator's set or the blueprint's, so a student is never scored on
+        # a blend of approved and generic content.
         if not questions_data:
             questions_data = select_non_tech_interview_questions(
                 role_name=normalized_job_name,

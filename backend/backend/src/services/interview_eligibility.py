@@ -129,6 +129,29 @@ def unavailable_reason(job_profile, difficulty: str) -> str | None:
     )
 
 
+def difficulty_to_serve(job_profile, *, preferred: str) -> str | None:
+    """Which published level to serve, for a flow with no student level picker.
+
+    The non-tech flow fixes its own difficulty and never shows the student a
+    choice, so it cannot ask which level they meant. It used to hardcode the
+    lookup to level 2, which meant a facilitator who published non-tech
+    questions at easy, hard or expert had them served to nobody - not
+    occasionally, but never - while students silently got the generic blueprint
+    instead.
+
+    Returns `preferred` when the facilitator published enough questions there,
+    otherwise the easiest level they did publish, or None when they published
+    none - in which case the caller's own default content is the honest answer,
+    because there is no curated set to prefer.
+    """
+    available = available_difficulties(job_profile)
+    if not available:
+        return None
+    if preferred in available:
+        return preferred
+    return available[0]
+
+
 def select_published_questions(questions, *, difficulty: str, count: int, offset: int = 0):
     """Pick `count` of the facilitator's questions for one level.
 
