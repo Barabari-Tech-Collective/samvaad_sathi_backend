@@ -129,11 +129,11 @@ incident.
 
 | # | Task | Status |
 |---|---|---|
-| 1.1 | `interview.difficulty` added before `alter_column` so the chain runs from scratch | `LOCAL` |
-| 1.2 | CI gate: empty PostgreSQL + `alembic upgrade head` must reproduce the model schema | `LOCAL` — never executed |
+| 1.1 | `interview.difficulty` added by a migration that actually runs | `CI` |
+| 1.2 | CI gate: empty PostgreSQL + `alembic upgrade head` must reproduce the model schema | `CI` — **green** |
 | 1.3 | Startup reports any column the models declare and the database lacks | `LOCAL` |
 | 1.4 | Patch `interview.difficulty` / `job_profile_id` idempotently at startup | `LOCAL` |
-| 1.5 | Resolve C2 so production can be migrated | `TODO` |
+| 1.5 | Resolve C2 so production can be migrated | `VERIFIED PROD` |
 | 1.6 | Retire `create_all` fallback and the hand-patch block once 1.2 is green and production is consistent | `TODO` |
 
 1.6 is deliberately last. The patches are what keep production running today.
@@ -235,10 +235,10 @@ cannot attach to a question the student has left.
 
 | # | Task | Status |
 |---|---|---|
-| 3.1 | CI workflow (compile, full suite, synthetic settings) | `LOCAL` — never executed |
-| 3.2 | CI Python pinned to 3.12 to match production | `LOCAL` |
-| 3.3 | CI PostgreSQL pinned to 17 to match Aiven | `LOCAL` |
-| 3.4 | Push branch so CI runs for the first time | `TODO` |
+| 3.1 | CI workflow (compile, full suite, synthetic settings) | `CI` — **green both repos** |
+| 3.2 | CI Python pinned to 3.12 to match production | `CI` |
+| 3.3 | CI PostgreSQL pinned to 17 to match Aiven | `CI` |
+| 3.4 | Push branch so CI runs for the first time | `CI` (2026-10-12) |
 | 3.5 | Rewrite `ops/ec2-release.sh` for the real layout | `TODO` — blocked, see below |
 | 3.6 | Frontend-first deploy ordering (the `audio.py` 503 is a breaking change) | `TODO` |
 | 3.7 | Walk one full interview locally — the only pre-production rehearsal available | `TODO` |
@@ -257,6 +257,24 @@ rewrite correctly. Requirements once rewritten:
 - keep the existing refusal to deploy migration changes without an approved procedure
 
 ---
+
+## What CI found on its first run (2026-10-12)
+
+Seven real defects, none of which any amount of local testing had surfaced.
+Both repositories are now green.
+
+| # | Found | Why local testing missed it |
+|---|---|---|
+| 1 | `pycairo` needs `libcairo2-dev`, declared nowhere | This machine already had cairo. **Rebuilding the production host today would fail the same way** |
+| 2 | 21 production npm advisories, 2 critical, 6 high | Nothing had ever run `npm audit` as a gate |
+| 3 | Storing answer audio caught only `ClientError`, so `NoCredentialsError` escaped and turned a storage problem into a **503 that costs a student their answer** | This machine has AWS credentials; CI does not |
+| 4 | `DB_SSL_ENABLED` defaults true, CI's PostgreSQL speaks plaintext | No local PostgreSQL in the loop |
+| 5 | An SSO assertion passed or failed on test ordering, because `logging.basicConfig(force=True)` removes caplog's handler | Ordering happened to be favourable locally |
+| 6 | The migration gate pointed at a different database than the app | — |
+| 7 | **The `interview.difficulty` fix sat after an unconditional `return`** in a migration neutered to a no-op years ago | Only running the real chain could reveal it |
+
+Number 7 is the point of the whole exercise: the fix looked right, reviewed
+right, and did nothing. Applying 47 migrations to an empty database proved it.
 
 ## Completed
 
