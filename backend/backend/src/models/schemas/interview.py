@@ -107,6 +107,13 @@ class InterviewInResponse(BaseSchemaModel):
     status: str
     created_at: datetime.datetime
     resumed: bool
+    interview_mode: str = pydantic.Field(
+        default="practice",
+        description=(
+            "Snapshotted from the job profile at creation, or 'practice' for an "
+            "interview with none. Does not change if the profile's mode changes later."
+        ),
+    )
 
 
 class GeneratedQuestionsInResponse(BaseSchemaModel):

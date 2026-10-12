@@ -376,6 +376,7 @@ class AnalyticsService:
             "role_selected": interview.track,
             "difficulty": interview.difficulty,
             "status": interview.status,
+            "interview_mode": interview.interview_mode,
             "total_score": round(overall_score, 2) if overall_score is not None else None,
             "speech_score": round(speech_total, 2) if speech_total is not None else None,
             "knowledge_score": round(knowledge_total, 2) if knowledge_total is not None else None,
