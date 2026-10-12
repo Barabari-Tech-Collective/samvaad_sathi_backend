@@ -81,6 +81,24 @@ class JobProfileResponse(JobProfileBase):
         validation_alias=pydantic.AliasChoices("totalQuestions", "total_questions"),
         serialization_alias="totalQuestions"
     )
+
+    @pydantic.computed_field(  # type: ignore[prop-decorator]
+        alias="availableDifficulties",
+        description=(
+            "Difficulties a student may actually start, easiest first. Empty when the "
+            "profile is not published or no level has enough questions yet. Clients "
+            "must offer only these, so the minimum-questions rule stays server-owned "
+            "and the picker cannot disagree with what interview creation will accept."
+        ),
+    )
+    @property
+    def availableDifficulties(self) -> List[str]:
+        # The eligibility helpers read `.status` and the four count fields, all
+        # of which this schema carries, so it can be passed in place of the ORM
+        # row without a second query.
+        from src.services.interview_eligibility import available_difficulties
+
+        return available_difficulties(self)
     adminComment: Optional[str] = pydantic.Field(
         default=None,
         alias="adminComment",
