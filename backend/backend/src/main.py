@@ -1,5 +1,8 @@
 import logging
+import traceback
+
 import fastapi
+import fastapi.responses
 import uvicorn
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,10 +16,40 @@ from src.config.events import (
 )
 from src.config.loki_logging import configure_loki_logging
 from src.config.manager import settings
+from src.config.settings.environment import Environment
+
+logger = logging.getLogger(__name__)
+
+
+def verify_sso_configuration() -> None:
+    """Refuse to serve a deployment that cannot complete a student sign-in.
+
+    An empty AUTH_SERVICE_BASE_URL makes the authorize redirect a relative path
+    that resolves back to this service and answers 404, so every student sees a
+    dead "Continue" button with nothing in the logs explaining why. A deployed
+    environment therefore fails to start rather than serving a broken login.
+
+    Local development is still allowed to run without the auth service, because
+    most work does not touch sign-in; the SSO routes report a clear error there
+    instead of emitting an unusable redirect.
+    """
+    if settings.AUTH_SERVICE_BASE_URL.strip():
+        return
+    message = (
+        "AUTH_SERVICE_BASE_URL is not set, so Sampark Saathi SSO cannot build a "
+        "valid authorize redirect and student sign-in would fail."
+    )
+    if settings.ENVIRONMENT != Environment.DEVELOPMENT.value:
+        raise RuntimeError(message)
+    logger.error(
+        "%s Continuing because this is local development; /api/auth/sso routes "
+        "will report that sign-in is unavailable.",
+        message,
+    )
 
 
 def initialize_backend_application() -> fastapi.FastAPI:
-    
+
     logging.basicConfig(
         level=settings.LOGGING_LEVEL,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -28,15 +61,9 @@ def initialize_backend_application() -> fastapi.FastAPI:
     logging.getLogger("src").setLevel(settings.LOGGING_LEVEL)
     configure_loki_logging()
 
-    logging.getLogger(__name__).info(
-    "######## APPLICATION INFO LOG TEST ########"
-    )
-    logging.getLogger(__name__).warning(
-    "######## APPLICATION WARNING LOG TEST ########"
-    )
-
     # Load environment variables from .env if present
     load_dotenv()
+    verify_sso_configuration()
     app = fastapi.FastAPI(**settings.set_backend_app_attributes)  # type: ignore
 
     # Tags metadata for Swagger grouping
@@ -78,6 +105,31 @@ def initialize_backend_application() -> fastapi.FastAPI:
     except Exception:
         # Non-fatal if attributes are not available
         pass
+
+    # Registered before CORSMiddleware so that it ends up *inside* it. Starlette
+    # turns an unhandled exception into a 500 at ServerErrorMiddleware, which sits
+    # outside the CORS layer, so that response carries no Access-Control-Allow-Origin
+    # and the browser reports "blocked by CORS policy" instead of the real failure.
+    # Every server error then looks like a CORS misconfiguration from the frontend,
+    # which is a long detour away from the actual bug. Turning the exception into a
+    # response here means CORSMiddleware still adds its headers and the browser can
+    # read the status.
+    @app.middleware("http")
+    async def return_unhandled_errors_with_cors_headers(request, call_next):
+        try:
+            return await call_next(request)
+        except Exception:
+            logger.exception(
+                "Unhandled error | %s %s", request.method, request.url.path
+            )
+            # Gated on its own opt-in setting rather than on ENVIRONMENT. The
+            # production host runs with ENVIRONMENT=DEV, so keying this on the
+            # environment would have echoed exception text - table names, driver
+            # errors - straight to students' browsers.
+            detail = "Something went wrong. Please try again."
+            if settings.EXPOSE_ERROR_DETAIL:
+                detail = f"{detail} (detail: {traceback.format_exc(limit=0).strip()})"
+            return fastapi.responses.JSONResponse(status_code=500, content={"detail": detail})
 
     # Add middleware BEFORE including routers (middleware is applied in reverse order)
     # CORS middleware should be added first to handle preflight requests

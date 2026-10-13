@@ -1090,6 +1090,12 @@ async def get_student_interviews(
             "knowledge_score": _metric_or_zero(_extract_knowledge_score(report, summary_report), digits=2),
             "duration_seconds": _metric_or_zero(interview.duration_seconds),
             "created_at": interview.created_at,
+            # Practice and Assessment are both scored identically - this is the
+            # only thing that tells a facilitator which kind of sitting a score
+            # came from: a scouting signal to act on, or a formal record.
+            "interview_mode": interview.interview_mode,
+            "proctoring_terminated": interview.proctoring_terminated,
+            "proctoring_violation_reason": interview.proctoring_violation_reason,
         }
         for interview, report, summary_report in rows
     ]
@@ -1342,22 +1348,36 @@ async def get_interviews_table(
     college: str | None = None,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: str | None = fastapi.Query(
+        default=None,
+        description=(
+            "Filter to 'practice' or 'assessment'. Practice and Assessment are "
+            "scored identically; this is how a facilitator tells a scouting "
+            "signal apart from a formal record when scanning the table."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     del current_user
-    base_stmt = _apply_interview_filters(
+
+    def _with_mode_filter(stmt):
+        if interview_mode is not None:
+            return stmt.where(Interview.interview_mode == interview_mode)
+        return stmt
+
+    base_stmt = _with_mode_filter(_apply_interview_filters(
         sqlalchemy.select(Interview.id),
         start_date=start_date,
         end_date=end_date,
         role=role,
         difficulty=difficulty.value if difficulty else None,
         college=college,
-    )
+    ))
     total = (await session.execute(sqlalchemy.select(sqlalchemy.func.count()).select_from(base_stmt.subquery()))).scalar() or 0
 
     offset = (page - 1) * limit
-    rows_stmt = _apply_interview_filters(
+    rows_stmt = _with_mode_filter(_apply_interview_filters(
         sqlalchemy.select(Interview, User.name, User.university, Report, SummaryReport)
         .join(User, User.id == Interview.user_id)
         .outerjoin(Report, Report.interview_id == Interview.id)
@@ -1367,10 +1387,10 @@ async def get_interviews_table(
         role=role,
         difficulty=difficulty.value if difficulty else None,
         college=college,
-    ).order_by(Interview.created_at.desc()).offset(offset).limit(limit)
+    )).order_by(Interview.created_at.desc()).offset(offset).limit(limit)
 
     rows = list((await session.execute(rows_stmt)).all())
-    
+
     from src.services.analytics import _extract_overall_score, _extract_sub_scores
     items = []
     for interview, student_name, university, report, summary_report in rows:
@@ -1387,6 +1407,11 @@ async def get_interviews_table(
             "knowledge_score": _metric_or_zero(knowledge_score, digits=2),
             "duration": _metric_or_zero(interview.duration_seconds),
             "date": interview.created_at,
+            # Both are scored the same way - this is the only field that tells
+            # a facilitator which kind of sitting a row came from.
+            "interview_mode": interview.interview_mode,
+            "proctoring_terminated": interview.proctoring_terminated,
+            "proctoring_violation_reason": interview.proctoring_violation_reason,
         })
     return TablePageResponse(table_type="interviews", items=items, page=page, limit=limit, total=total)
 
@@ -1793,6 +1818,18 @@ async def get_interview_detail_summary(
         KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero(metrics.get("speech_score"), digits=2)),
         KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero(metrics.get("knowledge_score"), digits=2)),
         KpiCard(key="completion_status", label="Completion Status", value=metrics.get("status")),
+        # Scored identically to Assessment - this is the only card that tells a
+        # reviewer whether this sitting is a scouting signal or a formal record.
+        KpiCard(key="interview_mode", label="Interview Mode", value=metrics.get("interview_mode")),
+        KpiCard(
+            key="proctoring_remark",
+            label="Proctoring",
+            value=(
+                f"Ended early - {metrics.get('proctoring_violation_reason')}"
+                if metrics.get("proctoring_terminated")
+                else "No violation"
+            ),
+        ),
     ]
     return DashboardOverviewResponse(kpis=kpis)
 

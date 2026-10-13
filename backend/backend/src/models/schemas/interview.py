@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from typing import Literal
 
 import pydantic
 
@@ -107,6 +108,13 @@ class InterviewInResponse(BaseSchemaModel):
     status: str
     created_at: datetime.datetime
     resumed: bool
+    interview_mode: str = pydantic.Field(
+        default="practice",
+        description=(
+            "Snapshotted from the job profile at creation, or 'practice' for an "
+            "interview with none. Does not change if the profile's mode changes later."
+        ),
+    )
 
 
 class GeneratedQuestionsInResponse(BaseSchemaModel):
@@ -120,6 +128,10 @@ class GeneratedQuestionsInResponse(BaseSchemaModel):
     llm_model: str | None = None
     llm_latency_ms: int | None = None
     llm_error: str | None = None
+    interview_mode: str = pydantic.Field(
+        default="practice",
+        description="Snapshotted on the interview at creation. See Interview.interview_mode.",
+    )
 
 
 class StructurePracticeQuestionsResponse(BaseSchemaModel):
@@ -202,6 +214,23 @@ class CompleteInterviewRequest(BaseSchemaModel):
     interview_id: int
 
 
+#: What the client is allowed to report. Anything else is a 422, not a free-text
+#: reason field - the facilitator-visible remark reads from a fixed, known set.
+ProctoringViolationReason = Literal["tab_switch", "fullscreen_exit"]
+
+
+class ReportProctoringViolationRequest(BaseSchemaModel):
+    interview_id: int
+    reason: ProctoringViolationReason
+
+
+class ProctoringViolationResponse(BaseSchemaModel):
+    interview_id: int
+    status: str
+    proctoring_terminated: bool
+    proctoring_violation_reason: str | None = None
+
+
 class ResumeInterviewRequest(BaseSchemaModel):
     interview_id: int = pydantic.Field(description="ID of the interview to resume")
 
@@ -214,6 +243,14 @@ class ResumeInterviewResponse(BaseSchemaModel):
     total_questions: int = pydantic.Field(description="Total number of questions in the interview")
     attempted_questions: int = pydantic.Field(description="Number of questions with attempts")
     remaining_questions: int = pydantic.Field(description="Number of questions without attempts")
+    interview_mode: str = pydantic.Field(
+        default="practice",
+        description=(
+            "Snapshotted on the interview at creation. A resume can't rely on the "
+            "URL the client happened to arrive with, so this is how the client "
+            "learns whether to activate proctoring when continuing a sitting."
+        ),
+    )
 
 
 class QuestionSupplementsResponse(BaseSchemaModel):

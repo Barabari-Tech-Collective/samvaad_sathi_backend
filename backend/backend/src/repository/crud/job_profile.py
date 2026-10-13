@@ -4,6 +4,30 @@ import sqlalchemy
 from sqlalchemy import select, func
 from src.models.db.job_profile import JobProfile, JobProfileStatus
 from src.repository.crud.base import BaseCRUDRepository
+from src.services.interview_eligibility import LEVEL_TO_DIFFICULTY
+
+
+def _difficulty_for_level(level: int) -> str:
+    """Derive the difficulty label from the level, never trust a supplied one.
+
+    `job_profile_question` carries both `level` (int) and `difficulty` (str) for
+    the same fact, with no constraint tying them together. Everything that
+    serves an interview filters on `level`, while facilitator-facing views show
+    `difficulty` - so a row where they disagree means a facilitator believes
+    they published at one level while students sit the questions at another.
+    The manual add-question endpoint validated the level but passed the
+    difficulty straight through, which made that reachable.
+
+    Deriving here puts the invariant below every writer, so no caller can create
+    a row where the two disagree.
+    """
+    try:
+        return LEVEL_TO_DIFFICULTY[level]
+    except KeyError:
+        raise ValueError(
+            f"Invalid question level {level!r}; expected one of {sorted(LEVEL_TO_DIFFICULTY)}"
+        ) from None
+
 
 class JobProfileCRUDRepository(BaseCRUDRepository):
     # --- feature/roles-page-api methods ---
@@ -59,6 +83,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         additional_context: Optional[str] = None,
         category: Optional[str] = None,
         employment_type: Optional[str] = None,
+        interview_mode: str = "assessment",
         created_by: Optional[int] = None,
     ) -> JobProfile:
         new_profile = JobProfile(
@@ -70,6 +95,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             additional_context=additional_context,
             category=category,
             employment_type=employment_type,
+            interview_mode=interview_mode,
             status=JobProfileStatus.DRAFT,
             created_by=created_by,
         )
@@ -191,7 +217,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
                 job_profile_id=q["job_profile_id"],
                 question_text=q["question_text"],
                 level=q["level"],
-                difficulty=q["difficulty"],
+                difficulty=_difficulty_for_level(q["level"]),
                 question_type=q.get("question_type", "theoretical"),
                 is_ai_generated=q.get("is_ai_generated", True),
                 keywords=q.get("keywords") or [],
@@ -222,7 +248,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         job_profile_id: int,
         question_text: str,
         level: int,
-        difficulty: str,
+        difficulty: str | None = None,
         question_type: str = "theoretical",
         is_ai_generated: bool = False,
         keywords: list[str] | None = None,
@@ -230,12 +256,18 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         expected_answer: str | None = None,
         example_output: str | None = None
     ) -> JobProfileQuestion:
+        """`difficulty` is accepted for call compatibility but always derived.
+
+        See _difficulty_for_level: the two columns describe the same thing, and
+        a caller-supplied difficulty could disagree with the level everything
+        else filters on.
+        """
         from src.models.db.job_profile_question import JobProfileQuestion
         obj = JobProfileQuestion(
             job_profile_id=job_profile_id,
             question_text=question_text,
             level=level,
-            difficulty=difficulty,
+            difficulty=_difficulty_for_level(level),
             question_type=question_type,
             is_ai_generated=is_ai_generated,
             keywords=keywords or [],

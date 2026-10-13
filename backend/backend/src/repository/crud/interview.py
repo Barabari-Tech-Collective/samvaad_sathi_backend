@@ -20,7 +20,25 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         return query.scalar()  # type: ignore
 
     async def create_interview(self, *, user_id: int, track: str, difficulty: str = "medium", job_profile_id: int | None = None) -> Interview:
-        new_interview = Interview(user_id=user_id, track=track, difficulty=difficulty, status="active", job_profile_id=job_profile_id)
+        # Derived here, not accepted as a parameter, so every caller - v1, v2,
+        # the non-tech flow - gets a correct snapshot without each having to
+        # remember to look it up and pass it through themselves.
+        interview_mode = "practice"
+        if job_profile_id is not None:
+            from src.models.db.job_profile import JobProfile
+
+            profile = await self.async_session.get(JobProfile, job_profile_id)
+            if profile is not None:
+                interview_mode = profile.interview_mode
+
+        new_interview = Interview(
+            user_id=user_id,
+            track=track,
+            difficulty=difficulty,
+            status="active",
+            job_profile_id=job_profile_id,
+            interview_mode=interview_mode,
+        )
         self.async_session.add(new_interview)
         await self.async_session.commit()
         await self.async_session.refresh(new_interview)
@@ -51,6 +69,44 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         interview.status = "completed"
         interview.completed_at = datetime.datetime.now(datetime.timezone.utc)
         interview.duration_seconds = duration_seconds
+        await self.async_session.commit()
+        await self.async_session.refresh(interview)
+        return interview
+
+    async def mark_terminated_for_proctoring(self, *, interview_id: int, reason: str) -> Interview | None:
+        """End an interview early because the student left the tab or fullscreen.
+
+        Mirrors mark_completed's duration calculation - a terminated sitting
+        can still have real answered questions worth timing - but status is
+        "terminated", never "completed", so nothing downstream can mistake an
+        ended attempt for a finished one.
+        """
+        stmt = sqlalchemy.select(Interview).where(Interview.id == interview_id)
+        query = await self.async_session.execute(statement=stmt)
+        interview: Interview | None = query.scalar()  # type: ignore
+        if not interview:
+            return None
+
+        duration_stmt = (
+            sqlalchemy.select(
+                sqlalchemy.func.min(QuestionAttempt.created_at).label("start_at"),
+                sqlalchemy.func.max(QuestionAttempt.created_at).label("end_at"),
+            )
+            .where(QuestionAttempt.interview_id == interview_id)
+        )
+        duration_row = (await self.async_session.execute(duration_stmt)).one()
+        start_at = duration_row.start_at
+        end_at = duration_row.end_at
+
+        duration_seconds: int | None = None
+        if start_at is not None and end_at is not None:
+            duration_seconds = max(0, int((end_at - start_at).total_seconds()))
+
+        interview.status = "terminated"
+        interview.completed_at = datetime.datetime.now(datetime.timezone.utc)
+        interview.duration_seconds = duration_seconds
+        interview.proctoring_terminated = True
+        interview.proctoring_violation_reason = reason
         await self.async_session.commit()
         await self.async_session.refresh(interview)
         return interview

@@ -6,12 +6,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
-from src.models.schemas.interview import InterviewCreate, InterviewInResponse, GeneratedQuestionsInResponse, InterviewsListResponse, InterviewItem, QuestionsListResponse, QuestionAttemptsListResponse, QuestionAttemptItem, GenerateQuestionsRequest, CreateAttemptResponse, InterviewQuestionOut, CompleteInterviewRequest, CreateAttemptRequest, InterviewItemWithSummary, InterviewsListWithSummaryResponse, ResumeInterviewResponse, ResumeInterviewRequest
+from src.models.schemas.interview import InterviewCreate, InterviewInResponse, GeneratedQuestionsInResponse, InterviewsListResponse, InterviewItem, QuestionsListResponse, QuestionAttemptsListResponse, QuestionAttemptItem, GenerateQuestionsRequest, CreateAttemptResponse, InterviewQuestionOut, CompleteInterviewRequest, CreateAttemptRequest, InterviewItemWithSummary, InterviewsListWithSummaryResponse, ResumeInterviewResponse, ResumeInterviewRequest, ReportProctoringViolationRequest, ProctoringViolationResponse
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
+from src.services.question_snapshot import lock_question_generation, question_items_from_persisted
 from src.services.syllabus_service import syllabus_service
 from src.services.whisper import strip_word_level_data
 from src.services.static_questions import get_static_questions
@@ -58,6 +59,7 @@ async def create_or_resume_interview(
             status=active.status,
             created_at=active.created_at,
             resumed=True,
+            interview_mode=active.interview_mode,
         )
 
     difficulty = (payload.difficulty or "medium").lower()
@@ -85,8 +87,9 @@ async def create_or_resume_interview(
         status=interview.status,
         created_at=interview.created_at,
         resumed=False,
+        interview_mode=interview.interview_mode,
     )
-    
+
     logger.info(
         "POST /interviews/create NEW RESPONSE | User=%s | Interview=%s | Response=\n%s",
         current_user.id,
@@ -158,6 +161,25 @@ async def generate_questions(
         interview = await interview_repo.get_active_by_user(user_id=current_user.id)
         if interview is None:
             raise fastapi.HTTPException(status_code=fastapi.status.HTTP_400_BAD_REQUEST, detail="No active interview to generate questions for")
+
+    # This endpoint has no job-profile awareness: it goes straight to the
+    # syllabus and the LLM. Serving a curated interview from here would assess a
+    # student against a facilitator's role on questions the facilitator never
+    # wrote - and because question sets are immutable once persisted, whichever
+    # generator ran first would decide that permanently. The student app only
+    # calls the v2 generator; this guards the endpoint against other callers.
+    if getattr(interview, "job_profile_id", None):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail=(
+                "This interview is based on a facilitator's role and must be generated "
+                "through /v2/interviews/generate-questions, which serves their published questions."
+            ),
+        )
+
+    # Serialize against the other generators (interviews_v2) before reading, or
+    # two requests both see no questions and both insert a full set.
+    await lock_question_generation(question_repo.async_session, interview_id=interview.id)
 
     # Check if questions already exist for this interview (idempotent)
     existing = await question_repo.list_by_interview(interview_id=interview.id)
@@ -265,50 +287,22 @@ async def generate_questions(
             questions_data=questions_data,
             resume_used=payload.use_resume
         )
-        
-        # Prepare response data for newly generated questions
-        response_items = []
-        for idx, question_obj in enumerate(persisted):
-            structured = items[idx] if items and idx < len(items) else None
-            response_items.append({
-                "interviewQuestionId": question_obj.id,
-                "text": (structured or {}).get("text") or question_obj.text,
-                "topic": (structured or {}).get("topic") or question_obj.topic,
-                "difficulty": (structured or {}).get("difficulty"),
-                "category": (structured or {}).get("category") or question_obj.category,
-                "isFollowUp": getattr(question_obj, "is_follow_up", False),
-                "parentQuestionId": getattr(question_obj, "parent_question_id", None),
-                "followUpStrategy": getattr(question_obj, "follow_up_strategy", None),
-            })
 
         qs = {
-            "questions": questions,
+            "questions": [q.text for q in persisted],
             "llm_error": llm_error,
             "latency_ms": latency_ms,
             "llm_model": llm_model,
-            "items": response_items,
+            "items": question_items_from_persisted(persisted, difficulty=interview.difficulty),
         }
     else:
         # Questions already exist, prepare response data from existing questions
-        existing_items = [
-            {
-                "interviewQuestionId": q.id,
-                "text": q.text,
-                "topic": q.topic,
-                "difficulty": None,
-                "category": q.category,
-                "isFollowUp": getattr(q, "is_follow_up", False),
-                "parentQuestionId": getattr(q, "parent_question_id", None),
-                "followUpStrategy": getattr(q, "follow_up_strategy", None),
-            }
-            for q in existing
-        ]
         qs = {
             "questions": [q.text for q in existing],
             "llm_error": None,
             "latency_ms": None,
             "llm_model": None,
-            "items": existing_items,
+            "items": question_items_from_persisted(existing, difficulty=interview.difficulty),
         }
 
     response = GeneratedQuestionsInResponse(
@@ -322,6 +316,7 @@ async def generate_questions(
         llm_model=qs.get("llm_model"),  # type: ignore[union-attr]
         llm_latency_ms=qs.get("latency_ms"),  # type: ignore[union-attr]
         llm_error=qs.get("llm_error"),  # type: ignore[union-attr]
+        interview_mode=interview.interview_mode,
     )
     logger.info(
         "POST /interviews/generate-questions FULL RESPONSE PAYLOAD | Interview=%s | Cached=%s | Response=\n%s",
@@ -374,6 +369,82 @@ async def complete_interview(
         "status": updated.status if updated else None,
         "message": "Interview marked as completed" if updated else "No update performed",
     }
+
+
+@router.post(
+    path="/interviews/proctoring-violation",
+    name="interviews:report-proctoring-violation",
+    response_model=ProctoringViolationResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="End an assessment interview early due to a proctoring violation",
+    description=(
+        "Ends the specified interview immediately because the student left the "
+        "tab/window or exited fullscreen during a proctored assessment. Only "
+        "valid for an interview_mode='assessment' interview - mode is read from "
+        "the interview's own stored snapshot, not trusted from the client, so a "
+        "client that fakes this call for a practice interview has no effect."
+    ),
+)
+async def report_proctoring_violation(
+    payload: ReportProctoringViolationRequest,
+    current_user=fastapi.Depends(get_current_user),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
+):
+    interview = await interview_repo.get_by_id(interview_id=payload.interview_id)
+    if interview is None or interview.user_id != current_user.id:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+
+    if interview.interview_mode != "assessment":
+        # Practice is deliberately low-stakes - leaving the tab must never end
+        # one. A client that sends this for a practice interview either has a
+        # bug or is lying about the mode; either way, nothing happens.
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="Proctoring does not apply to a practice interview.",
+        )
+
+    if interview.status in ("terminated", "completed"):
+        # Idempotent: a retried request (flaky network, duplicate event) must
+        # not error, and must not downgrade an interview that finished
+        # normally into a terminated one.
+        return ProctoringViolationResponse(
+            interview_id=interview.id,
+            status=interview.status,
+            proctoring_terminated=interview.proctoring_terminated,
+            proctoring_violation_reason=interview.proctoring_violation_reason,
+        )
+
+    if interview.status != "active":
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+            detail="Only an active interview can be ended for a proctoring violation.",
+        )
+
+    updated = await interview_repo.mark_terminated_for_proctoring(
+        interview_id=interview.id, reason=payload.reason
+    )
+    if updated is None:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+
+    await track_analytics_event(
+        interview_repo.async_session,
+        event_type="interview_proctoring_terminated",
+        user_id=current_user.id,
+        interview_id=updated.id,
+        event_data={
+            "track": updated.track,
+            "difficulty": updated.difficulty,
+            "reason": payload.reason,
+            "api": "interviews.report_proctoring_violation",
+        },
+    )
+
+    return ProctoringViolationResponse(
+        interview_id=updated.id,
+        status=updated.status,
+        proctoring_terminated=updated.proctoring_terminated,
+        proctoring_violation_reason=updated.proctoring_violation_reason,
+    )
 
 
 @router.get(
@@ -568,6 +639,17 @@ async def create_question_attempt(
     interview = await interview_repo.get_by_id(interview_id=interview_id)
     if interview is None or interview.user_id != current_user.id:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+
+    if interview.status != "active":
+        # The gap a proctoring termination would otherwise leave open: ending
+        # an interview client-side means nothing if the API still accepts new
+        # answers for it. "completed" is included too - this endpoint never
+        # checked status before, so a finished interview could already take
+        # new attempts via a direct call.
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="This interview has ended and can no longer accept answers.",
+        )
 
     # Verify question exists and belongs to the interview
     question = await question_repo.get_by_id(question_id=question_id)
@@ -809,6 +891,7 @@ async def resume_interview(
         total_questions=total_questions,
         attempted_questions=attempted_count,
         remaining_questions=len(questions_without_attempts),
+        interview_mode=interview.interview_mode,
     )
 
 

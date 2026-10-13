@@ -125,6 +125,106 @@ def upload_resume_to_s3(file_bytes: bytes, user_id: int, filename: str, content_
         logger.error(f"Failed to upload resume to S3: {e}")
         return None
 
+#: Prefix for student answer recordings. Kept distinct from tts-audio/ and
+#: resumes/ so a bucket lifecycle or retention rule can target voice recordings
+#: specifically without touching anything else.
+ANSWER_AUDIO_PREFIX = "Samvaad-Saathi/answer-audio"
+
+
+def answer_audio_s3_key(user_id: int, question_attempt_id: int, extension: str = ".wav") -> str:
+    """Stable, non-guessable key for one student's answer recording."""
+    return (
+        f"{ANSWER_AUDIO_PREFIX}/user_{user_id}/attempt_{question_attempt_id}"
+        f"_{uuid.uuid4().hex[:12]}{extension}"
+    )
+
+
+async def upload_answer_audio_to_s3(
+    audio_bytes: bytes,
+    user_id: int,
+    question_attempt_id: int,
+    extension: str = ".wav",
+) -> Optional[str]:
+    """Stores a student's answer recording and returns its object key.
+
+    Answer audio was previously written to a temporary file that the request
+    deleted on its way out, so a failed transcription lost the recording for
+    good, an answer could never be re-transcribed after a provider outage, and
+    a disputed score could not be checked against what the student actually
+    said. Storing it durably is also what allows transcription to move off the
+    request path at all - a background worker needs something to fetch.
+
+    Returns an object key rather than a URL, like resumes and unlike TTS audio:
+    this is personal data and must only ever be reachable through a short-lived
+    presigned URL, never a public link.
+
+    boto3 is synchronous, so the call is run in a worker thread. Awaiting it on
+    the event loop would stall every other request in this process for the
+    duration of the upload - and with one server worker, that is all of them.
+    """
+    if not s3_client or not BUCKET_NAME:
+        logger.error("S3 client is not configured; cannot store answer audio.")
+        return None
+
+    import asyncio
+
+    object_key = answer_audio_s3_key(user_id, question_attempt_id, extension)
+
+    def _put() -> None:
+        s3_client.put_object(
+            Bucket=BUCKET_NAME,
+            Key=object_key,
+            Body=audio_bytes,
+            ContentType="audio/wav",
+            # Student voice recordings are personal data; encrypt at rest.
+            ServerSideEncryption="AES256",
+        )
+
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, _put)
+        logger.info(
+            "Stored answer audio | QuestionAttempt=%s | Key=%s",
+            question_attempt_id,
+            object_key,
+        )
+        return object_key
+    except Exception as error:  # noqa: BLE001
+        # Deliberately broad. Catching only ClientError let NoCredentialsError
+        # and EndpointConnectionError - both BotoCoreError, not ClientError -
+        # escape into the upload route, which treats any exception as a save
+        # failure and answers 503. Missing or expired credentials would then
+        # cost a student their answer over a storage problem that does not
+        # affect transcription at all.
+        logger.error(
+            "Failed to store answer audio | QuestionAttempt=%s | %s",
+            question_attempt_id,
+            error,
+        )
+        return None
+
+
+async def fetch_answer_audio_from_s3(object_key: str) -> Optional[bytes]:
+    """Reads back a stored answer recording, for the transcription worker."""
+    if not s3_client or not BUCKET_NAME:
+        logger.error("S3 client is not configured; cannot read answer audio.")
+        return None
+
+    import asyncio
+
+    def _get() -> bytes:
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=object_key)
+        return response["Body"].read()
+
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, _get)
+    except Exception as error:  # noqa: BLE001
+        # Broad for the same reason as the upload above: credential and
+        # endpoint failures are BotoCoreError rather than ClientError, and the
+        # worker must record a transcription failure rather than crash.
+        logger.error("Failed to read answer audio | Key=%s | %s", object_key, error)
+        return None
+
+
 def get_presigned_url(object_key: str, expiration: int = 3600) -> Optional[str]:
     """
     Generates a short-lived presigned URL to securely download a file.
