@@ -110,7 +110,7 @@ async def test_is_team_authorized_user_grants_global_admin():
 
 def test_team_create_requires_name():
     with pytest.raises(pydantic.ValidationError):
-        TeamCreate()
+        TeamCreate.model_validate({})
 
 
 def test_team_create_accepts_valid_payload():
@@ -138,7 +138,7 @@ def test_team_response_serialization():
 
 def test_team_member_create_requires_role_name_and_email():
     with pytest.raises(pydantic.ValidationError):
-        TeamMemberCreate(access_role="Facilitator")
+        TeamMemberCreate.model_validate({"access_role": "Facilitator"})
 
     member = TeamMemberCreate(
         name="Alice Smith",
