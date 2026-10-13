@@ -12,6 +12,7 @@ from src.models.db.question_attempt import (
     TERMINAL_TRANSCRIPTION_STATUSES,
     TranscriptionStatus,
 )
+from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.services.audio_processor import validate_audio_file, save_audio_file, get_audio_duration_estimate, cleanup_temp_audio_file
 from src.services.whisper import transcribe_audio_with_whisper, validate_transcription_language, extract_word_count, strip_word_level_data
@@ -40,6 +41,7 @@ async def transcribe_audio_answer(
     file: UploadFile = File(..., description="Audio file to transcribe. Supported: .mp3, .wav, .m4a, .flac (max 25MB)"),
     current_user = fastapi.Depends(get_current_user),
     question_repo: QuestionAttemptCRUDRepository = fastapi.Depends(get_repository(repo_type=QuestionAttemptCRUDRepository)),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
 ) -> AudioTranscriptionResponse:
     """
     Main endpoint for audio transcription workflow:
@@ -80,6 +82,17 @@ async def transcribe_audio_answer(
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
             detail="Question attempt not found or access denied"
+        )
+
+    # A terminated or completed interview must not accept a late answer for a
+    # question attempt that was already created before it ended - otherwise a
+    # proctoring termination only locks the student out of *starting* new
+    # questions, not from finishing the one they were on when they left.
+    parent_interview = await interview_repo.get_by_id(interview_id=question_attempt.interview_id)
+    if parent_interview is not None and parent_interview.status != "active":
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="This interview has ended and can no longer accept answers.",
         )
 
     # Step 2: Validate audio file

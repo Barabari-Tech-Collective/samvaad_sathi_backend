@@ -482,6 +482,7 @@ async def generate_questions_v2(
                 llm_model=qs.get("llm_model"),
                 llm_latency_ms=qs.get("latency_ms"),
                 llm_error=qs.get("llm_error"),
+                interview_mode=interview.interview_mode,
             )
 
             # Static Resume Warning Response
@@ -699,6 +700,7 @@ async def generate_questions_v2(
         llm_model=str(qs.get("llm_model")) if qs.get("llm_model") else None,
         llm_latency_ms=latency_val,
         llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
+        interview_mode=interview.interview_mode,
     )
 
     # =========================================================================
@@ -923,6 +925,7 @@ async def generate_non_tech_questions_v2(
         llm_model=str(qs.get("llm_model")) if qs.get("llm_model") else None,
         llm_latency_ms=latency_val,
         llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
+        interview_mode=interview.interview_mode,
     )
 
 
