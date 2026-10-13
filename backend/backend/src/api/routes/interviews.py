@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.interview import InterviewCreate, InterviewInResponse, GeneratedQuestionsInResponse, InterviewsListResponse, InterviewItem, QuestionsListResponse, QuestionAttemptsListResponse, QuestionAttemptItem, GenerateQuestionsRequest, CreateAttemptResponse, InterviewQuestionOut, CompleteInterviewRequest, CreateAttemptRequest, InterviewItemWithSummary, InterviewsListWithSummaryResponse, ResumeInterviewResponse, ResumeInterviewRequest, ResumeQuestionOut, ReportProctoringViolationRequest, ProctoringViolationResponse
+from src.models.schemas.interview import PauseInterviewRequest, PauseInterviewResponse
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
 from src.repository.crud.question import AttemptIdempotencyConflict, QuestionAttemptCRUDRepository
@@ -21,6 +22,7 @@ from src.services.question_supplements import (
     serialize_question_supplement,
 )
 from src.services.analytics_events import track_analytics_event
+from src.services.interview_lifecycle import interview_has_expired
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,7 @@ async def create_or_resume_interview(
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
 ) -> InterviewInResponse:
     # Check if the user has an active session; if so, resume instead of creating a new one
-    active = await interview_repo.get_active_by_user(user_id=current_user.id)
+    active = await interview_repo.get_resumable_by_user(user_id=current_user.id)
     if active is not None and active.track == payload.track:
         return InterviewInResponse(
             interview_id=active.id,
@@ -60,6 +62,8 @@ async def create_or_resume_interview(
             created_at=active.created_at,
             resumed=True,
             interview_mode=active.interview_mode,
+            paused_at=getattr(active, "paused_at", None),
+            expires_at=getattr(active, "expires_at", None),
         )
 
     difficulty = (payload.difficulty or "medium").lower()
@@ -88,6 +92,8 @@ async def create_or_resume_interview(
         created_at=interview.created_at,
         resumed=False,
         interview_mode=interview.interview_mode,
+        paused_at=getattr(interview, "paused_at", None),
+        expires_at=getattr(interview, "expires_at", None),
     )
 
     logger.info(
@@ -98,6 +104,66 @@ async def create_or_resume_interview(
     )
 
     return res
+
+
+@router.post(
+    path="/interviews/pause",
+    name="interviews:pause",
+    response_model=PauseInterviewResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Save and exit a Practice interview",
+)
+async def pause_interview(
+    payload: PauseInterviewRequest,
+    current_user=fastapi.Depends(get_current_user),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
+) -> PauseInterviewResponse:
+    interview = await interview_repo.get_by_id(interview_id=payload.interview_id)
+    if interview is None or interview.user_id != current_user.id:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="Interview not found",
+        )
+    if interview.interview_mode != "practice":
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="Save and exit is available only for Practice interviews.",
+        )
+    if interview.status == "expired" or (
+        interview.status in ("active", "paused") and interview_has_expired(interview)
+    ):
+        await interview_repo.mark_expired(interview_id=interview.id)
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_410_GONE,
+            detail="This Practice interview has expired. Start a new interview.",
+        )
+    if interview.status == "paused":
+        paused = interview
+    elif interview.status == "active":
+        paused = await interview_repo.mark_paused(interview_id=interview.id)
+        if paused is None:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_409_CONFLICT,
+                detail="The interview changed while it was being paused. Try again.",
+            )
+        await track_analytics_event(
+            interview_repo.async_session,
+            event_type="interview_paused",
+            user_id=current_user.id,
+            interview_id=paused.id,
+            event_data={"api": "interviews.pause"},
+        )
+    else:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="Only an active Practice interview can be paused.",
+        )
+    return PauseInterviewResponse(
+        interview_id=paused.id,
+        status="paused",
+        paused_at=paused.paused_at,
+        expires_at=paused.expires_at,
+    )
 
 
 @router.post(
@@ -348,6 +414,14 @@ async def complete_interview(
             "status": interview.status,
             "message": "Interview already completed",
         }
+    if interview.status == "expired" or (
+        interview.status in ("active", "paused") and interview_has_expired(interview)
+    ):
+        await interview_repo.mark_expired(interview_id=interview.id)
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_410_GONE,
+            detail="This Practice interview has expired. Start a new interview.",
+        )
     if interview.status != "active":
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_400_BAD_REQUEST, detail="Only active interviews can be completed")
     updated = await interview_repo.mark_completed(interview_id=interview.id)
@@ -640,6 +714,15 @@ async def create_question_attempt(
     if interview is None or interview.user_id != current_user.id:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
 
+    if interview.status == "expired" or (
+        interview.status in ("active", "paused") and interview_has_expired(interview)
+    ):
+        await interview_repo.mark_expired(interview_id=interview.id)
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_410_GONE,
+            detail="This Practice interview has expired. Start a new interview.",
+        )
+
     if interview.status != "active":
         # The gap a proctoring termination would otherwise leave open: ending
         # an interview client-side means nothing if the API still accepts new
@@ -848,6 +931,34 @@ async def resume_interview(
     interview = await interview_repo.get_by_id_and_user(request.interview_id, current_user.id)
     if not interview:
         raise fastapi.HTTPException(status_code=404, detail="Interview not found or access denied")
+    if interview.status == "expired" or (
+        interview.status in ("active", "paused") and interview_has_expired(interview)
+    ):
+        await interview_repo.mark_expired(interview_id=interview.id)
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_410_GONE,
+            detail="This Practice interview has expired. Start a new interview.",
+        )
+    if interview.status == "paused":
+        if interview.interview_mode != "practice":
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_409_CONFLICT,
+                detail="Only Practice interviews can be resumed from a paused state.",
+            )
+        resumed_interview = await interview_repo.mark_resumed(interview_id=interview.id)
+        if resumed_interview is None:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_409_CONFLICT,
+                detail="The interview changed while it was being resumed. Try again.",
+            )
+        interview = resumed_interview
+        await track_analytics_event(
+            interview_repo.async_session,
+            event_type="interview_resumed",
+            user_id=current_user.id,
+            interview_id=interview.id,
+            event_data={"api": "interviews.resume"},
+        )
 
     # Resume is server-authoritative. An attempt can exist before its answer is
     # saved, so excluding every question with an attempt can skip the exact
@@ -927,6 +1038,8 @@ async def resume_interview(
         remaining_questions=max(0, total_questions - answered_count),
         resume_question_index=resume_question_index,
         status=interview.status,
+        paused_at=getattr(interview, "paused_at", None),
+        expires_at=getattr(interview, "expires_at", None),
         interview_mode=interview.interview_mode,
     )
 

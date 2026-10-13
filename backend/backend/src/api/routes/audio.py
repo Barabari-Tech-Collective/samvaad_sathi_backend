@@ -23,11 +23,35 @@ from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.services.audio_processor import validate_audio_file, get_audio_duration_estimate
 from src.services.whisper import transcribe_audio_with_whisper, validate_transcription_language, extract_word_count, strip_word_level_data
 from src.services.follow_up import FollowUpService
+from src.services.interview_lifecycle import interview_has_expired
 from src.services.s3_service import upload_answer_audio_to_s3
 
 
 router = fastapi.APIRouter(prefix="", tags=["audio"])
 logger = logging.getLogger(__name__)
+
+
+async def _require_active_interview(question_attempt, interview_repo) -> None:
+    parent_interview = await interview_repo.get_by_id(
+        interview_id=question_attempt.interview_id
+    )
+    if parent_interview is not None and (
+        parent_interview.status == "expired"
+        or (
+            parent_interview.status in ("active", "paused")
+            and interview_has_expired(parent_interview)
+        )
+    ):
+        await interview_repo.mark_expired(interview_id=parent_interview.id)
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_410_GONE,
+            detail="This Practice interview has expired. Start a new interview.",
+        )
+    if parent_interview is not None and parent_interview.status != "active":
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="This interview is paused or has ended and cannot accept answers.",
+        )
 
 
 @router.post(
@@ -94,12 +118,7 @@ async def transcribe_audio_answer(
     # question attempt that was already created before it ended - otherwise a
     # proctoring termination only locks the student out of *starting* new
     # questions, not from finishing the one they were on when they left.
-    parent_interview = await interview_repo.get_by_id(interview_id=question_attempt.interview_id)
-    if parent_interview is not None and parent_interview.status != "active":
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_409_CONFLICT,
-            detail="This interview has ended and can no longer accept answers.",
-        )
+    await _require_active_interview(question_attempt, interview_repo)
 
     # Step 2: Validate audio file
     try:
@@ -326,6 +345,9 @@ async def save_text_answer(
     question_repo: QuestionAttemptCRUDRepository = fastapi.Depends(
         get_repository(repo_type=QuestionAttemptCRUDRepository)
     ),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
 ) -> TextAnswerResponse:
     attempt = await question_repo.get_by_id_and_user(
         question_attempt_id=payload.question_attempt_id, user_id=current_user.id
@@ -335,6 +357,7 @@ async def save_text_answer(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
             detail="Question attempt not found or access denied",
         )
+    await _require_active_interview(attempt, interview_repo)
     normalized = " ".join(payload.text.split())
     if not normalized:
         raise fastapi.HTTPException(

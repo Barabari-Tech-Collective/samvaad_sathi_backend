@@ -7,6 +7,8 @@ from src.models.db.question_attempt import QuestionAttempt
 from src.models.db.summary_report import SummaryReport
 from src.repository.crud.base import BaseCRUDRepository
 
+PRACTICE_SESSION_TTL = datetime.timedelta(days=7)
+
 
 class InterviewCRUDRepository(BaseCRUDRepository):
     async def get_active_by_user(self, *, user_id: int) -> Interview | None:
@@ -14,6 +16,18 @@ class InterviewCRUDRepository(BaseCRUDRepository):
             sqlalchemy.select(Interview)
             .where(Interview.user_id == user_id)
             .where(Interview.status == "active")
+            .order_by(Interview.id.desc())
+        )
+        query = await self.async_session.execute(statement=stmt)
+        return query.scalar()  # type: ignore
+
+    async def get_resumable_by_user(self, *, user_id: int) -> Interview | None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stmt = (
+            sqlalchemy.select(Interview)
+            .where(Interview.user_id == user_id)
+            .where(Interview.status.in_(("active", "paused")))
+            .where(sqlalchemy.or_(Interview.expires_at.is_(None), Interview.expires_at > now))
             .order_by(Interview.id.desc())
         )
         query = await self.async_session.execute(statement=stmt)
@@ -38,11 +52,57 @@ class InterviewCRUDRepository(BaseCRUDRepository):
             status="active",
             job_profile_id=job_profile_id,
             interview_mode=interview_mode,
+            expires_at=(
+                datetime.datetime.now(datetime.timezone.utc) + PRACTICE_SESSION_TTL
+                if interview_mode == "practice"
+                else None
+            ),
         )
         self.async_session.add(new_interview)
         await self.async_session.commit()
         await self.async_session.refresh(new_interview)
         return new_interview
+
+    async def mark_paused(self, *, interview_id: int) -> Interview | None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stmt = (
+            sqlalchemy.update(Interview)
+            .where(Interview.id == interview_id, Interview.status == "active")
+            .values(status="paused", paused_at=now, expires_at=now + PRACTICE_SESSION_TTL)
+            .returning(Interview)
+        )
+        interview = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if interview is not None:
+            await self.async_session.refresh(interview)
+        return interview
+
+    async def mark_resumed(self, *, interview_id: int) -> Interview | None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stmt = (
+            sqlalchemy.update(Interview)
+            .where(Interview.id == interview_id, Interview.status == "paused")
+            .values(status="active", paused_at=None, expires_at=now + PRACTICE_SESSION_TTL)
+            .returning(Interview)
+        )
+        interview = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if interview is not None:
+            await self.async_session.refresh(interview)
+        return interview
+
+    async def mark_expired(self, *, interview_id: int) -> Interview | None:
+        stmt = (
+            sqlalchemy.update(Interview)
+            .where(Interview.id == interview_id, Interview.status.in_(("active", "paused")))
+            .values(status="expired", paused_at=None)
+            .returning(Interview)
+        )
+        interview = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if interview is not None:
+            await self.async_session.refresh(interview)
+        return interview
 
     async def mark_completed(self, *, interview_id: int) -> Interview | None:
         stmt = sqlalchemy.select(Interview).where(Interview.id == interview_id)
@@ -229,5 +289,4 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         query = await self.async_session.execute(statement=stmt)
         count = query.scalar()
         return count or 0
-
 

@@ -25,6 +25,12 @@ class Interview(Base):  # type: ignore
     completed_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True), nullable=True, index=True
     )
+    paused_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(
+        sqlalchemy.DateTime(timezone=True), nullable=True, index=True
+    )
+    expires_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(
+        sqlalchemy.DateTime(timezone=True), nullable=True, index=True
+    )
     duration_seconds: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(sqlalchemy.Integer, nullable=True)
     job_profile_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
         sqlalchemy.ForeignKey("job_profile.id", ondelete="SET NULL"), nullable=True, index=True
@@ -62,5 +68,4 @@ class Interview(Base):  # type: ignore
     )
 
     __mapper_args__ = {"eager_defaults": True}
-
 

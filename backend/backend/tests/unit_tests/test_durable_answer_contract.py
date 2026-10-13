@@ -154,7 +154,7 @@ async def test_audio_is_acknowledged_when_transcription_fails(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_typed_answer_is_saved_as_transcribed_evidence():
-    attempt = SimpleNamespace(id=42)
+    attempt = SimpleNamespace(id=42, interview_id=9)
     saved = SimpleNamespace(id=42, answer_version=3)
 
     class Repo:
@@ -174,6 +174,11 @@ async def test_typed_answer_is_saved_as_transcribed_evidence():
         ),
         current_user=USER,
         question_repo=Repo(),
+        interview_repo=SimpleNamespace(
+            get_by_id=AsyncMock(
+                return_value=SimpleNamespace(status="active", expires_at=None)
+            )
+        ),
     )
 
     assert result.saved is True

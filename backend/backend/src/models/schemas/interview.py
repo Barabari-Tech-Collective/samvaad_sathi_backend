@@ -130,6 +130,8 @@ class InterviewInResponse(BaseSchemaModel):
     status: str
     created_at: datetime.datetime
     resumed: bool
+    paused_at: datetime.datetime | None = None
+    expires_at: datetime.datetime | None = None
     interview_mode: str = pydantic.Field(
         default="practice",
         description=(
@@ -236,6 +238,17 @@ class CompleteInterviewRequest(BaseSchemaModel):
     interview_id: int
 
 
+class PauseInterviewRequest(BaseSchemaModel):
+    interview_id: int
+
+
+class PauseInterviewResponse(BaseSchemaModel):
+    interview_id: int
+    status: Literal["paused"]
+    paused_at: datetime.datetime | None = None
+    expires_at: datetime.datetime | None = None
+
+
 #: What the client is allowed to report. Anything else is a 422, not a free-text
 #: reason field - the facilitator-visible remark reads from a fixed, known set.
 ProctoringViolationReason = Literal["tab_switch", "fullscreen_exit"]
@@ -276,6 +289,8 @@ class ResumeInterviewResponse(BaseSchemaModel):
         description="Zero-based first question without a durable answer, or null when all are saved"
     )
     status: str = pydantic.Field(description="Authoritative interview lifecycle status")
+    paused_at: datetime.datetime | None = None
+    expires_at: datetime.datetime | None = None
     interview_mode: str = pydantic.Field(
         default="practice",
         description=(
