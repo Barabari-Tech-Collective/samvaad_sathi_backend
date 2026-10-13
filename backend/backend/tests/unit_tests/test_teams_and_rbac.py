@@ -8,7 +8,8 @@ Covers:
 """
 
 import datetime
-from unittest.mock import AsyncMock, MagicMock
+from typing import cast
+from unittest.mock import AsyncMock
 import fastapi
 import pydantic
 import pytest
@@ -19,6 +20,7 @@ from src.api.dependencies.admin import (
     is_team_authorized_user,
 )
 from src.config.manager import settings
+from src.models.db.user import User
 from src.models.schemas.teams_v2 import (
     TeamCreate,
     TeamResponse,
@@ -28,31 +30,37 @@ from src.models.schemas.teams_v2 import (
 )
 
 
-class _MockUser:
-    def __init__(self, user_id: int, email: str = "", is_admin: bool = False, is_super_admin: bool = False):
-        self.id = user_id
-        self.email = email
-        self.is_admin = is_admin
-        self.is_super_admin = is_super_admin
+def _make_user(
+    user_id: int,
+    email: str = "",
+    is_admin: bool = False,
+    is_super_admin: bool = False,
+) -> User:
+    return User(
+        id=user_id,
+        email=email,
+        is_admin=is_admin,
+        is_super_admin=is_super_admin,
+    )
 
 
 # --- RBAC & Super Admin Permission Tests -------------------------------------
 
 
 def test_is_super_admin_user_with_db_flag():
-    user = _MockUser(1, email="lead@example.com", is_super_admin=True)
+    user = _make_user(1, email="lead@example.com", is_super_admin=True)
     assert is_super_admin_user(user) is True
 
 
 def test_is_super_admin_user_with_env_allowlist(monkeypatch):
     monkeypatch.setattr(settings, "SUPER_ADMIN_EMAILS", "super@corp.org, founder@corp.org")
-    user = _MockUser(2, email="SUPER@corp.org", is_super_admin=False)
+    user = _make_user(2, email="SUPER@corp.org", is_super_admin=False)
     assert is_super_admin_user(user) is True
 
 
 def test_is_super_admin_user_rejects_regular_user(monkeypatch):
     monkeypatch.setattr(settings, "SUPER_ADMIN_EMAILS", "super@corp.org")
-    user = _MockUser(3, email="student@corp.org", is_super_admin=False)
+    user = _make_user(3, email="student@corp.org", is_super_admin=False)
     assert is_super_admin_user(user) is False
 
 
@@ -62,12 +70,12 @@ def test_is_super_admin_user_handles_missing_attribute():
         id = 99
         email = "legacy@corp.org"
 
-    assert is_super_admin_user(_LegacyUser()) is False
+    assert is_super_admin_user(cast(User, _LegacyUser())) is False
 
 
 @pytest.mark.asyncio
 async def test_get_current_super_admin_user_rejects_non_super_admin():
-    user = _MockUser(4, email="regular@corp.org", is_super_admin=False)
+    user = _make_user(4, email="regular@corp.org", is_super_admin=False)
     with pytest.raises(fastapi.HTTPException) as exc:
         await get_current_super_admin_user(current_user=user)
     assert exc.value.status_code == 403
@@ -76,13 +84,13 @@ async def test_get_current_super_admin_user_rejects_non_super_admin():
 
 @pytest.mark.asyncio
 async def test_get_current_super_admin_user_allows_super_admin():
-    admin = _MockUser(5, is_super_admin=True)
+    admin = _make_user(5, is_super_admin=True)
     assert await get_current_super_admin_user(current_user=admin) is admin
 
 
 @pytest.mark.asyncio
 async def test_is_team_authorized_user_grants_super_admin():
-    super_admin = _MockUser(1, is_super_admin=True)
+    super_admin = _make_user(1, is_super_admin=True)
     mock_session = AsyncMock()
     assert await is_team_authorized_user(super_admin, team_id=10, session=mock_session) is True
     # Should short-circuit without querying the database
@@ -91,7 +99,7 @@ async def test_is_team_authorized_user_grants_super_admin():
 
 @pytest.mark.asyncio
 async def test_is_team_authorized_user_grants_global_admin():
-    global_admin = _MockUser(2, is_admin=True)
+    global_admin = _make_user(2, is_admin=True)
     mock_session = AsyncMock()
     assert await is_team_authorized_user(global_admin, team_id=10, session=mock_session) is True
     mock_session.execute.assert_not_called()
