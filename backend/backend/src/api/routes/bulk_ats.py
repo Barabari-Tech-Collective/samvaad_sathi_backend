@@ -9,19 +9,25 @@ reviewer (needs_review).
 
 import hashlib
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 import fastapi
+import pydantic
 from fastapi import UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
-from src.api.dependencies.admin import get_current_bulk_ats_user
+from src.api.dependencies.admin import (
+    get_current_admin_user,
+    get_current_bulk_ats_user,
+    is_admin_user,
+)
 from src.api.dependencies.rate_limit import hybrid_rate_limiter
 from src.api.dependencies.session import get_async_session
 from src.config.manager import settings
 from src.models.db.bulk_ats import BulkATSCandidate
 from src.models.db.user import User
 from src.repository.crud.bulk_ats import BulkATSCRUDRepository
+from src.repository.crud.user import UserCRUDRepository
 from src.services.ai_resume.parser_service import ALLOWED_FILE_TYPES
 from src.services.s3_service import upload_bulk_ats_resume_to_s3
 from src.worker.queue import enqueue_job
@@ -378,3 +384,49 @@ async def review_candidate(
     if candidate is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
     return _candidate_detail(candidate)
+
+
+@router.get("/me")
+async def get_bulk_ats_self(current_user: User = Depends(get_current_bulk_ats_user)):
+    """Lets the frontend decide what to show (e.g. the staff-access admin tab)
+    without duplicating the RBAC logic in get_current_bulk_ats_user client-side.
+    Reaching this route at all already proves bulk-ats access; isAdmin further
+    distinguishes who may grant/revoke it for others."""
+    return {"email": current_user.email, "isAdmin": is_admin_user(current_user)}
+
+
+class SetBulkATSRoleBody(pydantic.BaseModel):
+    email: pydantic.EmailStr
+    role: Literal["recruiter", "placement_staff"] | None = None
+
+
+@router.get("/admin/staff")
+async def list_bulk_ats_staff(
+    current_user: User = Depends(get_current_admin_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Admin-only: who currently has Bulk ATS access. Gated by
+    get_current_admin_user (the existing is_admin/ADMIN_EMAILS grant,
+    reachable today via SamvaadAdminsTab) rather than
+    get_current_bulk_ats_user, so granting access can't be bootstrapped by
+    someone who only has access themselves."""
+    user_repo = UserCRUDRepository(async_session=session)
+    staff = await user_repo.list_bulk_ats_staff()
+    return [{"email": u.email, "name": u.name, "role": u.role} for u in staff]
+
+
+@router.post("/admin/staff")
+async def set_bulk_ats_staff_role(
+    payload: SetBulkATSRoleBody,
+    current_user: User = Depends(get_current_admin_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    from src.utilities.exceptions.database import EntityDoesNotExist
+
+    user_repo = UserCRUDRepository(async_session=session)
+    try:
+        user = await user_repo.get_user_by_email(email=payload.email)
+    except EntityDoesNotExist:
+        raise HTTPException(status_code=404, detail="No Samvaad Saathi account exists for this email yet")
+    user = await user_repo.set_bulk_ats_role(email=user.email, role=payload.role)
+    return {"email": user.email, "role": user.role}

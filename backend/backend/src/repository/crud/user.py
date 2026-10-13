@@ -218,6 +218,25 @@ class UserCRUDRepository(BaseCRUDRepository):
         query = await self.async_session.execute(statement=stmt)
         return list(query.scalars().all())
 
+    # ------------------------------------------------------------------
+    # Bulk ATS staff role (recruiter / placement_staff) - see User.role and
+    # api/dependencies/admin.py:get_current_bulk_ats_user. Mirrors
+    # set_admin_status/list_admins above: an existing Samvaad admin grants
+    # this directly (no auth-service bridge needed, unlike is_admin's
+    # SamvaadAdminsTab path), gated by get_current_admin_user.
+    # ------------------------------------------------------------------
+    async def set_bulk_ats_role(self, *, email: str, role: str | None) -> User:
+        user = await self.get_user_by_email(email=email)
+        user.role = role
+        await self.async_session.commit()
+        await self.async_session.refresh(user)
+        return user
+
+    async def list_bulk_ats_staff(self) -> list[User]:
+        stmt = sqlalchemy.select(User).where(User.role.in_(["recruiter", "placement_staff"]))
+        query = await self.async_session.execute(statement=stmt)
+        return list(query.scalars().all())
+
     async def delete_user(self, *, user_id: int) -> None:
         """Deletes a user and ensures their S3 resumes are cleaned up to prevent orphaned objects."""
         from src.models.db.user_resume import UserResume
