@@ -50,8 +50,6 @@ class TeamMemberCreate(TeamMemberBase):
 
 class TeamMemberUpdate(BaseSchemaModel):
     name: Optional[str] = Field(None, description="Name of the user")
-    email: Optional[str] = Field(None, description="Email of the user")
-    password: Optional[str] = Field(None, description="Password if updating user password")
     access_role: Optional[str] = Field(None, description="Access role for the user")
     purposes: Optional[List[str]] = Field(None, description="Granular access purposes")
     domain: Optional[str] = Field(None, description="Assigned domain")

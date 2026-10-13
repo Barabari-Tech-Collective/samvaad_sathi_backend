@@ -215,7 +215,8 @@ def test_team_member_update_allows_partial_fields():
     update = TeamMemberUpdate(access_role="Lead")
     assert update.access_role == "Lead"
     assert update.name is None
-    assert update.email is None
+    assert not hasattr(update, "email")
+    assert not hasattr(update, "password")
 
 
 # --- Router Security & Permission Wiring -------------------------------------
@@ -327,11 +328,11 @@ async def test_add_team_member_rejects_duplicate_active_membership():
 
 
 @pytest.mark.asyncio
-async def test_update_team_member_does_not_mutate_credentials():
-    """Security: Team Lead updating member metadata cannot alter user's email or password."""
+async def test_update_team_member_updates_metadata_safely():
+    """Security: Team Lead updating member metadata only updates role, domain, purposes, colleges."""
     mock_session = AsyncMock()
     member = TeamMember(id=5, team_id=1, user_id=10, status="active", access_role="member")
-    user = User(id=10, email="target@barabari.org", password_hash="secure_user_pw")
+    user = User(id=10, email="target@barabari.org", password_hash="secure_user_pw", name="Target Name")
 
     def execute_mock(stmt):
         result = MagicMock()
@@ -348,14 +349,57 @@ async def test_update_team_member_does_not_mutate_credentials():
 
     repo = TeamCRUDRepository(async_session=mock_session)
     update_data = TeamMemberUpdate(
+        name="Updated Name",
         access_role="lead",
         domain="Engineering",
-        password="malicious_overwrite_pw",
-        email="attacker@takeover.org",
     )
     res = await repo.update_team_member(team_id=1, member_id=5, member_data=update_data)
 
     assert member.access_role == "lead"
     assert member.domain == "Engineering"
+    assert user.name == "Updated Name"
     assert user.password_hash == "secure_user_pw"
     assert user.email == "target@barabari.org"
+
+
+@pytest.mark.asyncio
+async def test_get_all_teams_forces_active_status_for_regular_users():
+    """Query param status bypass guard: regular users querying status=deleted are forced to active."""
+    from src.api.routes.teams_v2 import get_all_teams
+    mock_repo = AsyncMock()
+    mock_repo.get_all_teams.return_value = []
+    regular_user = _make_user(1, email="user@barabari.org", is_super_admin=False)
+
+    await get_all_teams(status="deleted", current_user=regular_user, team_repo=mock_repo)
+    mock_repo.get_all_teams.assert_called_once_with(status="active")
+
+
+@pytest.mark.asyncio
+async def test_get_all_teams_allows_deleted_status_for_super_admin():
+    """Super Admins are allowed to inspect deleted teams via query param."""
+    from src.api.routes.teams_v2 import get_all_teams
+    mock_repo = AsyncMock()
+    mock_repo.get_all_teams.return_value = []
+    super_admin = _make_user(1, email="admin@barabari.org", is_super_admin=True)
+
+    await get_all_teams(status="deleted", current_user=super_admin, team_repo=mock_repo)
+    mock_repo.get_all_teams.assert_called_once_with(status="deleted")
+
+
+@pytest.mark.asyncio
+async def test_get_active_members_query_status_deleted_requires_lead_privilege():
+    """Query param status bypass guard: non-leads cannot query status=deleted on members route."""
+    from src.api.routes.teams_v2 import get_active_members
+    mock_repo = AsyncMock()
+    mock_repo.async_session = AsyncMock()
+    regular_member = _make_user(5, email="member@barabari.org")
+
+    # Regular member record (not a lead)
+    member_record = TeamMember(id=1, team_id=1, user_id=5, access_role="member", status="active")
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = member_record
+    mock_repo.async_session.execute.return_value = mock_result
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_active_members(team_id=1, status="deleted", current_user=regular_member, team_repo=mock_repo)
+    assert exc_info.value.status_code == 403

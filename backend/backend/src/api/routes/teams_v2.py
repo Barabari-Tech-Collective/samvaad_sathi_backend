@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from src.api.dependencies.admin import (
     get_current_admin_user,
     get_current_super_admin_user,
+    is_super_admin_user,
     is_team_authorized_user,
     check_team_permission,
 )
@@ -37,6 +38,9 @@ async def get_all_teams(
     current_user: User = fastapi.Depends(get_current_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ) -> List[TeamResponse]:
+    # Prevent query-parameter status bypass: non-super-admins cannot inspect deleted teams
+    if status != "active" and not is_super_admin_user(current_user):
+        status = "active"
     teams = await team_repo.get_all_teams(status=status)
     return [TeamResponse(**t) for t in teams]
 
@@ -133,10 +137,14 @@ async def get_active_members(
     current_user: User = fastapi.Depends(get_current_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ) -> List[TeamMemberResponse]:
-    if not await check_team_permission(current_user, team_id, team_repo.async_session, require_lead=False):
+    # Prevent query-parameter status bypass: viewing non-active/deleted members requires lead permission
+    require_lead = (status != "active")
+    if not await check_team_permission(current_user, team_id, team_repo.async_session, require_lead=require_lead):
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to view members of this team.",
+            detail="Team Lead or Administrator access required to view non-active members."
+            if require_lead
+            else "You do not have access to view members of this team.",
         )
     members = await team_repo.get_team_members(team_id, status)
     return [TeamMemberResponse(**m) for m in members]
