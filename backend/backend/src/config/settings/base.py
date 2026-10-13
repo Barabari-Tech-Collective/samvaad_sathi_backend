@@ -285,7 +285,10 @@ class BackendBaseSettings(BaseSettings):
     # bulk/jev_client.py fall back to a local stub provider so Bulk ATS stays
     # usable (candidates land in needs_review) before Jev is wired up.
     JEV_API_KEY: str = decouple.config("JEV_API_KEY", cast=str, default="")  # type: ignore
+    # Leave blank for typesafe-sdk's own default (https://api.typesafe.ai) /
+    # model ("jev-latest") - only set these to override.
     JEV_API_BASE_URL: str = decouple.config("JEV_API_BASE_URL", cast=str, default="")  # type: ignore
+    JEV_MODEL: str = decouple.config("JEV_MODEL", cast=str, default="")  # type: ignore
     JEV_TIMEOUT_SECONDS: float = decouple.config("JEV_TIMEOUT_SECONDS", cast=float, default=60.0)  # type: ignore
 
     # Bulk ATS ingestion limits.

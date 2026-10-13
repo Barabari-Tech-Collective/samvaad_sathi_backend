@@ -178,3 +178,6 @@ python-logging-loki==0.3.1
 
 # Bulk ATS Excel/CSV candidate link import (src/services/ai_resume/bulk)
 openpyxl==3.1.5
+
+# Jev (TypeSafe) semantic scoring client (src/services/ai_resume/bulk/jev_client.py)
+typesafe-sdk==0.7.4

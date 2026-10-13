@@ -25,7 +25,7 @@ from src.services.ai_resume.scoring.link_scorer import LinkScorer
 from src.utilities.link_validator import SmartLinkValidator
 from src.services.ai_resume.url_validator import extract_professional_urls
 
-from src.services.ai_resume.bulk.jev_client import JevProvider, JevAnswer
+from src.services.ai_resume.bulk.jev_client import JevProvider, JevAnswer, score_answer_to_pct
 from src.services.ai_resume.bulk.link_requirements import infer_role_track, check_link_requirements
 from src.services.ai_resume.bulk.scoring_weights import resolve_weights, score_band_for
 
@@ -173,7 +173,11 @@ async def run_candidate_pipeline(
     )
     jev_report = {qid: {"value": a.value, "confidence": a.confidence, "type": a.type} for qid, a in jev_answers.items()}
     jev_needs_review = bool(_jev_value(jev_answers, "needs_manual_review"))
-    jev_confidences = [a.confidence for a in jev_answers.values() if a.confidence is not None]
+    # Noul's "confidence" field above is repurposed to carry its yes-probability
+    # (see jev_client.JevClient.evaluate), which is not a calibration-confidence
+    # in the same sense as Score/Choice - excluded here so one ambiguous Noul
+    # answer can't dominate the average.
+    jev_confidences = [a.confidence for a in jev_answers.values() if a.confidence is not None and a.type != "noul"]
     low_jev_confidence = bool(jev_confidences) and (sum(jev_confidences) / len(jev_confidences)) < 0.5
 
     # 5. Weighted final score. ATSCalculator's scoreBreakdown (skillsMatch,
@@ -201,11 +205,15 @@ async def run_candidate_pipeline(
     link_penalty = 50.0 * len(link_requirement_report["missing_required"])
     link_pct = max(0.0, link_integrity_pct - link_penalty) if link_requirement_report["missing_required"] else link_integrity_pct
 
+    def jev_score_pct(question_id: str) -> float | None:
+        answer = jev_answers.get(question_id)
+        return score_answer_to_pct(answer) if answer else None
+
     category_pct = {
-        "skills": blended("skillsMatch", _jev_value(jev_answers, "skills_score")),
+        "skills": blended("skillsMatch", jev_score_pct("skills_score")),
         "education": blended("educationScore", education_jev_pct),
-        "experience": blended("experienceMatch", _jev_value(jev_answers, "experience_relevance")),
-        "projects": blended("projectMatch", _jev_value(jev_answers, "project_quality")),
+        "experience": blended("experienceMatch", jev_score_pct("experience_relevance")),
+        "projects": blended("projectMatch", jev_score_pct("project_quality")),
         "links": link_pct,
     }
 
