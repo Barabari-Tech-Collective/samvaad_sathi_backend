@@ -8,6 +8,11 @@ from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.interview import InterviewCreate, InterviewInResponse, GeneratedQuestionsInResponse, InterviewsListResponse, InterviewItem, QuestionsListResponse, QuestionAttemptsListResponse, QuestionAttemptItem, GenerateQuestionsRequest, CreateAttemptResponse, InterviewQuestionOut, CompleteInterviewRequest, CreateAttemptRequest, InterviewItemWithSummary, InterviewsListWithSummaryResponse, ResumeInterviewResponse, ResumeInterviewRequest, ResumeQuestionOut, ReportProctoringViolationRequest, ProctoringViolationResponse
 from src.models.schemas.interview import PauseInterviewRequest, PauseInterviewResponse
+from src.models.schemas.interview import (
+    ClaimSessionLeaseRequest,
+    HeartbeatSessionLeaseRequest,
+    SessionLeaseResponse,
+)
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
 from src.repository.crud.question import AttemptIdempotencyConflict, QuestionAttemptCRUDRepository
@@ -23,11 +28,50 @@ from src.services.question_supplements import (
 )
 from src.services.analytics_events import track_analytics_event
 from src.services.interview_lifecycle import interview_has_expired
+from src.services.interview_session_lease import (
+    session_lease_is_active,
+    session_lease_matches,
+)
 
 logger = logging.getLogger(__name__)
 
 
 router = fastapi.APIRouter(prefix="", tags=["interviews"])
+
+
+def _session_lease_error(code: str, message: str) -> fastapi.HTTPException:
+    return fastapi.HTTPException(
+        status_code=fastapi.status.HTTP_409_CONFLICT,
+        detail={"code": code, "message": message},
+    )
+
+
+def _require_session_lease(interview, lease_token: str | None) -> None:
+    if (
+        getattr(interview, "interview_mode", None) != "practice"
+        or not getattr(interview, "session_lease_required", False)
+    ):
+        return
+    if not session_lease_matches(interview, lease_token):
+        raise _session_lease_error(
+            "SESSION_LEASE_REPLACED",
+            "This interview is active on another device or tab.",
+        )
+    if not session_lease_is_active(interview):
+        raise _session_lease_error(
+            "SESSION_LEASE_EXPIRED",
+            "Your connection lock expired. Reconnect before saving this answer.",
+        )
+
+
+async def _lock_owned_interview(interview_repo, *, interview_id: int, user_id: int):
+    lock = getattr(interview_repo, "lock_by_id_and_user", None)
+    if callable(lock):
+        return await lock(interview_id=interview_id, user_id=user_id)
+    interview = await interview_repo.get_by_id(interview_id=interview_id)
+    if interview is None or interview.user_id != user_id:
+        return None
+    return interview
 
 
 def _supplements_enabled_for_track(track: str | None) -> bool:
@@ -107,6 +151,93 @@ async def create_or_resume_interview(
 
 
 @router.post(
+    path="/interviews/session/claim",
+    name="interviews:claim-session-lease",
+    response_model=SessionLeaseResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Claim the active Practice interview session",
+)
+async def claim_session_lease(
+    payload: ClaimSessionLeaseRequest,
+    current_user=fastapi.Depends(get_current_user),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
+) -> SessionLeaseResponse:
+    interview, state, token = await interview_repo.claim_session_lease(
+        interview_id=payload.interview_id,
+        user_id=current_user.id,
+        presented_token=payload.lease_token,
+        force=payload.force,
+    )
+    if interview is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="Interview not found",
+        )
+    if state == "not_practice":
+        raise _session_lease_error(
+            "SESSION_LEASE_NOT_AVAILABLE",
+            "Session takeover is available only for Practice interviews.",
+        )
+    if state == "expired":
+        await interview_repo.mark_expired(interview_id=interview.id)
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_410_GONE,
+            detail="This Practice interview has expired. Start a new interview.",
+        )
+    if interview.status != "active":
+        raise _session_lease_error(
+            "SESSION_NOT_ACTIVE",
+            "This interview is not active.",
+        )
+    if state == "conflict":
+        raise _session_lease_error(
+            "SESSION_ACTIVE_ELSEWHERE",
+            "This interview is already open on another device or tab.",
+        )
+    if token is None or interview.session_lease_expires_at is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The interview session could not be secured. Try again.",
+        )
+    return SessionLeaseResponse(
+        interview_id=interview.id,
+        lease_token=token,
+        lease_expires_at=interview.session_lease_expires_at,
+        state=state,
+    )
+
+
+@router.post(
+    path="/interviews/session/heartbeat",
+    name="interviews:heartbeat-session-lease",
+    response_model=SessionLeaseResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Keep the active Practice interview session alive",
+)
+async def heartbeat_session_lease(
+    payload: HeartbeatSessionLeaseRequest,
+    current_user=fastapi.Depends(get_current_user),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
+) -> SessionLeaseResponse:
+    interview = await interview_repo.heartbeat_session_lease(
+        interview_id=payload.interview_id,
+        user_id=current_user.id,
+        lease_token=payload.lease_token,
+    )
+    if interview is None:
+        raise _session_lease_error(
+            "SESSION_LEASE_REPLACED",
+            "This interview is active on another device or is no longer available.",
+        )
+    return SessionLeaseResponse(
+        interview_id=interview.id,
+        lease_token=payload.lease_token,
+        lease_expires_at=interview.session_lease_expires_at,
+        state="renewed",
+    )
+
+
+@router.post(
     path="/interviews/pause",
     name="interviews:pause",
     response_model=PauseInterviewResponse,
@@ -118,8 +249,10 @@ async def pause_interview(
     current_user=fastapi.Depends(get_current_user),
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
 ) -> PauseInterviewResponse:
-    interview = await interview_repo.get_by_id(interview_id=payload.interview_id)
-    if interview is None or interview.user_id != current_user.id:
+    interview = await _lock_owned_interview(
+        interview_repo, interview_id=payload.interview_id, user_id=current_user.id
+    )
+    if interview is None:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
             detail="Interview not found",
@@ -140,6 +273,7 @@ async def pause_interview(
     if interview.status == "paused":
         paused = interview
     elif interview.status == "active":
+        _require_session_lease(interview, payload.session_lease_token)
         paused = await interview_repo.mark_paused(interview_id=interview.id)
         if paused is None:
             raise fastapi.HTTPException(
@@ -405,8 +539,10 @@ async def complete_interview(
     current_user=fastapi.Depends(get_current_user),
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
 ):
-    interview = await interview_repo.get_by_id(interview_id=payload.interview_id)
-    if interview is None or interview.user_id != current_user.id:
+    interview = await _lock_owned_interview(
+        interview_repo, interview_id=payload.interview_id, user_id=current_user.id
+    )
+    if interview is None:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
     if interview.status == "completed":
         return {
@@ -414,6 +550,7 @@ async def complete_interview(
             "status": interview.status,
             "message": "Interview already completed",
         }
+    _require_session_lease(interview, payload.session_lease_token)
     if interview.status == "expired" or (
         interview.status in ("active", "paused") and interview_has_expired(interview)
     ):
@@ -739,8 +876,28 @@ async def create_question_attempt(
     if question is None or question.interview_id != interview_id:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Question not found")
 
-    # Update question status to in_progress
-    await question_repo.update_status(question_id=question_id, status="in_progress")
+    locked_interview = await _lock_owned_interview(
+        interview_repo, interview_id=interview_id, user_id=current_user.id
+    )
+    if locked_interview is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
+        )
+    if locked_interview.status == "expired" or (
+        locked_interview.status in ("active", "paused")
+        and interview_has_expired(locked_interview)
+    ):
+        await interview_repo.mark_expired(interview_id=locked_interview.id)
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_410_GONE,
+            detail="This Practice interview has expired. Start a new interview.",
+        )
+    if locked_interview.status != "active":
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="This interview has ended and can no longer accept answers.",
+        )
+    _require_session_lease(locked_interview, payload.session_lease_token)
 
     # Create the question attempt
     try:
@@ -755,6 +912,9 @@ async def create_question_attempt(
             status_code=fastapi.status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+
+    # Secondary display state; the durable attempt is the authoritative record.
+    await question_repo.update_status(question_id=question_id, status="in_progress")
 
     return CreateAttemptResponse(question_attempt_id=attempt.id, created=created)
 

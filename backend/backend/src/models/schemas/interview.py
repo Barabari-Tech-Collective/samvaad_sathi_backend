@@ -53,6 +53,9 @@ class CreateAttemptRequest(BaseSchemaModel):
         pattern=r"^[A-Za-z0-9._:-]+$",
         description="Stable client idempotency key for this interview question",
     )
+    session_lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
 
     # Swagger example
     model_config = BaseSchemaModel.model_config.copy()
@@ -236,10 +239,16 @@ class QuestionAttemptsListResponse(BaseSchemaModel):
 
 class CompleteInterviewRequest(BaseSchemaModel):
     interview_id: int
+    session_lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
 
 
 class PauseInterviewRequest(BaseSchemaModel):
     interview_id: int
+    session_lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
 
 
 class PauseInterviewResponse(BaseSchemaModel):
@@ -247,6 +256,26 @@ class PauseInterviewResponse(BaseSchemaModel):
     status: Literal["paused"]
     paused_at: datetime.datetime | None = None
     expires_at: datetime.datetime | None = None
+
+
+class ClaimSessionLeaseRequest(BaseSchemaModel):
+    interview_id: int
+    lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
+    force: bool = False
+
+
+class HeartbeatSessionLeaseRequest(BaseSchemaModel):
+    interview_id: int
+    lease_token: str = pydantic.Field(min_length=20, max_length=256)
+
+
+class SessionLeaseResponse(BaseSchemaModel):
+    interview_id: int
+    lease_token: str
+    lease_expires_at: datetime.datetime
+    state: Literal["acquired", "renewed", "taken_over"]
 
 
 #: What the client is allowed to report. Anything else is a 422, not a free-text

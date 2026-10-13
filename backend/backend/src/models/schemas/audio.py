@@ -44,6 +44,9 @@ class TextAnswerRequest(BaseSchemaModel):
     question_attempt_id: int
     text: str = pydantic.Field(min_length=1, max_length=5000)
     language: str = pydantic.Field(default="en", min_length=2, max_length=12)
+    session_lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
 
 
 class TextAnswerResponse(BaseSchemaModel):
