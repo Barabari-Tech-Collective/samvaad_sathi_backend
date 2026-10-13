@@ -9,7 +9,7 @@ from src.api.dependencies.repository import get_repository
 from src.models.schemas.interview import InterviewCreate, InterviewInResponse, GeneratedQuestionsInResponse, InterviewsListResponse, InterviewItem, QuestionsListResponse, QuestionAttemptsListResponse, QuestionAttemptItem, GenerateQuestionsRequest, CreateAttemptResponse, InterviewQuestionOut, CompleteInterviewRequest, CreateAttemptRequest, InterviewItemWithSummary, InterviewsListWithSummaryResponse, ResumeInterviewResponse, ResumeInterviewRequest, ReportProctoringViolationRequest, ProctoringViolationResponse
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
-from src.repository.crud.question import QuestionAttemptCRUDRepository
+from src.repository.crud.question import AttemptIdempotencyConflict, QuestionAttemptCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.question_snapshot import lock_question_generation, question_items_from_persisted
@@ -660,13 +660,20 @@ async def create_question_attempt(
     await question_repo.update_status(question_id=question_id, status="in_progress")
 
     # Create the question attempt
-    attempt = await attempt_repo.create_attempt(
-        interview_id=interview_id,
-        question_id=question_id,
-        question_text=question.text
-    )
+    try:
+        attempt, created = await attempt_repo.create_or_get_attempt(
+            interview_id=interview_id,
+            question_id=question_id,
+            question_text=question.text,
+            client_attempt_id=payload.client_attempt_id,
+        )
+    except AttemptIdempotencyConflict as exc:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
-    return CreateAttemptResponse(question_attempt_id=attempt.id)
+    return CreateAttemptResponse(question_attempt_id=attempt.id, created=created)
 
 
 @router.get(

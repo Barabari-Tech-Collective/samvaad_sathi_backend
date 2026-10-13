@@ -93,7 +93,8 @@ async def complete_analysis(
             user_id=current_user.id,
             analysis_types=request.analysis_types,
             auth_token=auth_token,
-            db=db
+            db=db,
+            answer_version=request.answer_version,
         )
         
         aggregation_time = time.perf_counter() - aggregation_start

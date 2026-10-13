@@ -131,11 +131,16 @@ def upload_resume_to_s3(file_bytes: bytes, user_id: int, filename: str, content_
 ANSWER_AUDIO_PREFIX = "Samvaad-Saathi/answer-audio"
 
 
-def answer_audio_s3_key(user_id: int, question_attempt_id: int, extension: str = ".wav") -> str:
+def answer_audio_s3_key(
+    user_id: int,
+    question_attempt_id: int,
+    extension: str = ".wav",
+    checksum: str | None = None,
+) -> str:
     """Stable, non-guessable key for one student's answer recording."""
     return (
         f"{ANSWER_AUDIO_PREFIX}/user_{user_id}/attempt_{question_attempt_id}"
-        f"_{uuid.uuid4().hex[:12]}{extension}"
+        f"_{checksum or uuid.uuid4().hex}{extension}"
     )
 
 
@@ -144,6 +149,8 @@ async def upload_answer_audio_to_s3(
     user_id: int,
     question_attempt_id: int,
     extension: str = ".wav",
+    checksum: str | None = None,
+    content_type: str = "audio/wav",
 ) -> Optional[str]:
     """Stores a student's answer recording and returns its object key.
 
@@ -168,14 +175,14 @@ async def upload_answer_audio_to_s3(
 
     import asyncio
 
-    object_key = answer_audio_s3_key(user_id, question_attempt_id, extension)
+    object_key = answer_audio_s3_key(user_id, question_attempt_id, extension, checksum)
 
     def _put() -> None:
         s3_client.put_object(
             Bucket=BUCKET_NAME,
             Key=object_key,
             Body=audio_bytes,
-            ContentType="audio/wav",
+            ContentType=content_type,
             # Student voice recordings are personal data; encrypt at rest.
             ServerSideEncryption="AES256",
         )

@@ -26,11 +26,21 @@ class InterviewQuestionOut(BaseSchemaModel):
 
 class CreateAttemptResponse(BaseSchemaModel):
     question_attempt_id: int
+    created: bool = pydantic.Field(
+        default=True, description="False when an idempotent retry returned the existing attempt"
+    )
 
 
 class CreateAttemptRequest(BaseSchemaModel):
     interview_id: int
     question_id: int
+    client_attempt_id: str | None = pydantic.Field(
+        default=None,
+        min_length=8,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+        description="Stable client idempotency key for this interview question",
+    )
 
     # Swagger example
     model_config = BaseSchemaModel.model_config.copy()

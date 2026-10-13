@@ -35,6 +35,14 @@ TERMINAL_TRANSCRIPTION_STATUSES = frozenset(
 class QuestionAttempt(Base):  # type: ignore
     __tablename__ = "question_attempt"
 
+    __table_args__ = (
+        sqlalchemy.UniqueConstraint(
+            "interview_id",
+            "client_attempt_id",
+            name="uq_question_attempt_interview_client_attempt",
+        ),
+    )
+
     id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(primary_key=True, autoincrement="auto")
     interview_id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(
         sqlalchemy.ForeignKey("interview.id", ondelete="CASCADE"), nullable=False, index=True
@@ -43,7 +51,24 @@ class QuestionAttempt(Base):  # type: ignore
         sqlalchemy.ForeignKey("interview_question.id", ondelete="CASCADE"), nullable=True, index=True
     )
     question_text: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=False)
+    client_attempt_id: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=64),
+        nullable=True,
+        doc="Stable browser-generated idempotency key for starting this attempt.",
+    )
     audio_url: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(length=512), nullable=True)
+    answer_checksum: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=64), nullable=True
+    )
+    answer_version: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(
+        sqlalchemy.Integer, nullable=False, default=0, server_default="0"
+    )
+    answer_kind: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=16), nullable=True
+    )
+    answer_saved_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(
+        sqlalchemy.DateTime(timezone=True), nullable=True
+    )
     transcription: SQLAlchemyMapped[dict | None] = sqlalchemy_mapped_column(JSONB, nullable=True)
     analysis_json: SQLAlchemyMapped[dict | None] = sqlalchemy_mapped_column(JSONB, nullable=True)
     feedback: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
@@ -78,5 +103,4 @@ class QuestionAttempt(Base):  # type: ignore
     question = relationship("InterviewQuestion", back_populates="question_attempts")
 
     __mapper_args__ = {"eager_defaults": True}
-
 

@@ -34,6 +34,23 @@ class AudioTranscriptionResponse(BaseSchemaModel):
         default=None,
         description="Generated follow-up question (if created) with IDs and text",
     )
+    answer_version: int = pydantic.Field(default=1, ge=1)
+    transcription_status: str = pydantic.Field(
+        default="transcribed", description="pending, processing, transcribed, or failed"
+    )
+
+
+class TextAnswerRequest(BaseSchemaModel):
+    question_attempt_id: int
+    text: str = pydantic.Field(min_length=1, max_length=5000)
+    language: str = pydantic.Field(default="en", min_length=2, max_length=12)
+
+
+class TextAnswerResponse(BaseSchemaModel):
+    question_attempt_id: int
+    saved: bool = True
+    answer_version: int = pydantic.Field(ge=1)
+    transcription_status: str = "transcribed"
 
 
 class TranscriptionStatusResponse(BaseSchemaModel):
