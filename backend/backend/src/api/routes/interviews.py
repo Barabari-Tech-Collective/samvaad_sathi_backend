@@ -6,7 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
-from src.models.schemas.interview import InterviewCreate, InterviewInResponse, GeneratedQuestionsInResponse, InterviewsListResponse, InterviewItem, QuestionsListResponse, QuestionAttemptsListResponse, QuestionAttemptItem, GenerateQuestionsRequest, CreateAttemptResponse, InterviewQuestionOut, CompleteInterviewRequest, CreateAttemptRequest, InterviewItemWithSummary, InterviewsListWithSummaryResponse, ResumeInterviewResponse, ResumeInterviewRequest, ReportProctoringViolationRequest, ProctoringViolationResponse
+from src.models.schemas.interview import InterviewCreate, InterviewInResponse, GeneratedQuestionsInResponse, InterviewsListResponse, InterviewItem, QuestionsListResponse, QuestionAttemptsListResponse, QuestionAttemptItem, GenerateQuestionsRequest, CreateAttemptResponse, InterviewQuestionOut, CompleteInterviewRequest, CreateAttemptRequest, InterviewItemWithSummary, InterviewsListWithSummaryResponse, ResumeInterviewResponse, ResumeInterviewRequest, ResumeQuestionOut, ReportProctoringViolationRequest, ProctoringViolationResponse
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
 from src.repository.crud.question import AttemptIdempotencyConflict, QuestionAttemptCRUDRepository
@@ -831,10 +831,10 @@ async def list_my_interviews_with_summary(
     name="interviews:resume-interview",
     response_model=ResumeInterviewResponse,
     status_code=fastapi.status.HTTP_200_OK,
-    summary="Resume interview - get questions without attempts",
+    summary="Resume an interview from its durable server checkpoint",
     description=(
-        "Fetches questions from an interview that don't have any QuestionAttempt records. "
-        "This is useful for resuming an interview where some questions have been answered."
+        "Returns the complete immutable question snapshot in its original order, together with "
+        "the latest attempt and durable answer state for each question."
     ),
 )
 async def resume_interview(
@@ -849,19 +849,34 @@ async def resume_interview(
     if not interview:
         raise fastapi.HTTPException(status_code=404, detail="Interview not found or access denied")
 
-    # Get questions without attempts
-    questions_without_attempts = await question_repo.get_questions_without_attempts(interview_id=interview.id)
-    
-    # Get total questions count
+    # Resume is server-authoritative. An attempt can exist before its answer is
+    # saved, so excluding every question with an attempt can skip the exact
+    # question the student was on when the browser refreshed.
     all_questions = await question_repo.list_by_interview(interview_id=interview.id)
     total_questions = len(all_questions)
-    
-    # Get count of questions with attempts
-    attempted_count = await question_repo.get_questions_with_attempts_count(interview_id=interview.id)
+    attempts = await question_attempt_repo.list_by_interview(interview_id=interview.id)
+    attempt_by_question_id = {
+        attempt.question_id: attempt for attempt in attempts if attempt.question_id is not None
+    }
+    attempted_count = len(attempt_by_question_id)
+
+    def has_saved_answer(attempt) -> bool:
+        return bool(
+            attempt
+            and (
+                getattr(attempt, "answer_saved_at", None) is not None
+                or getattr(attempt, "audio_url", None)
+                or getattr(attempt, "transcription", None) is not None
+            )
+        )
+
+    answered_count = sum(
+        1 for attempt in attempt_by_question_id.values() if has_saved_answer(attempt)
+    )
 
     # Backfill any missing follow-up parent pointers
     await _backfill_follow_up_parents(
-        questions=questions_without_attempts,
+        questions=all_questions,
         question_repo=question_repo,
         question_attempt_repo=question_attempt_repo,
     )
@@ -874,21 +889,32 @@ async def resume_interview(
     )
     
     # Convert to response format
-    question_items = [
-        InterviewQuestionOut(
-            interview_question_id=q.id,
-            text=q.text,
-            topic=q.topic,
-            category=q.category,
-            status=q.status,
-            resume_used=q.resume_used,
-            is_follow_up=q.is_follow_up,
-            parent_question_id=q.parent_question_id,
-            follow_up_strategy=q.follow_up_strategy,
-            supplement=supplement_map.get(q.id),
+    question_items: list[ResumeQuestionOut] = []
+    resume_question_index: int | None = None
+    for index, q in enumerate(all_questions):
+        attempt = attempt_by_question_id.get(q.id)
+        answer_saved = has_saved_answer(attempt)
+        if resume_question_index is None and not answer_saved:
+            resume_question_index = index
+        question_items.append(
+            ResumeQuestionOut(
+                interview_question_id=q.id,
+                text=q.text,
+                topic=q.topic,
+                category=q.category,
+                status=q.status,
+                resume_used=q.resume_used,
+                is_follow_up=q.is_follow_up,
+                parent_question_id=q.parent_question_id,
+                follow_up_strategy=q.follow_up_strategy,
+                supplement=supplement_map.get(q.id),
+                question_attempt_id=attempt.id if attempt else None,
+                answer_saved=answer_saved,
+                answer_version=(attempt.answer_version or 0) if attempt else 0,
+                answer_kind=attempt.answer_kind if attempt else None,
+                transcription_status=attempt.transcription_status if attempt else None,
+            )
         )
-        for q in questions_without_attempts
-    ]
 
     return ResumeInterviewResponse(
         interview_id=interview.id,
@@ -897,7 +923,10 @@ async def resume_interview(
         questions=question_items,
         total_questions=total_questions,
         attempted_questions=attempted_count,
-        remaining_questions=len(questions_without_attempts),
+        answered_questions=answered_count,
+        remaining_questions=max(0, total_questions - answered_count),
+        resume_question_index=resume_question_index,
+        status=interview.status,
         interview_mode=interview.interview_mode,
     )
 

@@ -24,6 +24,18 @@ class InterviewQuestionOut(BaseSchemaModel):
     )
 
 
+class ResumeQuestionOut(InterviewQuestionOut):
+    """One immutable question plus the latest durable answer checkpoint."""
+
+    question_attempt_id: int | None = None
+    answer_saved: bool = False
+    answer_version: int = pydantic.Field(default=0, ge=0)
+    answer_kind: Literal["audio", "text"] | None = None
+    transcription_status: (
+        Literal["pending", "processing", "transcribed", "failed"] | None
+    ) = None
+
+
 class CreateAttemptResponse(BaseSchemaModel):
     question_attempt_id: int
     created: bool = pydantic.Field(
@@ -249,10 +261,21 @@ class ResumeInterviewResponse(BaseSchemaModel):
     interview_id: int = pydantic.Field(description="ID of the interview")
     track: str = pydantic.Field(description="Interview track")
     difficulty: str = pydantic.Field(description="Interview difficulty")
-    questions: list[InterviewQuestionOut] = pydantic.Field(description="Questions without attempts")
+    questions: list[ResumeQuestionOut] = pydantic.Field(
+        description="The complete immutable question snapshot with durable answer checkpoints"
+    )
     total_questions: int = pydantic.Field(description="Total number of questions in the interview")
     attempted_questions: int = pydantic.Field(description="Number of questions with attempts")
-    remaining_questions: int = pydantic.Field(description="Number of questions without attempts")
+    answered_questions: int = pydantic.Field(
+        description="Number of questions whose answer is durably saved"
+    )
+    remaining_questions: int = pydantic.Field(
+        description="Number of questions without a durably saved answer"
+    )
+    resume_question_index: int | None = pydantic.Field(
+        description="Zero-based first question without a durable answer, or null when all are saved"
+    )
+    status: str = pydantic.Field(description="Authoritative interview lifecycle status")
     interview_mode: str = pydantic.Field(
         default="practice",
         description=(
