@@ -81,6 +81,15 @@ class User(Base):  # type: ignore
         sqlalchemy.Boolean, nullable=False, server_default=sqlalchemy.text("false"),
         doc="Grants access to cross-student analytics endpoints. Default false."
     )
+    # Narrower staff grant alongside is_admin: a recruiter/placement_staff
+    # account should be able to run Bulk ATS without also getting the
+    # cross-student analytics access is_admin implies. NULL (every existing
+    # row, students included) grants nothing - see get_current_bulk_ats_user
+    # in api/dependencies/admin.py.
+    role: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=32), nullable=True,
+        doc="One of 'admin', 'recruiter', 'placement_staff', or NULL for no staff role."
+    )
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True), nullable=False, server_default=sqlalchemy_functions.now()
     )

@@ -175,3 +175,6 @@ aio-pika==9.5.5
 
 # Ships stdlib `logging` output to Grafana Cloud Loki (central-auth Phase 13, free tier)
 python-logging-loki==0.3.1
+
+# Bulk ATS Excel/CSV candidate link import (src/services/ai_resume/bulk)
+openpyxl==3.1.5

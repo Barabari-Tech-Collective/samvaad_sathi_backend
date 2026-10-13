@@ -61,3 +61,37 @@ async def get_current_admin_user(
             detail="Administrator access required.",
         )
     return current_user
+
+
+_BULK_ATS_ROLES = {"recruiter", "placement_staff", "admin"}
+
+
+def is_bulk_ats_user(user: User) -> bool:
+    """True if `user` may use Bulk ATS (screening assistance, not students).
+
+    Deliberately narrower than is_admin_user: a recruiter should not need
+    cross-student analytics access to screen resumes, so this also accepts
+    user.role in _BULK_ATS_ROLES on its own, in addition to the existing
+    is_admin/ADMIN_EMAILS grant.
+    """
+    if is_admin_user(user):
+        return True
+    role = (getattr(user, "role", "") or "").strip().lower()
+    return role in _BULK_ATS_ROLES
+
+
+async def get_current_bulk_ats_user(
+    current_user: User = fastapi.Depends(get_current_user),
+) -> User:
+    """Require an authenticated recruiter/placement_staff/admin user.
+
+    Students (role is NULL, is_admin false) are rejected with 403. This is a
+    backend-level gate, not a UI hide: every Bulk ATS route depends on this,
+    not on get_current_user alone.
+    """
+    if not is_bulk_ats_user(current_user):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Bulk ATS access is restricted to recruiter, placement staff, or admin accounts.",
+        )
+    return current_user

@@ -277,6 +277,21 @@ class BackendBaseSettings(BaseSettings):
     # DeepSeek nor this setting apply to those; see the scaling plan's Phase 7/8 split.
     LLM_PROVIDER: str = decouple.config("LLM_PROVIDER", cast=str, default="openai")  # type: ignore
     DEEPSEEK_API_KEY: str = decouple.config("DEEPSEEK_API_KEY", cast=str, default="")  # type: ignore
+
+    # Jev (TypeSafe) - typed-decision model used by Bulk ATS for the semantic
+    # judgment calls only (project quality/complexity, resume hygiene, etc).
+    # Deterministic parsing, link checks and the final weighted score never
+    # go through this. Empty JEV_API_KEY/JEV_API_BASE_URL makes
+    # bulk/jev_client.py fall back to a local stub provider so Bulk ATS stays
+    # usable (candidates land in needs_review) before Jev is wired up.
+    JEV_API_KEY: str = decouple.config("JEV_API_KEY", cast=str, default="")  # type: ignore
+    JEV_API_BASE_URL: str = decouple.config("JEV_API_BASE_URL", cast=str, default="")  # type: ignore
+    JEV_TIMEOUT_SECONDS: float = decouple.config("JEV_TIMEOUT_SECONDS", cast=float, default=60.0)  # type: ignore
+
+    # Bulk ATS ingestion limits.
+    BULK_ATS_MAX_FILES_PER_BATCH: int = decouple.config("BULK_ATS_MAX_FILES_PER_BATCH", cast=int, default=200)  # type: ignore
+    BULK_ATS_MAX_FILE_SIZE_MB: int = decouple.config("BULK_ATS_MAX_FILE_SIZE_MB", cast=int, default=10)  # type: ignore
+    RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR: int = decouple.config("RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR", cast=int, default=20)  # type: ignore
     DEEPSEEK_BASE_URL: str = decouple.config("DEEPSEEK_BASE_URL", cast=str, default="https://api.deepseek.com")  # type: ignore
     DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-v4-flash")  # type: ignore
 
