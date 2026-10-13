@@ -45,4 +45,8 @@ class TeamMember(Base):  # type: ignore
     # Using string reference for User to avoid circular imports if any, or directly "User" if imported
     user = relationship("User", foreign_keys=[user_id])
 
+    __table_args__ = (
+        sqlalchemy.UniqueConstraint("team_id", "user_id", name="uq_team_member_team_id_user_id"),
+    )
+
     __mapper_args__ = {"eager_defaults": True}

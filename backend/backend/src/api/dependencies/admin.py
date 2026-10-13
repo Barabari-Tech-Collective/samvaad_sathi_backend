@@ -37,9 +37,24 @@ def _allow_listed_emails() -> set[str]:
     return {entry.strip().lower() for entry in raw.split(",") if entry.strip()}
 
 
+def _super_admin_allow_listed_emails() -> set[str]:
+    """Parse SUPER_ADMIN_EMAILS into a normalised set. Comma-separated; blanks and
+    surrounding whitespace ignored."""
+    raw = getattr(settings, "SUPER_ADMIN_EMAILS", "") or ""
+    return {entry.strip().lower() for entry in raw.split(",") if entry.strip()}
+
+
+def is_super_admin_user(user: User) -> bool:
+    """True if user has full system access, including team creation and deletion."""
+    if getattr(user, "is_super_admin", False):
+        return True
+    email = (getattr(user, "email", "") or "").strip().lower()
+    return bool(email) and email in _super_admin_allow_listed_emails()
+
+
 def is_admin_user(user: User) -> bool:
-    """True if `user` may read cross-student data."""
-    if getattr(user, "is_admin", False):
+    """True if user may read cross-student data. Super Admins inherit this privilege."""
+    if is_super_admin_user(user) or getattr(user, "is_admin", False):
         return True
     email = (getattr(user, "email", "") or "").strip().lower()
     return bool(email) and email in _allow_listed_emails()
@@ -63,21 +78,6 @@ async def get_current_admin_user(
     return current_user
 
 
-def _super_admin_allow_listed_emails() -> set[str]:
-    """Parse SUPER_ADMIN_EMAILS into a normalised set. Comma-separated; blanks and
-    surrounding whitespace ignored."""
-    raw = getattr(settings, "SUPER_ADMIN_EMAILS", "") or ""
-    return {entry.strip().lower() for entry in raw.split(",") if entry.strip()}
-
-
-def is_super_admin_user(user: User) -> bool:
-    """True if `user` has full system access, including team creation."""
-    if getattr(user, "is_super_admin", False):
-        return True
-    email = (getattr(user, "email", "") or "").strip().lower()
-    return bool(email) and email in _super_admin_allow_listed_emails()
-
-
 async def get_current_super_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
 ) -> User:
@@ -90,19 +90,43 @@ async def get_current_super_admin_user(
     return current_user
 
 
-async def is_team_authorized_user(user: User, team_id: int, session) -> bool:
-    """True if user is Super Admin, Global Admin, or an active member/lead of the specific team."""
-    if is_admin_user(user) or is_super_admin_user(user):
+LEAD_ROLES = {"lead", "creator", "admin"}
+
+
+async def check_team_permission(
+    user: User,
+    team_id: int,
+    session,
+    require_lead: bool = False,
+) -> bool:
+    """Verify team-scoped permissions.
+    - Super Admins and Global Admins always have access.
+    - For team members: if require_lead=True, their access_role must be in LEAD_ROLES.
+    """
+    if is_admin_user(user):
         return True
-    
-    # Check if user is an active member or lead of this specific team
+
     from sqlalchemy import select
     from src.models.db.team_member import TeamMember
+
     stmt = select(TeamMember).where(
         TeamMember.team_id == team_id,
         TeamMember.user_id == user.id,
-        TeamMember.status == "active"
+        TeamMember.status == "active",
     )
     result = await session.execute(stmt)
-    return result.scalar_one_or_none() is not None
+    member = result.scalar_one_or_none()
+    if not member:
+        return False
+
+    if require_lead:
+        role = (member.access_role or "").strip().lower()
+        return role in LEAD_ROLES
+
+    return True
+
+
+async def is_team_authorized_user(user: User, team_id: int, session) -> bool:
+    """Backward-compatible alias for checking general active membership in a team."""
+    return await check_team_permission(user, team_id, session, require_lead=False)
 

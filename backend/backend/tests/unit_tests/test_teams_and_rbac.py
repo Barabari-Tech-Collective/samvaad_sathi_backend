@@ -2,24 +2,30 @@
 
 Covers:
 1. Super Admin and Team authorization dependency guards.
-2. Team and TeamMember schema validation and serialization.
-3. Route-level authorization gates ensuring endpoints cannot be accessed without
-   the requisite privilege level.
+2. Role hierarchy (Super Admin inheriting Admin privileges).
+3. Scoped team permissions (distinguishing Team Lead from regular Team Member).
+4. Team and TeamMember schema validation and serialization.
+5. Repository-level credential hijacking prevention and duplicate membership prevention.
+6. Route-level authorization gates.
 """
 
 import datetime
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 import fastapi
 import pydantic
 import pytest
 
 from src.api.dependencies.admin import (
+    check_team_permission,
     get_current_super_admin_user,
+    is_admin_user,
     is_super_admin_user,
     is_team_authorized_user,
 )
 from src.config.manager import settings
+from src.models.db.team import Team
+from src.models.db.team_member import TeamMember
 from src.models.db.user import User
 from src.models.schemas.teams_v2 import (
     TeamCreate,
@@ -28,6 +34,8 @@ from src.models.schemas.teams_v2 import (
     TeamMemberUpdate,
     TeamMemberResponse,
 )
+from src.repository.crud.team_v2 import TeamCRUDRepository
+from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
 
 
 def _make_user(
@@ -73,6 +81,12 @@ def test_is_super_admin_user_handles_missing_attribute():
     assert is_super_admin_user(cast(User, _LegacyUser())) is False
 
 
+def test_is_admin_user_inherits_super_admin_privilege():
+    """A Super Admin must be a strict superset of Admin and pass is_admin_user."""
+    super_admin = _make_user(10, email="super@corp.org", is_admin=False, is_super_admin=True)
+    assert is_admin_user(super_admin) is True
+
+
 @pytest.mark.asyncio
 async def test_get_current_super_admin_user_rejects_non_super_admin():
     user = _make_user(4, email="regular@corp.org", is_super_admin=False)
@@ -88,21 +102,65 @@ async def test_get_current_super_admin_user_allows_super_admin():
     assert await get_current_super_admin_user(current_user=admin) is admin
 
 
+# --- Scoped Team Permission & Negative Authorization Tests -------------------
+
+
 @pytest.mark.asyncio
-async def test_is_team_authorized_user_grants_super_admin():
+async def test_check_team_permission_grants_super_admin_short_circuit():
     super_admin = _make_user(1, is_super_admin=True)
     mock_session = AsyncMock()
-    assert await is_team_authorized_user(super_admin, team_id=10, session=mock_session) is True
-    # Should short-circuit without querying the database
+    assert await check_team_permission(super_admin, team_id=10, session=mock_session, require_lead=True) is True
     mock_session.execute.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_is_team_authorized_user_grants_global_admin():
+async def test_check_team_permission_grants_global_admin_short_circuit():
     global_admin = _make_user(2, is_admin=True)
     mock_session = AsyncMock()
-    assert await is_team_authorized_user(global_admin, team_id=10, session=mock_session) is True
+    assert await check_team_permission(global_admin, team_id=10, session=mock_session, require_lead=True) is True
     mock_session.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_team_permission_rejects_non_member():
+    user = _make_user(3, is_admin=False, is_super_admin=False)
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = None
+    mock_session.execute.return_value = mock_result
+
+    # Non-member rejected whether require_lead is True or False
+    assert await check_team_permission(user, team_id=10, session=mock_session, require_lead=False) is False
+    assert await check_team_permission(user, team_id=10, session=mock_session, require_lead=True) is False
+
+
+@pytest.mark.asyncio
+async def test_check_team_permission_blocks_regular_member_from_lead_actions():
+    user = _make_user(4, is_admin=False, is_super_admin=False)
+    member_record = TeamMember(id=1, team_id=10, user_id=user.id, access_role="member", status="active")
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = member_record
+    mock_session.execute.return_value = mock_result
+
+    # Regular member CAN view (require_lead=False)
+    assert await check_team_permission(user, team_id=10, session=mock_session, require_lead=False) is True
+    # Regular member CANNOT manage (require_lead=True)
+    assert await check_team_permission(user, team_id=10, session=mock_session, require_lead=True) is False
+
+
+@pytest.mark.asyncio
+async def test_check_team_permission_allows_team_lead():
+    user = _make_user(5, is_admin=False, is_super_admin=False)
+    lead_record = TeamMember(id=2, team_id=10, user_id=user.id, access_role="lead", status="active")
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = lead_record
+    mock_session.execute.return_value = mock_result
+
+    # Team Lead CAN both view and manage
+    assert await check_team_permission(user, team_id=10, session=mock_session, require_lead=False) is True
+    assert await check_team_permission(user, team_id=10, session=mock_session, require_lead=True) is True
 
 
 # --- Team Schema Validation Tests --------------------------------------------
@@ -132,7 +190,7 @@ def test_team_response_serialization():
     response = TeamResponse(**data)
     assert response.id == 1
     assert response.name == "Design Team"
-    assert response.memberCount == 5
+    assert response.member_count == 5
     assert response.status == "active"
 
 
@@ -176,6 +234,7 @@ def test_super_admin_gated_routes_require_super_admin_dependency():
         "teams:delete",
         "teams:restore_team",
         "teams:permanent_delete_team",
+        "teams:get_team_recycle_bin",
     }
 
     for route in router.routes:
@@ -189,20 +248,114 @@ def test_super_admin_gated_routes_require_super_admin_dependency():
             )
 
 
-def test_admin_gated_routes_require_admin_dependency():
-    from src.api.routes.teams_v2 import router
+# --- Repository Security & Integrity Tests -----------------------------------
 
-    admin_routes = {
-        "teams:get_team_recycle_bin",
-        "teams:get_active_members",
-    }
 
-    for route in router.routes:
-        if getattr(route, "name", None) in admin_routes:
-            dep_names = [
-                getattr(dep.call, "__name__", "")
-                for dep in getattr(route.dependant, "dependencies", []) or []
-            ]
-            assert "get_current_admin_user" in dep_names, (
-                f"Route '{route.name}' must require get_current_admin_user"
-            )
+@pytest.mark.asyncio
+async def test_add_team_member_rejects_missing_team():
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = None
+    mock_session.execute.return_value = mock_result
+
+    repo = TeamCRUDRepository(async_session=mock_session)
+    member_data = TeamMemberCreate(name="Bob", email="bob@test.com", access_role="member")
+
+    with pytest.raises(EntityDoesNotExist):
+        await repo.add_team_member(team_id=9999, member_data=member_data)
+
+
+@pytest.mark.asyncio
+async def test_add_team_member_does_not_overwrite_existing_user_password():
+    """Security: Never silently change credentials of an existing global user account."""
+    mock_session = AsyncMock()
+    # Team exists
+    team = Team(id=1, name="Core", status="active")
+    # Existing user with an established password
+    existing_user = User(id=10, email="admin@barabari.org", password_hash="original_secret_hash")
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = None
+        elif "from team" in stmt_str or "team.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = team
+        elif "from \"user\"" in stmt_str or "user.email" in stmt_str:
+            result.scalar_one_or_none.return_value = existing_user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+
+    repo = TeamCRUDRepository(async_session=mock_session)
+    member_data = TeamMemberCreate(name="Admin", email="admin@barabari.org", password="hacker_password", access_role="lead")
+    await repo.add_team_member(team_id=1, member_data=member_data)
+
+    # Assert existing user's password hash was NOT mutated
+    assert existing_user.password_hash == "original_secret_hash"
+
+
+@pytest.mark.asyncio
+async def test_add_team_member_rejects_duplicate_active_membership():
+    """Integrity: Prevent duplicate active membership in the same team."""
+    mock_session = AsyncMock()
+    team = Team(id=1, name="Core", status="active")
+    user = User(id=10, email="member@barabari.org", password_hash="hash")
+    existing_active_member = TeamMember(id=5, team_id=1, user_id=10, status="active", access_role="member")
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = existing_active_member
+        elif "from team" in stmt_str or "team.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = team
+        elif "from \"user\"" in stmt_str or "user.email" in stmt_str:
+            result.scalar_one_or_none.return_value = user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+
+    repo = TeamCRUDRepository(async_session=mock_session)
+    member_data = TeamMemberCreate(name="Member", email="member@barabari.org", access_role="member")
+    with pytest.raises(EntityAlreadyExists):
+        await repo.add_team_member(team_id=1, member_data=member_data)
+
+
+@pytest.mark.asyncio
+async def test_update_team_member_does_not_mutate_credentials():
+    """Security: Team Lead updating member metadata cannot alter user's email or password."""
+    mock_session = AsyncMock()
+    member = TeamMember(id=5, team_id=1, user_id=10, status="active", access_role="member")
+    user = User(id=10, email="target@barabari.org", password_hash="secure_user_pw")
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = member
+        elif "from \"user\"" in stmt_str or "user.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+
+    repo = TeamCRUDRepository(async_session=mock_session)
+    update_data = TeamMemberUpdate(
+        access_role="lead",
+        domain="Engineering",
+        password="malicious_overwrite_pw",
+        email="attacker@takeover.org",
+    )
+    res = await repo.update_team_member(team_id=1, member_id=5, member_data=update_data)
+
+    assert member.access_role == "lead"
+    assert member.domain == "Engineering"
+    assert user.password_hash == "secure_user_pw"
+    assert user.email == "target@barabari.org"
