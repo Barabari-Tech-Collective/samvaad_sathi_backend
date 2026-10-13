@@ -10,6 +10,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
 
 def required(name):
@@ -21,20 +22,6 @@ def required(name):
 
 def command(*args):
     return json.loads(subprocess.check_output(args, text=True))
-
-
-def request(url, token=None, payload=None):
-    headers = {"Accept": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    body = None if payload is None else json.dumps(payload).encode()
-    if body:
-        headers["Content-Type"] = "application/json"
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, data=body, headers=headers), timeout=30) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"Deployment API returned HTTP {error.code}; inspect the provider dashboard") from None
 
 
 def wait_for(fetch, status, success, failure, timeout=1500):
@@ -54,40 +41,24 @@ def wait_for(fetch, status, success, failure, timeout=1500):
     raise RuntimeError("Deployment polling timed out; inspect the provider before retrying")
 
 
-def verify_staging(repository, sha):
-    deployments = command("gh", "api", f"repos/{repository}/deployments?sha={sha}&environment=staging&per_page=100")
-    for deployment in deployments:
-        if deployment["sha"] != sha or deployment.get("task") != "samvaad-release":
-            continue
-        statuses = command("gh", "api", f"repos/{repository}/deployments/{deployment['id']}/statuses")
-        if statuses and statuses[0]["state"] == "success":
-            return
-    raise RuntimeError("This exact commit has no successful staging deployment from this pipeline")
-
-
-def render_deploy(sha):
-    service = required("RENDER_SERVICE_ID")
-    if not re.fullmatch(r"srv-[a-z0-9]+", service):
-        raise RuntimeError("Invalid Render service ID")
-    token = required("RENDER_API_KEY")
-    root = f"https://api.render.com/v1/services/{service}"
-    settings = request(root, token)
-    if settings.get("autoDeploy") != "no":
-        raise RuntimeError("Disable Render auto-deploy before using gated releases")
-    deployment = request(f"{root}/deploys", token, {"commitId": sha, "clearCache": "do_not_clear"})
-    result = wait_for(lambda: request(f"{root}/deploys/{deployment['id']}", token),
-                      lambda value: value["status"], {"live"}, {"build_failed", "update_failed", "canceled", "deactivated"})
-    if result.get("commit", {}).get("id") != sha:
-        raise RuntimeError("Render deployed a different commit; do not promote")
+def verify_production_source(repository, sha):
+    repo = command("gh", "api", f"repos/{repository}")
+    default_branch = repo["default_branch"]
+    if required("GITHUB_REF_NAME") != default_branch:
+        raise RuntimeError("Production releases must run from the default branch")
+    source = command(
+        "gh", "api", f"repos/{repository}/commits/{quote(default_branch, safe='')}"
+    )
+    if source["sha"] != sha:
+        raise RuntimeError("The tested commit is not the current default-branch tip")
 
 
 def amplify_deploy(sha, repository):
     app, branch = required("AMPLIFY_APP_ID"), required("AMPLIFY_BRANCH")
     # RELEASE uses the latest source branch. Require its tip to equal the tested SHA.
-    from urllib.parse import quote
     source = command("gh", "api", f"repos/{repository}/commits/{quote(branch, safe='')}")
     if source["sha"] != sha:
-        raise RuntimeError("Amplify source branch differs from tested commit; stage its exact tip first")
+        raise RuntimeError("Amplify source branch differs from the tested production commit")
     settings = command("aws", "amplify", "get-branch", "--app-id", app, "--branch-name", branch, "--output", "json")
     if settings["branch"].get("enableAutoBuild"):
         raise RuntimeError("Disable Amplify auto-build before enabling gated production releases")
@@ -134,14 +105,13 @@ def smoke():
 
 
 def main():
-    sha, target, repository = required("GITHUB_SHA"), required("TARGET_ENVIRONMENT"), required("GITHUB_REPOSITORY")
-    if not re.fullmatch(r"[0-9a-f]{40}", sha) or target not in {"staging", "production"}:
-        raise RuntimeError("Invalid release input")
+    sha, repository = required("GITHUB_SHA"), required("GITHUB_REPOSITORY")
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise RuntimeError("Invalid release commit")
     if len(required("TEST_EVIDENCE")) < 20:
         raise RuntimeError("Provide a meaningful test record including tester, date, and results")
-    if target == "production":
-        verify_staging(repository, sha)
-    payload = {"ref": sha, "environment": target, "task": "samvaad-release", "auto_merge": False,
+    verify_production_source(repository, sha)
+    payload = {"ref": sha, "environment": "production", "task": "samvaad-release", "auto_merge": False,
                "required_contexts": [], "description": "Verified feature release", "payload": {"test_evidence": required("TEST_EVIDENCE")}}
     deployment = json.loads(subprocess.check_output(["gh", "api", "--method", "POST", f"repos/{repository}/deployments", "--input", "-"], input=json.dumps(payload), text=True))
     status_path = f"repos/{repository}/deployments/{deployment['id']}/statuses"
@@ -149,8 +119,7 @@ def main():
         command("gh", "api", "--method", "POST", status_path, "-f", f"state={state}", "-f", f"environment_url={required('HEALTH_URL')}")
     mark("in_progress")
     try:
-        if target == "staging": render_deploy(sha)
-        elif required("PRODUCTION_PROVIDER") == "amplify": amplify_deploy(sha, repository)
+        if required("PRODUCTION_PROVIDER") == "amplify": amplify_deploy(sha, repository)
         elif required("PRODUCTION_PROVIDER") == "ec2": ec2_deploy(sha)
         else: raise RuntimeError("Unsupported production provider")
         smoke()
@@ -158,7 +127,7 @@ def main():
         mark("failure")
         raise
     mark("success")
-    print("Deployment and health check passed. Candidate journey acceptance is still required.")
+    print("Production deployment and health check passed. Candidate journey acceptance is still required.")
 
 
 if __name__ == "__main__":

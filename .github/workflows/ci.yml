@@ -58,7 +58,7 @@ jobs:
           # suite silently skips it and schema drift reaches production.
           SCHEMA_TEST_DATABASE_URL: postgresql+psycopg2://ci:ci-only-password@localhost:5432/samvaad_ci
       - name: Check release runner syntax
-        run: bash -n ops/ec2-release.sh
+        run: bash -n ops/ec2-release.sh && python -m py_compile ops/release.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

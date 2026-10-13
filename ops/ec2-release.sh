@@ -69,8 +69,9 @@ git checkout --quiet --force "$release_sha"
 "$VENV/bin/pip" install --quiet -r backend/backend/requirements.txt
 
 # Migrations are applied before the restart so the new code never meets an old
-# schema. Idempotent: the app also patches these columns at startup, and every
-# migration involved uses IF NOT EXISTS.
+# schema. Alembic records each applied revision, and this release's schema
+# changes are additive so the previous application commit remains compatible
+# if the health check triggers an application rollback.
 ( cd backend/backend && "$VENV/bin/python" -m alembic upgrade head )
 
 sudo systemctl restart "$API_SERVICE" "$WORKER_SERVICE"
