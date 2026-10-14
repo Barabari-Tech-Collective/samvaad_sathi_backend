@@ -14,7 +14,7 @@ from src.models.schemas.interview import (
 from src.services.interview_lifecycle import interview_has_expired
 
 UTC = datetime.timezone.utc
-NOW = datetime.datetime(2026, 10, 13, 8, 30, tzinfo=UTC)
+NOW = datetime.datetime.now(UTC)
 
 
 def interview(**overrides):
