@@ -89,6 +89,9 @@ class User(Base):  # type: ignore
     role: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=32), nullable=True,
         doc="One of 'admin', 'recruiter', 'placement_staff', or NULL for no staff role."
+    is_super_admin: SQLAlchemyMapped[bool] = sqlalchemy_mapped_column(
+        sqlalchemy.Boolean, nullable=False, server_default=sqlalchemy.text("false"),
+        doc="Grants full system access, including team creation. Default false."
     )
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True), nullable=False, server_default=sqlalchemy_functions.now()

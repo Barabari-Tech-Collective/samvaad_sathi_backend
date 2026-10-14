@@ -5,7 +5,7 @@ import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import is_admin_user
+from src.api.dependencies.admin import is_admin_user, is_super_admin_user
 from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
@@ -80,6 +80,7 @@ async def register_user(
                                     created_at=user_created_at,
                                     is_onboarded=user_is_onboarded,
                                     is_admin=is_admin_user(user),
+                                    is_super_admin=is_super_admin_user(user),
                                     degree=None,
                                     university=None,
                                     target_position=None,
@@ -132,6 +133,7 @@ async def login_user(
                                     created_at=user_created_at,
                                     is_onboarded=user_is_onboarded,
                                     is_admin=is_admin_user(user),
+                                    is_super_admin=is_super_admin_user(user),
                                     degree=None,
                                     university=None,
                                     target_position=None,
@@ -242,6 +244,7 @@ async def get_me(
             created_at=current_user.created_at,
             is_onboarded=getattr(current_user, 'is_onboarded', False),
             is_admin=is_admin_flag,
+            is_super_admin=is_super_admin_user(current_user),
             degree=current_user.degree,
             university=current_user.university,
             target_position=current_user.target_position,
