@@ -210,6 +210,52 @@ async def upload_answer_audio_to_s3(
         return None
 
 
+#: Prefix for Bulk ATS candidate resumes. Kept distinct from resumes/ (the
+#: student onboarding/ATS-final flow) since these are recruiter-uploaded,
+#: retained for a batch's lifetime rather than a user's, and never linked to
+#: a student account.
+BULK_ATS_RESUME_PREFIX = "Samvaad-Saathi/bulk-ats-resumes"
+
+
+def bulk_ats_resume_s3_key(batch_id: int, filename: str) -> str:
+    unique_suffix = str(uuid.uuid4())[:12]
+    _, ext = os.path.splitext(filename)
+    return f"{BULK_ATS_RESUME_PREFIX}/batch_{batch_id}/{unique_suffix}{ext or '.pdf'}"
+
+
+def upload_bulk_ats_resume_to_s3(file_bytes: bytes, batch_id: int, filename: str, content_type: str) -> Optional[str]:
+    if not s3_client or not BUCKET_NAME:
+        logger.error("S3 client is not configured. Ensure AWS credentials are in .env.")
+        return None
+
+    object_key = bulk_ats_resume_s3_key(batch_id, filename)
+    try:
+        s3_client.put_object(Bucket=BUCKET_NAME, Key=object_key, Body=file_bytes, ContentType=content_type)
+        return object_key
+    except ClientError as e:
+        logger.error(f"Failed to upload bulk ATS resume to S3: {e}")
+        return None
+
+
+async def fetch_bulk_ats_resume_from_s3(object_key: str) -> Optional[bytes]:
+    """Reads back a stored Bulk ATS resume, for the scoring worker task."""
+    if not s3_client or not BUCKET_NAME:
+        logger.error("S3 client is not configured; cannot read bulk ATS resume.")
+        return None
+
+    import asyncio
+
+    def _get() -> bytes:
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=object_key)
+        return response["Body"].read()
+
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, _get)
+    except Exception as error:  # noqa: BLE001
+        logger.error("Failed to read bulk ATS resume | Key=%s | %s", object_key, error)
+        return None
+
+
 async def fetch_answer_audio_from_s3(object_key: str) -> Optional[bytes]:
     """Reads back a stored answer recording, for the transcription worker."""
     if not s3_client or not BUCKET_NAME:
