@@ -103,6 +103,15 @@ async def initialize_db_tables(connection: AsyncConnection) -> None:
                 text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false')
             )
 
+            # user.role (Bulk ATS recruiter/placement_staff grant) is the same
+            # failure mode as is_admin above: the model declares it, so an
+            # environment that never ran the Alembic migration would 500 on
+            # every "user" query without this patch. NULL is the safe default -
+            # no existing row gains any new access.
+            await connection.execute(
+                text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS role VARCHAR(32)')
+            )
+
             # Transcription moved to the arq worker, so the model now declares a
             # status the upload response used to carry. Production's
             # alembic_version names a revision absent from the chain, so the
