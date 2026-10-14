@@ -6,6 +6,10 @@ on:
         description: 'Production acceptance record (tester, date, local/CI results, and approval link)'
         type: string
         required: true
+      database_backup_reference:
+        description: 'Latest verified Aiven backup/snapshot ID and timestamp'
+        type: string
+        required: true
 permissions:
   contents: read
   deployments: write
@@ -37,6 +41,7 @@ jobs:
         run: python ops/release.py
         env:
           TEST_EVIDENCE: ${{ inputs.test_evidence }}
+          DATABASE_BACKUP_REFERENCE: ${{ inputs.database_backup_reference }}
           GH_TOKEN: ${{ github.token }}
           HEALTH_URL: ${{ vars.HEALTH_URL }}
           PRODUCTION_PROVIDER: ec2
