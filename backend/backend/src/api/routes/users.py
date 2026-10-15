@@ -5,7 +5,7 @@ import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import is_admin_user, is_super_admin_user
+from src.api.dependencies.admin import is_admin_user, is_bulk_ats_user, is_super_admin_user
 from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
@@ -245,6 +245,8 @@ async def get_me(
             is_onboarded=getattr(current_user, 'is_onboarded', False),
             is_admin=is_admin_flag,
             is_super_admin=is_super_admin_user(current_user),
+            role=current_user.role,
+            can_use_bulk_ats=is_bulk_ats_user(current_user),
             degree=current_user.degree,
             university=current_user.university,
             target_position=current_user.target_position,

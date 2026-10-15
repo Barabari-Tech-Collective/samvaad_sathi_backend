@@ -1,9 +1,11 @@
 from io import BytesIO
 import json
+import zipfile
 from docx import Document
 from fastapi import HTTPException, UploadFile
 import fitz  # PyMuPDF
 
+from src.config.manager import settings
 
 ALLOWED_FILE_TYPES = [
     "application/pdf",
@@ -34,9 +36,10 @@ async def validate_resume_file(file: UploadFile):
 
 from typing import Any, Union
 
+
 async def extract_resume_text(file: UploadFile) -> Union[str, dict]:
     await validate_resume_file(file)
-    filename = file.filename.lower()
+    filename = (file.filename or "").lower()
 
     try:
         if filename.endswith(".pdf"):
@@ -64,6 +67,13 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
     try:
         contents = await file.read()
         pdf_document = fitz.open(stream=contents, filetype="pdf")
+
+        if pdf_document.needs_pass:
+            pdf_document.close()
+            raise HTTPException(
+                status_code=400,
+                detail="The PDF is password-protected. Upload an unlocked copy for ATS processing.",
+            )
 
         reconstructed_lines = []
         document_map = []
@@ -114,9 +124,7 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
 
                             if matched_url and matched_url not in span_text:
                                 # Inline attachment directly at text placement
-                                line_text_parts.append(
-                                    f"{span_text} [{matched_url}]"
-                                )
+                                line_text_parts.append(f"{span_text} [{matched_url}]")
                             else:
                                 line_text_parts.append(span_text)
 
@@ -141,17 +149,38 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
             if not raw_text_output.strip():
                 fallback_text = []
                 for page_num in range(len(pdf_document)):
-                    fallback_text.append(pdf_document.load_page(page_num).get_text("text"))
+                    fallback_text.append(
+                        pdf_document.load_page(page_num).get_text("text")
+                    )
                 raw_text_output = "\n".join(fallback_text)
-                
+
+            # Optional OCR for image-only PDFs. PyMuPDF delegates to the
+            # system Tesseract installation; deployments opt in explicitly.
+            if not raw_text_output.strip() and settings.BULK_ATS_OCR_ENABLED:
+                ocr_text = []
+                for page_num in range(len(pdf_document)):
+                    page = pdf_document.load_page(page_num)
+                    text_page = page.get_textpage_ocr(
+                        language=settings.BULK_ATS_OCR_LANGUAGE,
+                        dpi=settings.BULK_ATS_OCR_DPI,
+                        full=True,
+                    )
+                    ocr_text.append(page.get_text("text", textpage=text_page))
+                raw_text_output = "\n".join(ocr_text)
+
         finally:
             pdf_document.close()
             await file.seek(0)
 
         if not raw_text_output.strip():
+            ocr_hint = (
+                "OCR was enabled but could not recover text; review the original manually."
+                if settings.BULK_ATS_OCR_ENABLED
+                else "Enable BULK_ATS_OCR_ENABLED with Tesseract installed, or review the original manually."
+            )
             raise HTTPException(
-                status_code=400, 
-                detail="No readable text found. Your resume appears to be a scanned image OR has corrupted font encoding (missing Unicode maps) commonly caused by design tools like Canva. ATS systems cannot read these formats. Please re-export your resume directly from Word or Google Docs as a standard text-based PDF."
+                status_code=400,
+                detail=f"No readable text found in this image-only or malformed PDF. {ocr_hint}",
             )
 
         # Append structured spatial metadata block at bottom for downstream parser contexts
@@ -162,7 +191,7 @@ async def extract_pdf_text_spatial(file: UploadFile) -> dict:
         return {
             "text": raw_text_output.strip(),
             "documentMap": document_map,
-            "embeddedLinks": list(all_unique_urls)
+            "embeddedLinks": list(all_unique_urls),
         }
 
     except HTTPException:
@@ -179,6 +208,31 @@ async def extract_docx_text(file: UploadFile) -> str:
     """
     try:
         contents = await file.read()
+        try:
+            with zipfile.ZipFile(BytesIO(contents)) as archive:
+                infos = archive.infolist()
+                if "word/document.xml" not in {info.filename for info in infos}:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Malformed DOCX: document.xml is missing",
+                    )
+                max_uncompressed = (
+                    settings.BULK_ATS_DOCX_MAX_UNCOMPRESSED_MB * 1024 * 1024
+                )
+                if (
+                    len(infos) > 5000
+                    or sum(info.file_size for info in infos) > max_uncompressed
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="DOCX expands beyond the safe processing limit",
+                    )
+                if any(info.flag_bits & 0x1 for info in infos):
+                    raise HTTPException(
+                        status_code=400, detail="Encrypted DOCX files are not supported"
+                    )
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Malformed DOCX file")
         docx_file = BytesIO(contents)
         document = Document(docx_file)
 

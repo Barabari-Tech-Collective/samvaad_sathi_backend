@@ -11,6 +11,17 @@ services:
       retries: 5
     restart: unless-stopped
 
+  clamav:
+    image: clamav/clamav:stable
+    container_name: samvaad-clamav
+    expose:
+      - "3310"
+    # The official image already includes a clamd ping HEALTHCHECK and a
+    # startup delay while signatures load; depends_on below consumes it.
+    volumes:
+      - clamav_signatures:/var/lib/clamav
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -20,13 +31,21 @@ services:
       - "8000:8000"
     # Supabase: pass envs; do not include secrets in .env if possible
     env_file:
-      - ../.env
+      - .env
     environment:
       # Prefer injecting the API key at runtime or via Docker secrets/CI; override here if needed
       - OPENAI_API_KEY
       - REDIS_HOST=redis
+      - BULK_ATS_OCR_ENABLED=True
+      - BULK_ATS_OCR_LANGUAGE=eng+hin
+      - BULK_ATS_CLAMAV_HOST=clamav
+      - BULK_ATS_CLAMAV_PORT=3310
+      - BULK_ATS_CLAMAV_FAIL_CLOSED=True
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
     volumes:
       # Bind host uploads dir to container
       - ../../uploads:/app/uploads
@@ -44,10 +63,21 @@ services:
     container_name: samvaad-worker
     command: ["arq", "src.worker.main.WorkerSettings"]
     env_file:
-      - ../.env
+      - .env
     environment:
       - OPENAI_API_KEY
       - REDIS_HOST=redis
+      - BULK_ATS_OCR_ENABLED=True
+      - BULK_ATS_OCR_LANGUAGE=eng+hin
+      - BULK_ATS_CLAMAV_HOST=clamav
+      - BULK_ATS_CLAMAV_PORT=3310
+      - BULK_ATS_CLAMAV_FAIL_CLOSED=True
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  clamav_signatures:
