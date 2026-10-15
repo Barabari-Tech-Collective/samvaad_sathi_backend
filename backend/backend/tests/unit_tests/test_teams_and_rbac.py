@@ -757,3 +757,60 @@ async def test_allowed_colleges_for_senior_facilitator_and_team_member():
     assert allowed_tm is None
 
 
+@pytest.mark.asyncio
+async def test_team_member_creation_and_update_never_assigns_colleges():
+    """Team members in both teams must never be assigned specific colleges and have full view access."""
+    mock_session = AsyncMock()
+    team = Team(id=1, name="Program Team", status="active")
+    user = _make_user(109, email="tm_unassigned@barabari.org")
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = None
+        elif "from \"user\"" in stmt_str or "user.email" in stmt_str:
+            result.scalar_one_or_none.return_value = user
+        elif "from team" in stmt_str:
+            result.scalar_one_or_none.return_value = team
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    # Even if colleges are passed in payload for Team Member, they are forced to None
+    member_data = TeamMemberCreate(
+        name="Team Member",
+        email="tm_unassigned@barabari.org",
+        access_role="Team Member",
+        colleges=["BITS Pilani", "IIT Delhi"],
+    )
+    created = await repo.add_team_member(team_id=1, member_data=member_data)
+    assert created["colleges"] is None
+
+    # Verify update also forces colleges to None for Team Member
+    member = TeamMember(id=10, team_id=1, user_id=109, access_role="Team Member", colleges=["BITS Pilani"], status="active")
+
+    def update_exec_mock(stmt):
+        res = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "from \"user\"" in stmt_str or "user.id ==" in stmt_str:
+            res.scalar_one_or_none.return_value = user
+        else:
+            res.scalar_one_or_none.return_value = member
+        return res
+
+    mock_session.execute.side_effect = update_exec_mock
+
+    updated = await repo.update_team_member(
+        team_id=1,
+        member_id=10,
+        member_data=TeamMemberUpdate(access_role="Team Member", colleges=["BITS Pilani"]),
+    )
+    assert updated is not None
+    assert updated["colleges"] is None
+
+
+

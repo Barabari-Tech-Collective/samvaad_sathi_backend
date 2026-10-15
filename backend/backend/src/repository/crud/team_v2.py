@@ -200,6 +200,13 @@ class TeamCRUDRepository(BaseCRUDRepository):
                     user.password_hash = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
         # Security Note: If user already exists with an established password, NEVER overwrite their global password.
 
+        # Team Members and Creators are not assigned specific colleges (they view all colleges)
+        assigned_colleges = (
+            member_data.colleges
+            if clean_role in {"jr facilitator", "junior facilitator"}
+            else None
+        )
+
         # 3. Check existing membership (prevent duplicate rows / reactivate soft-deleted)
         mem_stmt = select(TeamMember).where(TeamMember.team_id == team_id, TeamMember.user_id == user.id)
         existing_member = (await self.async_session.execute(mem_stmt)).scalar_one_or_none()
@@ -212,7 +219,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
             existing_member.access_role = member_data.access_role
             existing_member.purposes = member_data.purposes
             existing_member.domain = member_data.domain
-            existing_member.colleges = member_data.colleges
+            existing_member.colleges = assigned_colleges
             new_member = existing_member
         else:
             new_member = TeamMember(
@@ -221,7 +228,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
                 access_role=member_data.access_role,
                 purposes=member_data.purposes,
                 domain=member_data.domain,
-                colleges=member_data.colleges,
+                colleges=assigned_colleges,
                 status='active'
             )
             self.async_session.add(new_member)
@@ -292,7 +299,11 @@ class TeamCRUDRepository(BaseCRUDRepository):
             member.purposes = member_data.purposes
         if member_data.domain is not None:
             member.domain = member_data.domain
-        if member_data.colleges is not None:
+
+        effective_role = (member_data.access_role or member.access_role or "").strip().lower()
+        if effective_role in {"team member", "member", "staff"}:
+            member.colleges = None
+        elif member_data.colleges is not None:
             member.colleges = member_data.colleges
             
         # Security Note: Never mutate user's email or password in team-scoped endpoint!
