@@ -183,9 +183,16 @@ def smoke():
     url = required("HEALTH_URL")
     if not url.startswith("https://"):
         raise RuntimeError("Hosted health checks require HTTPS")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Samvaad-Release-Health-Check/1.0",
+        },
+    )
     for attempt in range(6):
         try:
-            with urllib.request.urlopen(url, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=30) as response:
                 if response.status == 200:
                     return
         except (OSError, urllib.error.URLError):
