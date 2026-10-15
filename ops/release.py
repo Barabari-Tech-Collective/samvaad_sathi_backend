@@ -132,12 +132,11 @@ def ec2_deploy(sha):
         "--instance-ids",
         instance,
         "--document-name",
-        "AWS-RunShellScript",
+        "SamvaadProductionRelease",
         "--parameters",
         json.dumps(
             {
-                "commands": [f"/usr/local/sbin/samvaad-release {sha}"],
-                "executionTimeout": ["1200"],
+                "releaseSha": [sha],
             }
         ),
         "--output",
