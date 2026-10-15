@@ -11,7 +11,7 @@ from src.services.ai_resume.scoring.project_mapper import ProjectLinkMapper
 from src.services.ai_resume.prompt_builder import (
     build_ats_analysis_prompt,
 )
-from src.services.ai_resume.url_validator import extract_professional_urls
+from src.services.ai_resume.url_validator import extract_all_urls
 
 ats_engine = ATSEngine()
 project_mapper = ProjectLinkMapper()
@@ -50,11 +50,20 @@ async def generate_ats_analysis(
         link_validator = SmartLinkValidator()
         
         # Ingest pre-extracted spatial links or fallback text buffer
-        extracted_targets = list(embedded_links) if embedded_links else []
-        extracted_targets.extend(extract_professional_urls(resume_text))
-        extracted_targets = list(dict.fromkeys(extracted_targets))  # deduplicate, preserve order
+        seen_urls = set()
+        extracted_targets = []
+        for item in (embedded_links or []):
+            url_str = item.get("url") if isinstance(item, dict) else str(item)
+            if url_str and url_str not in seen_urls:
+                seen_urls.add(url_str)
+                extracted_targets.append(item)
+
+        for url_str in extract_all_urls(resume_text):
+            if url_str and url_str not in seen_urls:
+                seen_urls.add(url_str)
+                extracted_targets.append(url_str)
                 
-        verified_links_context = await link_validator.validate_all_links_async(extracted_targets)
+        verified_links_context = await link_validator.validate_all_links_async(extracted_targets, resume_text=resume_text)
 
         print("\n--- [STEP 1: SmartLinkValidator Output Links] ---")
         print(json.dumps(verified_links_context, indent=2))
@@ -186,7 +195,18 @@ async def generate_ats_analysis(
             ],
             "suggestedProject": parsed_ai_feedback.get("suggestedProject", {}),
             "finalRecommendations": parsed_ai_feedback.get("finalRecommendations", []),
-            "hygieneCheck": deterministic_report["hygieneCheck"]
+            "hygieneCheck": deterministic_report["hygieneCheck"],
+            "allLinks": [
+                {
+                    "url": url,
+                    "platform": details.get("platform", "unknown"),
+                    "category": details.get("category", "other"),
+                    "working": details.get("valid", False),
+                    "statusCode": details.get("status_code", 0),
+                    "error": details.get("error", "")
+                }
+                for url, details in verified_links_context.get("links", {}).items()
+            ]
         }
 
         final_response["hygieneCheck"]["grammarIssues"] = parsed_ai_feedback.get("hygieneCheck", {}).get("grammarIssues", [])
