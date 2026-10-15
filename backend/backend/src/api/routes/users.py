@@ -190,6 +190,7 @@ async def login_user(
             can_edit=can_edit,
             is_view_only=is_view_only,
             team_name=primary_team.name if primary_team else None,
+            can_use_bulk_ats=is_bulk_ats_user(user),
             degree=None,
             university=None,
             target_position=None,
