@@ -12,6 +12,7 @@ from src.api.routes.bulk_ats import (
     _get_authorized_batch,
     _get_authorized_candidate,
     _parse_skills,
+    _parse_resume_urls,
     _require_role_rubric,
 )
 from src.config.manager import settings
@@ -51,6 +52,25 @@ def test_parse_skills_deduplicates_and_accepts_newlines():
         "FastAPI",
         "PostgreSQL",
     ]
+
+
+def test_parse_resume_urls_ignores_blank_lines_and_marks_source():
+    assert _parse_resume_urls(
+        " https://drive.google.com/file/d/one/view\n\nhttps://example.test/two.pdf "
+    ) == [
+        {
+            "resume_url": "https://drive.google.com/file/d/one/view",
+            "source": "pasted_link",
+        },
+        {
+            "resume_url": "https://example.test/two.pdf",
+            "source": "pasted_link",
+        },
+    ]
+
+
+def test_staff_dashboard_origin_is_allowed_for_direct_bulk_uploads():
+    assert "https://admin.barabaricollective.org" in settings.ALLOWED_ORIGINS
 
 
 def test_batch_requires_jd_or_required_skills_as_role_rubric():
