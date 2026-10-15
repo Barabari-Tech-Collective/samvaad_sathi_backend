@@ -58,7 +58,8 @@ class AnalysisAggregationService:
         user_id: int,
         analysis_types: List[str],
         auth_token: str,
-        db: AsyncSession
+        db: AsyncSession,
+        answer_version: int | None = None,
     ) -> Tuple[AggregatedAnalysis, AnalysisMetadata, bool, str | None]:
         """
         Aggregate multiple analysis types for a question attempt.
@@ -115,6 +116,8 @@ class AnalysisAggregationService:
               question_attempt_id,
             )
             raise ValueError("Question attempt does not have transcription data")
+        if answer_version is not None and question_attempt.answer_version != answer_version:
+            raise ValueError("The answer changed before feedback processing started")
         logger.info(
           "COMPLETE_ANALYSIS starting concurrent analyses | Attempt=%s | Types=%s",
           question_attempt_id,
@@ -167,7 +170,7 @@ class AnalysisAggregationService:
         )
         # Save to database (deep-merge to avoid losing other keys)
         saved, save_error = await self._save_analysis_to_db(
-            question_attempt, aggregated_analysis, db
+            question_attempt, aggregated_analysis, db, answer_version=answer_version
         )
 
         logger.info(
@@ -749,7 +752,9 @@ class AnalysisAggregationService:
         self,
         question_attempt: QuestionAttempt,
         aggregated_analysis: AggregatedAnalysis,
-        db: AsyncSession
+        db: AsyncSession,
+        *,
+        answer_version: int | None = None,
     ) -> Tuple[bool, str | None]:
         """Save aggregated analysis to database."""
         logger.info(
@@ -777,12 +782,14 @@ class AnalysisAggregationService:
             )
 
             # Update the question attempt using SQL update to avoid session issues
-            stmt = (
-                sqlalchemy.update(QuestionAttempt)
-                .where(QuestionAttempt.id == question_attempt.id)
-                .values(analysis_json=merged)
-            )
-            await db.execute(stmt)
+            conditions = [QuestionAttempt.id == question_attempt.id]
+            if answer_version is not None:
+                conditions.append(QuestionAttempt.answer_version == answer_version)
+            stmt = sqlalchemy.update(QuestionAttempt).where(*conditions).values(analysis_json=merged)
+            result = await db.execute(stmt)
+            if result.rowcount != 1:
+                await db.rollback()
+                return False, "The answer changed while feedback was being prepared."
             await db.commit()
             logger.info(
             "ANALYSIS DB SAVE SUCCESS | Attempt=%s",

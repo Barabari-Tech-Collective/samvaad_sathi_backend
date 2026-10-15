@@ -6,14 +6,124 @@ from src.models.db.interview import Interview
 from src.models.db.question_attempt import QuestionAttempt
 from src.models.db.summary_report import SummaryReport
 from src.repository.crud.base import BaseCRUDRepository
+from src.services.interview_lifecycle import interview_has_expired
+from src.services.interview_session_lease import (
+    SESSION_LEASE_TTL,
+    new_session_lease_token,
+    session_lease_digest,
+    session_lease_is_active,
+    session_lease_matches,
+)
+
+PRACTICE_SESSION_TTL = datetime.timedelta(days=7)
 
 
 class InterviewCRUDRepository(BaseCRUDRepository):
+    async def lock_by_id_and_user(
+        self, *, interview_id: int, user_id: int
+    ) -> Interview | None:
+        stmt = (
+            sqlalchemy.select(Interview)
+            .where(Interview.id == interview_id, Interview.user_id == user_id)
+            .with_for_update()
+        )
+        return (await self.async_session.execute(stmt)).scalar_one_or_none()
+
+    async def claim_session_lease(
+        self,
+        *,
+        interview_id: int,
+        user_id: int,
+        presented_token: str | None,
+        force: bool,
+    ) -> tuple[Interview | None, str, str | None]:
+        interview = await self.lock_by_id_and_user(
+            interview_id=interview_id, user_id=user_id
+        )
+        if interview is None:
+            return None, "not_found", None
+        if interview.interview_mode != "practice":
+            return interview, "not_practice", None
+        if interview.status != "active":
+            return interview, "inactive", None
+        if interview_has_expired(interview):
+            return interview, "expired", None
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if force:
+            token = new_session_lease_token()
+            state = (
+                "taken_over"
+                if getattr(interview, "session_lease_hash", None)
+                else "acquired"
+            )
+            interview.session_lease_hash = session_lease_digest(token)
+            interview.session_lease_acquired_at = now
+        elif session_lease_matches(interview, presented_token):
+            token = presented_token
+            state = "renewed"
+        elif session_lease_is_active(interview, now=now) and not force:
+            return interview, "conflict", None
+        else:
+            token = new_session_lease_token()
+            state = "acquired"
+            interview.session_lease_hash = session_lease_digest(token)
+            interview.session_lease_acquired_at = now
+
+        interview.session_lease_expires_at = now + SESSION_LEASE_TTL
+        interview.session_lease_required = True
+        await self.async_session.commit()
+        await self.async_session.refresh(interview)
+        return interview, state, token
+
+    async def heartbeat_session_lease(
+        self,
+        *,
+        interview_id: int,
+        user_id: int,
+        lease_token: str,
+    ) -> Interview | None:
+        interview = await self.lock_by_id_and_user(
+            interview_id=interview_id, user_id=user_id
+        )
+        if (
+            interview is None
+            or interview.status != "active"
+            or interview.interview_mode != "practice"
+            or interview_has_expired(interview)
+            or not session_lease_matches(interview, lease_token)
+        ):
+            return None
+        interview.session_lease_expires_at = (
+            datetime.datetime.now(datetime.timezone.utc) + SESSION_LEASE_TTL
+        )
+        await self.async_session.commit()
+        await self.async_session.refresh(interview)
+        return interview
+
+    @staticmethod
+    def clear_session_lease(interview: Interview) -> None:
+        interview.session_lease_hash = None
+        interview.session_lease_acquired_at = None
+        interview.session_lease_expires_at = None
+
     async def get_active_by_user(self, *, user_id: int) -> Interview | None:
         stmt = (
             sqlalchemy.select(Interview)
             .where(Interview.user_id == user_id)
             .where(Interview.status == "active")
+            .order_by(Interview.id.desc())
+        )
+        query = await self.async_session.execute(statement=stmt)
+        return query.scalar()  # type: ignore
+
+    async def get_resumable_by_user(self, *, user_id: int) -> Interview | None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stmt = (
+            sqlalchemy.select(Interview)
+            .where(Interview.user_id == user_id)
+            .where(Interview.status.in_(("active", "paused")))
+            .where(sqlalchemy.or_(Interview.expires_at.is_(None), Interview.expires_at > now))
             .order_by(Interview.id.desc())
         )
         query = await self.async_session.execute(statement=stmt)
@@ -38,11 +148,77 @@ class InterviewCRUDRepository(BaseCRUDRepository):
             status="active",
             job_profile_id=job_profile_id,
             interview_mode=interview_mode,
+            expires_at=(
+                datetime.datetime.now(datetime.timezone.utc) + PRACTICE_SESSION_TTL
+                if interview_mode == "practice"
+                else None
+            ),
         )
         self.async_session.add(new_interview)
         await self.async_session.commit()
         await self.async_session.refresh(new_interview)
         return new_interview
+
+    async def mark_paused(self, *, interview_id: int) -> Interview | None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stmt = (
+            sqlalchemy.update(Interview)
+            .where(Interview.id == interview_id, Interview.status == "active")
+            .values(
+                status="paused",
+                paused_at=now,
+                expires_at=now + PRACTICE_SESSION_TTL,
+                session_lease_hash=None,
+                session_lease_acquired_at=None,
+                session_lease_expires_at=None,
+            )
+            .returning(Interview)
+        )
+        interview = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if interview is not None:
+            await self.async_session.refresh(interview)
+        return interview
+
+    async def mark_resumed(self, *, interview_id: int) -> Interview | None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stmt = (
+            sqlalchemy.update(Interview)
+            .where(Interview.id == interview_id, Interview.status == "paused")
+            .values(
+                status="active",
+                paused_at=None,
+                expires_at=now + PRACTICE_SESSION_TTL,
+                session_lease_hash=None,
+                session_lease_acquired_at=None,
+                session_lease_expires_at=None,
+            )
+            .returning(Interview)
+        )
+        interview = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if interview is not None:
+            await self.async_session.refresh(interview)
+        return interview
+
+    async def mark_expired(self, *, interview_id: int) -> Interview | None:
+        stmt = (
+            sqlalchemy.update(Interview)
+            .where(Interview.id == interview_id, Interview.status.in_(("active", "paused")))
+            .values(
+                status="expired",
+                paused_at=None,
+                session_lease_hash=None,
+                session_lease_acquired_at=None,
+                session_lease_expires_at=None,
+            )
+            .returning(Interview)
+        )
+        interview = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if interview is not None:
+            await self.async_session.refresh(interview)
+        return interview
 
     async def mark_completed(self, *, interview_id: int) -> Interview | None:
         stmt = sqlalchemy.select(Interview).where(Interview.id == interview_id)
@@ -69,6 +245,7 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         interview.status = "completed"
         interview.completed_at = datetime.datetime.now(datetime.timezone.utc)
         interview.duration_seconds = duration_seconds
+        self.clear_session_lease(interview)
         await self.async_session.commit()
         await self.async_session.refresh(interview)
         return interview
@@ -229,5 +406,3 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         query = await self.async_session.execute(statement=stmt)
         count = query.scalar()
         return count or 0
-
-

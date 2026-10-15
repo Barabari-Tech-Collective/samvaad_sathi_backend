@@ -9,6 +9,11 @@ from src.models.schemas.base import BaseSchemaModel
 class CompleteAnalysisRequest(BaseSchemaModel):
     """Request model for complete analysis endpoint"""
     question_attempt_id: pydantic.StrictInt = pydantic.Field(gt=0, description="ID of the question attempt to analyze (must be > 0, no string coercion)")
+    answer_version: pydantic.StrictInt | None = pydantic.Field(
+        default=None,
+        gt=0,
+        description="Answer version acknowledged by the save endpoint; prevents stale AI results",
+    )
     analysis_types: List[str] = pydantic.Field(
         default=["domain", "communication", "pace", "pause"],
         description="List of analysis types to perform. Available: domain, communication, pace, pause"
@@ -29,6 +34,7 @@ class CompleteAnalysisRequest(BaseSchemaModel):
         "examples": [
             {
                 "questionAttemptId": 1001,
+                "answerVersion": 1,
                 "analysisTypes": ["domain", "communication", "pace", "pause"]
             }
         ]

@@ -825,6 +825,15 @@ class AnalyticsService:
                 }
             )
 
+        system_alerts.extend(
+            await self._answer_processing_alerts(
+                user_id=user_id,
+                start_date=start_date,
+                end_date=end_date,
+                now=now,
+            )
+        )
+
         interviews_all = await self._list_interviews_all()
         reports_all = await self._reports_by_interview([i.id for i in interviews_all])
         summaries_all = await self._summary_reports_by_interview([i.id for i in interviews_all])
@@ -872,6 +881,97 @@ class AnalyticsService:
             "student_alerts": student_alerts,
             "system_alerts": system_alerts,
         }
+
+    async def _answer_processing_alerts(
+        self,
+        *,
+        user_id: int | None,
+        start_date: datetime.date | None,
+        end_date: datetime.date | None,
+        now: datetime.datetime,
+    ) -> list[dict[str, Any]]:
+        """Surface durable answers whose AI processing needs attention.
+
+        Only aggregate operational metadata is returned. Student answer text,
+        audio URLs, and provider error details must not leak into analytics.
+        """
+        stalled_before = now - datetime.timedelta(minutes=10)
+        last_update = sqlalchemy.func.coalesce(
+            QuestionAttempt.transcription_updated_at,
+            QuestionAttempt.answer_saved_at,
+            QuestionAttempt.created_at,
+        )
+        stmt = (
+            sqlalchemy.select(
+                QuestionAttempt.transcription_status.label("status"),
+                sqlalchemy.func.count(QuestionAttempt.id).label("answer_count"),
+                sqlalchemy.func.min(last_update).label("oldest_update"),
+            )
+            .join(Interview, Interview.id == QuestionAttempt.interview_id)
+            .where(
+                QuestionAttempt.answer_saved_at.is_not(None),
+                QuestionAttempt.answer_kind == "audio",
+                sqlalchemy.or_(
+                    QuestionAttempt.transcription_status == "failed",
+                    sqlalchemy.and_(
+                        QuestionAttempt.transcription_status.in_(("pending", "processing")),
+                        last_update < stalled_before,
+                    ),
+                ),
+            )
+            .group_by(QuestionAttempt.transcription_status)
+        )
+        if user_id is not None:
+            stmt = stmt.where(Interview.user_id == user_id)
+        if start_date is not None:
+            stmt = stmt.where(
+                Interview.created_at
+                >= datetime.datetime.combine(
+                    start_date, datetime.time.min, tzinfo=datetime.timezone.utc
+                )
+            )
+        if end_date is not None:
+            stmt = stmt.where(
+                Interview.created_at
+                <= datetime.datetime.combine(
+                    end_date, datetime.time.max, tzinfo=datetime.timezone.utc
+                )
+            )
+
+        rows = list((await self._db.execute(stmt)).all())
+        alerts: list[dict[str, Any]] = []
+        for row in rows:
+            count = int(row.answer_count)
+            oldest_update = _ensure_utc(row.oldest_update)
+            oldest_age_minutes = max(0, int((now - oldest_update).total_seconds() // 60))
+            if row.status == "failed":
+                alerts.append(
+                    {
+                        "type": "PRACTICE_ANSWER_FEEDBACK_FAILED",
+                        "severity": "high",
+                        "count": count,
+                        "oldest_age_minutes": oldest_age_minutes,
+                        "message": (
+                            f"{count} saved practice answer{'s' if count != 1 else ''} "
+                            "could not be transcribed. Student answers are safe, but detailed "
+                            "feedback needs recovery."
+                        ),
+                    }
+                )
+            else:
+                alerts.append(
+                    {
+                        "type": "PRACTICE_ANSWER_FEEDBACK_STUCK",
+                        "severity": "medium",
+                        "count": count,
+                        "oldest_age_minutes": oldest_age_minutes,
+                        "message": (
+                            f"{count} saved practice answer{'s have' if count != 1 else ' has'} "
+                            "been waiting over 10 minutes for speech processing."
+                        ),
+                    }
+                )
+        return alerts
 
     async def _list_interviews(
         self,

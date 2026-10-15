@@ -1,0 +1,769 @@
+import io
+import zipfile
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+from fastapi import HTTPException
+
+from src.api.routes.bulk_ats import (
+    _cell_text,
+    _get_authorized_batch,
+    _get_authorized_candidate,
+    _parse_skills,
+)
+from src.config.manager import settings
+from src.main import backend_app
+from src.repository.crud.bulk_ats import BulkATSCRUDRepository
+from src.services.ai_resume.bulk import (
+    deepseek_feedback,
+    google_drive_oauth,
+    jev_client,
+    pipeline,
+)
+from src.services.ai_resume.bulk.evidence import (
+    build_category_evidence,
+    calculate_confidence,
+    redact_for_semantic_scoring,
+)
+from src.services.ai_resume.bulk.jd_quality import analyze_job_description
+from src.services.ai_resume.bulk.malware_scan import scan_document
+from src.worker import tasks as worker_tasks
+from src.worker.tasks import (
+    _detect_resume_type,
+    _fetch_resume_from_url,
+    _google_drive_download_url,
+)
+
+
+def test_cell_text_accepts_numeric_excel_candidate_ids():
+    assert _cell_text(1234) == "1234"
+    assert _cell_text(1234.0) == "1234"
+    assert _cell_text("  candidate-7  ") == "candidate-7"
+    assert _cell_text(None) == ""
+
+
+def test_parse_skills_deduplicates_and_accepts_newlines():
+    assert _parse_skills("Python, FastAPI\npython, PostgreSQL") == [
+        "Python",
+        "FastAPI",
+        "PostgreSQL",
+    ]
+
+
+def test_jd_quality_flags_missing_context_and_discriminatory_proxies():
+    result = analyze_job_description(
+        "We need a young native English speaker with Python experience.",
+        required_skills=["Python"],
+    )
+
+    assert result["level"] == "limited"
+    assert "potentially_discriminatory_criteria_detected" in result["warnings"]
+    assert set(result["riskyCriteria"]) == {
+        "age_or_seniority_proxy",
+        "nationality_or_language_proxy",
+    }
+
+
+def test_semantic_payload_redacts_direct_identity_but_preserves_original():
+    parsed = {
+        "header": {
+            "fullName": "Asha Sharma",
+            "email": "asha@example.test",
+            "phone": "+91 99999 88888",
+        },
+        "skills": ["Python"],
+    }
+    text, semantic = redact_for_semantic_scoring(
+        "Asha Sharma | asha@example.test | +91 99999 88888 | Python",
+        parsed,
+    )
+
+    assert "Asha Sharma" not in text
+    assert "asha@example.test" not in text
+    assert semantic["header"] == {}
+    assert parsed["header"]["fullName"] == "Asha Sharma"
+
+
+def test_confidence_is_separate_from_score_and_exposes_interval():
+    evidence = build_category_evidence(
+        parsed_resume_json={
+            "skills": ["Python"],
+            "experience": [{"role": "Engineer", "company": "Example"}],
+        },
+        required_skills=["Python"],
+        preferred_skills=[],
+        link_report={"missing_required": []},
+        jev_report={"skills_score": {"value": 4, "confidence": 0.9}},
+    )
+    confidence = calculate_confidence(
+        role_context="job_description",
+        category_evidence=evidence,
+        jev_average_confidence=0.9,
+        parsed_resume_json={"skills": ["Python"], "experience": [{}]},
+        warnings=[],
+        final_score=78.0,
+    )
+
+    assert (
+        confidence["scoreInterval"]["lower"] < 78 < confidence["scoreInterval"]["upper"]
+    )
+    assert confidence["policy"].startswith("Confidence controls review priority")
+
+
+def test_google_drive_share_link_is_converted_to_download_url():
+    converted = _google_drive_download_url(
+        "https://drive.google.com/file/d/file-123/view?usp=sharing"
+    )
+
+    assert converted == "https://drive.google.com/uc?export=download&id=file-123"
+
+
+def test_google_drive_oauth_state_and_refresh_token_are_protected(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    key = Fernet.generate_key().decode()
+    monkeypatch.setattr(settings, "GOOGLE_DRIVE_OAUTH_CLIENT_ID", "client-id")
+    monkeypatch.setattr(settings, "GOOGLE_DRIVE_OAUTH_CLIENT_SECRET", "client-secret")
+    monkeypatch.setattr(
+        settings,
+        "GOOGLE_DRIVE_OAUTH_REDIRECT_URI",
+        "https://api.example.test/api/bulk-ats/google-drive/callback",
+    )
+    monkeypatch.setattr(
+        settings,
+        "GOOGLE_DRIVE_OAUTH_FRONTEND_RETURN_URL",
+        "https://app.example.test/bulk-ats",
+    )
+    monkeypatch.setattr(settings, "GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY", key)
+    monkeypatch.setattr(settings, "GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY_ID", "v1")
+
+    authorization_url = google_drive_oauth.build_authorization_url(user_id=42)
+    query = parse_qs(urlparse(authorization_url).query)
+    assert query["access_type"] == ["offline"]
+    assert query["scope"] == ["https://www.googleapis.com/auth/drive.readonly"]
+    assert google_drive_oauth.decode_state(query["state"][0]) == 42
+
+    encrypted = google_drive_oauth.encrypt_refresh_token("refresh-token")
+    assert "refresh-token" not in encrypted
+    assert (
+        google_drive_oauth.decrypt_refresh_token(encrypted, key_id="v1")
+        == "refresh-token"
+    )
+    with pytest.raises(google_drive_oauth.DriveOAuthStateError):
+        google_drive_oauth.decode_state(query["state"][0] + "tampered")
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_malware_scan_rejects_missing_scanner(monkeypatch):
+    monkeypatch.setattr(settings, "BULK_ATS_CLAMAV_HOST", "")
+    monkeypatch.setattr(settings, "BULK_ATS_CLAMAV_FAIL_CLOSED", True)
+
+    result = await scan_document(b"synthetic")
+
+    assert result == {"status": "error", "reason": "scanner_not_configured"}
+
+
+def test_resume_signature_detection_rejects_html_and_accepts_pdf_docx():
+    assert _detect_resume_type(b"<html>Sign in to Google Drive</html>") is None
+    assert _detect_resume_type(b"%PDF-1.7\nexample") == (".pdf", "application/pdf")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "content types")
+        archive.writestr("word/document.xml", "document")
+    assert _detect_resume_type(buffer.getvalue()) == (
+        ".docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+
+@pytest.mark.asyncio
+async def test_drive_fetch_revalidates_redirect_and_returns_detected_file(monkeypatch):
+    import httpx
+
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, status_code, headers, content=b""):
+            self.status_code = status_code
+            self.headers = headers
+            self.content = content
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def aiter_bytes(self):
+            yield self.content
+
+    responses = iter(
+        [
+            FakeResponse(
+                302,
+                {"location": "https://drive.usercontent.google.com/download/resume"},
+            ),
+            FakeResponse(
+                200,
+                {"content-disposition": 'attachment; filename="Candidate Resume.pdf"'},
+                b"%PDF-1.7\nsynthetic",
+            ),
+        ]
+    )
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, _method, url):
+            requested_urls.append(url)
+            return next(responses)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(worker_tasks, "_is_public_http_url", lambda _url: True)
+
+    result = await _fetch_resume_from_url(
+        "https://drive.google.com/file/d/file-123/view?usp=sharing"
+    )
+
+    assert requested_urls == [
+        "https://drive.google.com/uc?export=download&id=file-123",
+        "https://drive.usercontent.google.com/download/resume",
+    ]
+    assert result.content == b"%PDF-1.7\nsynthetic"
+    assert result.filename == "Candidate Resume.pdf"
+    assert result.content_type == "application/pdf"
+
+
+@pytest.mark.asyncio
+async def test_drive_fetch_rejects_non_file_permission_page(monkeypatch):
+    import httpx
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "text/html"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def aiter_bytes(self):
+            yield b"<html>Request access</html>"
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, _method, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(worker_tasks, "_is_public_http_url", lambda _url: True)
+
+    result = await _fetch_resume_from_url(
+        "https://drive.google.com/file/d/private-file/view"
+    )
+
+    assert result.content is None
+    assert "sharing permissions" in result.error
+
+
+@pytest.mark.asyncio
+async def test_private_drive_fetch_uses_drive_api_bearer_token(monkeypatch):
+    import httpx
+
+    requests: list[tuple[str, dict]] = []
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-disposition": 'attachment; filename="Private Resume.pdf"'}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def aiter_bytes(self):
+            yield b"%PDF-1.7\nprivate"
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, _method, url, **kwargs):
+            requests.append((url, kwargs.get("headers") or {}))
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(worker_tasks, "_is_public_http_url", lambda _url: True)
+
+    result = await _fetch_resume_from_url(
+        "https://drive.google.com/file/d/private-file/view",
+        google_access_token="short-lived-token",
+    )
+
+    assert requests == [
+        (
+            "https://www.googleapis.com/drive/v3/files/private-file?alt=media&supportsAllDrives=true",
+            {"Authorization": "Bearer short-lived-token"},
+        )
+    ]
+    assert result.filename == "Private Resume.pdf"
+
+
+def test_bulk_ats_endpoints_are_exposed_in_openapi():
+    paths = backend_app.openapi()["paths"]
+
+    assert "/api/bulk-ats/me" in paths
+    assert "/api/bulk-ats/batches" in paths
+    assert "/api/bulk-ats/batches/{batch_id}/resumes" in paths
+    assert "/api/bulk-ats/batches/{batch_id}/import-links" in paths
+    assert "/api/bulk-ats/batches/{batch_id}/candidates" in paths
+    assert "/api/bulk-ats/candidates/{candidate_id}/rerun" in paths
+    assert "/api/bulk-ats/candidates/{candidate_id}/review" in paths
+    assert "/api/bulk-ats/google-drive/status" in paths
+    assert "/api/bulk-ats/google-drive/connect" in paths
+    assert "/api/bulk-ats/google-drive/connection" in paths
+
+
+@pytest.mark.asyncio
+async def test_stub_jev_provider_forces_manual_review():
+    answers = await jev_client.StubJevProvider().evaluate()
+
+    assert answers["needs_manual_review"].value is True
+    assert answers["needs_manual_review"].confidence == 0.0
+    assert answers["skills_score"].value is None
+
+
+@pytest.mark.asyncio
+async def test_real_jev_provider_calls_system_one_and_maps_answers(monkeypatch):
+    response = SimpleNamespace(
+        scores={"skills_score": SimpleNamespace(score=3.0, confidence=0.8)},
+        choices={"education_quality": SimpleNamespace(choice="Strong", confidence=0.9)},
+        nouls={"needs_manual_review": SimpleNamespace(noul=0.2)},
+    )
+    system_one = AsyncMock(return_value=response)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def system_one(self, **kwargs):
+            return await system_one(**kwargs)
+
+    monkeypatch.setattr(jev_client, "AsyncTypeSafeClient", FakeClient)
+    provider = jev_client.JevClient(
+        api_key="test-key",
+        base_url=None,
+        model=None,
+        timeout=12,
+    )
+
+    answers = await provider.evaluate(
+        resume_text="Python developer",
+        parsed_resume_json={"skills": ["Python"]},
+        role_name="Backend Developer",
+        role_description="Build APIs",
+        evaluation_intent="Assess delivery fit for a regulated fintech migration",
+        required_skills=["Python"],
+        preferred_skills=["FastAPI"],
+    )
+
+    assert system_one.await_count == 1
+    request = system_one.await_args.kwargs
+    assert request["state"]["role_name"] == "Backend Developer"
+    assert request["state"]["evaluation_intent"].startswith("Assess delivery fit")
+    assert (
+        "score only resume-supported evidence"
+        in request["state"]["evaluation_context_policy"]
+    )
+    assert request["questions"] is jev_client.QUESTIONS
+    assert answers["skills_score"].value == 3.0
+    assert answers["education_quality"].value == "Strong"
+    assert answers["needs_manual_review"].value is False
+
+
+@pytest.mark.asyncio
+async def test_jev_transport_failure_degrades_to_manual_review(monkeypatch):
+    class BrokenClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            raise TimeoutError("provider timed out")
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(jev_client, "AsyncTypeSafeClient", BrokenClient)
+    provider = jev_client.JevClient(
+        api_key="test-key", base_url=None, model=None, timeout=1
+    )
+
+    answers = await provider.evaluate(
+        resume_text="Synthetic candidate",
+        parsed_resume_json={},
+        role_name="Engineer",
+        role_description="Build reliable APIs",
+        required_skills=["Python"],
+        preferred_skills=[],
+    )
+
+    assert answers["needs_manual_review"].value is True
+    assert answers["skills_score"].value is None
+
+
+@pytest.mark.asyncio
+async def test_empty_resume_text_routes_to_ocr_review_without_calling_jev(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "extract_resume_text",
+        AsyncMock(return_value={"text": "", "documentMap": []}),
+    )
+    provider = SimpleNamespace(evaluate=AsyncMock())
+
+    result = await pipeline.run_candidate_pipeline(
+        raw_bytes=b"%PDF-1.7\nscan",
+        filename="scan.pdf",
+        role_name="Engineer",
+        role_description="Build APIs",
+        required_skills=["Python"],
+        preferred_skills=[],
+        experience_mode="experienced",
+        weight_overrides=None,
+        jev_provider=provider,
+    )
+
+    assert result.status == "needs_review"
+    assert result.final_score is None
+    assert "ocr_or_manual_review_required" in result.warnings
+    provider.evaluate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scanned_pdf_parser_error_routes_to_manual_review(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "extract_resume_text",
+        AsyncMock(
+            side_effect=HTTPException(
+                status_code=400, detail="No readable text found; OCR is required"
+            )
+        ),
+    )
+    provider = SimpleNamespace(evaluate=AsyncMock())
+
+    result = await pipeline.run_candidate_pipeline(
+        raw_bytes=b"%PDF-1.7\nscan",
+        filename="scan.pdf",
+        role_name="Engineer",
+        role_description="Build APIs",
+        required_skills=["Python"],
+        preferred_skills=[],
+        experience_mode="experienced",
+        weight_overrides=None,
+        jev_provider=provider,
+    )
+
+    assert result.status == "needs_review"
+    assert "ocr_or_manual_review_required" in result.warnings
+    provider.evaluate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_candidate_pipeline_builds_metric_scorecard_and_brief(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "extract_resume_text",
+        AsyncMock(
+            return_value={
+                "text": "Synthetic Python engineer resume",
+                "documentMap": [],
+                "embeddedLinks": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "generate_structured_resume_data",
+        AsyncMock(
+            return_value={
+                "header": {
+                    "fullName": "Test Candidate",
+                    "email": "candidate@example.test",
+                },
+                "skills": ["Python"],
+                "education": [],
+                "projects": [],
+                "experience": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(pipeline, "extract_professional_urls", lambda _text: [])
+
+    class FakeLinkValidator:
+        async def validate_all_links_async(self, _targets):
+            return {}
+
+    monkeypatch.setattr(pipeline, "SmartLinkValidator", FakeLinkValidator)
+    monkeypatch.setattr(
+        pipeline._link_scorer,
+        "score_links",
+        lambda **_kwargs: {"categoryBreakdown": {}},
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "check_link_requirements",
+        lambda *_args, **_kwargs: {"warnings": [], "missing_required": []},
+    )
+    monkeypatch.setattr(
+        pipeline._ats_engine,
+        "run_assessment",
+        lambda **_kwargs: {
+            "scoreBreakdown": {
+                "skillsMatch": 80,
+                "educationScore": 60,
+                "experienceMatch": 70,
+                "projectMatch": 50,
+                "linkIntegrity": 40,
+            },
+            "hygieneCheck": {"hasEmail": True, "hasPhone": True},
+        },
+    )
+    answers = {
+        "skills_score": jev_client.JevAnswer("skills_score", "score", 4.0, 0.9),
+        "education_quality": jev_client.JevAnswer(
+            "education_quality", "choice", "Strong", 0.9
+        ),
+        "experience_relevance": jev_client.JevAnswer(
+            "experience_relevance", "score", 3.0, 0.8
+        ),
+        "project_quality": jev_client.JevAnswer("project_quality", "score", 2.0, 0.8),
+        "project_complexity": jev_client.JevAnswer(
+            "project_complexity", "score", 2.0, 0.8
+        ),
+        "resume_hygiene": jev_client.JevAnswer("resume_hygiene", "score", 3.0, 0.9),
+        "project_tier": jev_client.JevAnswer("project_tier", "choice", "Average", 0.8),
+        "needs_manual_review": jev_client.JevAnswer(
+            "needs_manual_review", "noul", False, 0.1
+        ),
+    }
+    provider = SimpleNamespace(evaluate=AsyncMock(return_value=answers))
+
+    result = await pipeline.run_candidate_pipeline(
+        raw_bytes=b"%PDF-1.7\nsynthetic",
+        filename="candidate.pdf",
+        role_name="Backend Engineer",
+        role_description="Build Python APIs",
+        evaluation_intent="Evaluate ownership of a short fintech migration project",
+        required_skills=["Python"],
+        preferred_skills=["FastAPI"],
+        experience_mode="experienced",
+        weight_overrides=None,
+        jev_provider=provider,
+    )
+
+    scorecard = result.deterministic_report["bulkAtsScorecard"]
+    assert set(scorecard["categoryScores"]) == {
+        "skills",
+        "education",
+        "experience",
+        "projects",
+        "links",
+    }
+    assert (
+        round(sum(scorecard["weightedContributions"].values()), 2) == result.final_score
+    )
+    assert result.deterministic_report["candidateBrief"]["summary"].startswith(
+        "Scored "
+    )
+    assert scorecard["evaluationIntentApplied"] is True
+    assert provider.evaluate.await_args.kwargs["evaluation_intent"].startswith(
+        "Evaluate ownership"
+    )
+    assert result.status == "completed"
+
+
+def test_candidate_brief_surfaces_strongest_and_weakest_metrics():
+    brief = pipeline._build_candidate_brief(
+        role_name="Backend Engineer",
+        final_score=74.5,
+        score_band="strong",
+        category_scores={
+            "skills": 90,
+            "education": 70,
+            "experience": 80,
+            "projects": 60,
+            "links": 40,
+        },
+        warnings=["missing_github"],
+        needs_review=True,
+    )
+
+    assert [item["metric"] for item in brief["strengths"]] == [
+        "Skills match",
+        "Experience relevance",
+    ]
+    assert [item["metric"] for item in brief["gaps"]] == [
+        "Links and evidence",
+        "Project quality",
+    ]
+    assert brief["recommendation"] == "Manual review required"
+
+
+def test_optional_job_description_reports_role_context_quality():
+    warnings, context = pipeline._assess_role_context(
+        role_description="",
+        evaluation_intent="",
+        required_skills=["Python"],
+        preferred_skills=[],
+    )
+    assert context == "role_and_skills"
+    assert warnings == ["missing_job_description"]
+
+    warnings, context = pipeline._assess_role_context(
+        role_description="",
+        evaluation_intent="",
+        required_skills=[],
+        preferred_skills=[],
+    )
+    assert context == "role_only"
+    assert warnings == [
+        "missing_job_description",
+        "missing_skills_rubric",
+        "minimal_role_context",
+    ]
+
+    warnings, context = pipeline._assess_role_context(
+        role_description="",
+        evaluation_intent="Assess fit for a six-month data migration",
+        required_skills=["Python"],
+        preferred_skills=[],
+    )
+    assert context == "evaluation_intent_and_skills"
+    assert warnings == ["missing_job_description"]
+
+    warnings, context = pipeline._assess_role_context(
+        role_description="",
+        evaluation_intent="Best person",
+        required_skills=[],
+        preferred_skills=[],
+    )
+    assert context == "role_only"
+    assert warnings == [
+        "missing_job_description",
+        "missing_skills_rubric",
+        "evaluation_intent_too_brief",
+        "minimal_role_context",
+    ]
+
+
+def test_deepseek_payload_includes_intent_as_context_only():
+    payload = deepseek_feedback._input_payload(
+        role_name="Backend Engineer",
+        evaluation_intent="Prioritize evidence of migration ownership",
+        scorecard={"categoryScores": {"skills": 80}, "confidence": {}},
+        evidence={"skills": [{"source": "resume.skills", "text": "Python"}]},
+        warnings=[],
+    )
+
+    assert payload["evaluationIntent"] == "Prioritize evidence of migration ownership"
+    assert "resume" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        ({}, "draft"),
+        ({"total": 3, "completed": 1, "needs_review": 0, "failed": 0}, "processing"),
+        ({"total": 3, "completed": 1, "needs_review": 1, "failed": 1}, "completed"),
+        ({"total": 2, "completed": 0, "needs_review": 0, "failed": 2}, "failed"),
+    ],
+)
+async def test_refresh_batch_status_derives_terminal_state(counts, expected):
+    session = SimpleNamespace(commit=AsyncMock())
+    repo = BulkATSCRUDRepository(session)
+    batch = SimpleNamespace(status="processing")
+    repo.get_batch = AsyncMock(return_value=batch)
+
+    async def count_candidates(*, batch_id, status=None):
+        assert batch_id == 9
+        return counts.get(status or "total", 0)
+
+    repo.count_candidates = count_candidates
+
+    status = await repo.refresh_batch_status(9)
+
+    assert status == expected
+    assert batch.status == expected
+    if expected == "processing":
+        session.commit.assert_not_awaited()
+    else:
+        session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recruiter_cannot_read_another_recruiters_batch():
+    repo = SimpleNamespace(
+        get_batch=AsyncMock(return_value=SimpleNamespace(id=7, created_by=22))
+    )
+    recruiter = SimpleNamespace(
+        id=11,
+        email="recruiter@example.com",
+        role="recruiter",
+        is_admin=False,
+        is_super_admin=False,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _get_authorized_batch(repo, batch_id=7, current_user=recruiter)
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_admin_can_read_any_recruiters_candidate():
+    candidate = SimpleNamespace(id=5, batch=SimpleNamespace(created_by=22))
+    repo = SimpleNamespace(get_candidate=AsyncMock(return_value=candidate))
+    admin = SimpleNamespace(
+        id=1,
+        email="admin@example.com",
+        role="admin",
+        is_admin=True,
+        is_super_admin=False,
+    )
+
+    result = await _get_authorized_candidate(repo, candidate_id=5, current_user=admin)
+
+    assert result is candidate

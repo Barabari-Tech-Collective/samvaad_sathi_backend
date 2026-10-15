@@ -1,16 +1,57 @@
 import sqlalchemy
 import logging
 import time
+import datetime
+import hashlib
 from typing import Any
+from sqlalchemy.exc import IntegrityError
 
 from src.models.db.question_attempt import QuestionAttempt
 from src.models.db.interview_question import InterviewQuestion
 from src.repository.crud.base import BaseCRUDRepository
 logger = logging.getLogger(__name__)
 
+
+class AttemptIdempotencyConflict(ValueError):
+    """A client key was reused for a different question in one interview."""
+
 class QuestionAttemptCRUDRepository(BaseCRUDRepository):
-    async def create_attempt(self, *, interview_id: int, question_id: int, question_text: str) -> QuestionAttempt:
+    async def create_attempt(
+        self,
+        *,
+        interview_id: int,
+        question_id: int,
+        question_text: str,
+        client_attempt_id: str | None = None,
+    ) -> QuestionAttempt:
+        attempt, _ = await self.create_or_get_attempt(
+            interview_id=interview_id,
+            question_id=question_id,
+            question_text=question_text,
+            client_attempt_id=client_attempt_id,
+        )
+        return attempt
+
+    async def create_or_get_attempt(
+        self,
+        *,
+        interview_id: int,
+        question_id: int,
+        question_text: str,
+        client_attempt_id: str | None = None,
+    ) -> tuple[QuestionAttempt, bool]:
         db_start = time.perf_counter()
+
+        if client_attempt_id:
+            existing = await self.get_by_client_attempt_id(
+                interview_id=interview_id, client_attempt_id=client_attempt_id
+            )
+            if existing is not None:
+                if existing.question_id != question_id:
+                    raise AttemptIdempotencyConflict(
+                        "The attempt key is already assigned to another question."
+                    )
+                return existing, False
 
         logger.info(
           "Creating question attempt | Interview=%s | Question=%s",
@@ -21,10 +62,26 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         attempt = QuestionAttempt(
             interview_id=interview_id,
             question_id=question_id,
-            question_text=question_text
+            question_text=question_text,
+            client_attempt_id=client_attempt_id,
         )
         self.async_session.add(attempt)
-        await self.async_session.commit()
+        try:
+            await self.async_session.commit()
+        except IntegrityError:
+            await self.async_session.rollback()
+            if not client_attempt_id:
+                raise
+            existing = await self.get_by_client_attempt_id(
+                interview_id=interview_id, client_attempt_id=client_attempt_id
+            )
+            if existing is None:
+                raise
+            if existing.question_id != question_id:
+                raise AttemptIdempotencyConflict(
+                    "The attempt key is already assigned to another question."
+                )
+            return existing, False
         await self.async_session.refresh(attempt)
         logger.info(
           "Question attempt created | Attempt=%s | Interview=%s | Question=%s | DBTime=%.2fs",
@@ -33,6 +90,86 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
           question_id,
           time.perf_counter() - db_start,
         )
+        return attempt, True
+
+    async def get_by_client_attempt_id(
+        self, *, interview_id: int, client_attempt_id: str
+    ) -> QuestionAttempt | None:
+        stmt = sqlalchemy.select(QuestionAttempt).where(
+            QuestionAttempt.interview_id == interview_id,
+            QuestionAttempt.client_attempt_id == client_attempt_id,
+        )
+        query = await self.async_session.execute(stmt)
+        return query.scalar_one_or_none()
+
+    async def save_audio_asset(
+        self,
+        *,
+        question_attempt_id: int,
+        audio_url: str,
+        checksum: str,
+    ) -> QuestionAttempt | None:
+        attempt = await self.get_by_id(question_attempt_id=question_attempt_id)
+        if attempt is None:
+            return None
+        if attempt.answer_checksum != checksum:
+            attempt.answer_version = (attempt.answer_version or 0) + 1
+        attempt.audio_url = audio_url
+        attempt.answer_checksum = checksum
+        attempt.answer_kind = "audio"
+        attempt.answer_saved_at = datetime.datetime.now(datetime.timezone.utc)
+        attempt.transcription = None
+        attempt.transcription_status = "processing"
+        attempt.transcription_error = None
+        attempt.transcription_updated_at = datetime.datetime.now(datetime.timezone.utc)
+        attempt.analysis_json = None
+        attempt.feedback = None
+        await self.async_session.commit()
+        await self.async_session.refresh(attempt)
+        return attempt
+
+    async def save_text_answer(
+        self, *, question_attempt_id: int, text: str, language: str
+    ) -> QuestionAttempt | None:
+        attempt = await self.get_by_id(question_attempt_id=question_attempt_id)
+        if attempt is None:
+            return None
+        checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if attempt.answer_checksum != checksum:
+            attempt.answer_version = (attempt.answer_version or 0) + 1
+        attempt.answer_checksum = checksum
+        attempt.answer_kind = "text"
+        attempt.answer_saved_at = datetime.datetime.now(datetime.timezone.utc)
+        attempt.transcription = {"text": text, "language": language, "segments": []}
+        attempt.transcription_status = "transcribed"
+        attempt.transcription_error = None
+        attempt.transcription_updated_at = datetime.datetime.now(datetime.timezone.utc)
+        attempt.analysis_json = None
+        attempt.feedback = None
+        await self.async_session.commit()
+        await self.async_session.refresh(attempt)
+        return attempt
+
+    async def mark_transcription_failed(
+        self, *, question_attempt_id: int, checksum: str, error: str
+    ) -> QuestionAttempt | None:
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(
+                QuestionAttempt.id == question_attempt_id,
+                QuestionAttempt.answer_checksum == checksum,
+            )
+            .values(
+                transcription_status="failed",
+                transcription_error=error[:1000],
+                transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            .returning(QuestionAttempt)
+        )
+        attempt = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if attempt is not None:
+            await self.async_session.refresh(attempt)
         return attempt
 
     async def create_batch(self, *, interview_id: int, questions: list[str], metadata: dict[str, Any] | None = None) -> list[QuestionAttempt]:
@@ -170,7 +307,8 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         *,
         question_attempt_id: int,
         audio_url: str,
-        transcription: dict
+        transcription: dict,
+        checksum: str | None = None,
     ) -> QuestionAttempt | None:
         db_start = time.perf_counter()
 
@@ -179,14 +317,25 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
           question_attempt_id,
         )
         """Update a question attempt with audio URL and transcription data"""
-        stmt = sqlalchemy.select(QuestionAttempt).where(QuestionAttempt.id == question_attempt_id)
-        query = await self.async_session.execute(statement=stmt)
-        question_attempt = query.scalar_one_or_none()
-        
+        conditions = [QuestionAttempt.id == question_attempt_id]
+        if checksum is not None:
+            conditions.append(QuestionAttempt.answer_checksum == checksum)
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(*conditions)
+            .values(
+                audio_url=audio_url,
+                transcription=transcription,
+                transcription_status="transcribed",
+                transcription_error=None,
+                transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            .returning(QuestionAttempt)
+        )
+        question_attempt = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+
         if question_attempt:
-            question_attempt.audio_url = audio_url
-            question_attempt.transcription = transcription
-            await self.async_session.commit()
             await self.async_session.refresh(question_attempt)
             logger.info(
             "Transcription saved | Attempt=%s | Audio=%s | TranscriptChars=%d | DBTime=%.2fs",
@@ -197,7 +346,7 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
             )
         else:
             logger.warning(
-                "Question attempt not found while saving analysis | Attempt=%s",
+                "Question attempt missing or superseded while saving transcription | Attempt=%s",
                 question_attempt_id,
             )
         
@@ -245,4 +394,3 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         )
         query = await self.async_session.execute(statement=stmt)
         return query.scalar_one_or_none()
-

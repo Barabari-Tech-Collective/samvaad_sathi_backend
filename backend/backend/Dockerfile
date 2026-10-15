@@ -8,12 +8,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install OS deps: curl for healthchecks; build-essential/pkg-config/libcairo2-dev
+# Install OS deps: curl for healthchecks; Tesseract with English/Hindi packs
+# for Bulk ATS image-only resumes; build-essential/pkg-config/libcairo2-dev
 # are required to compile pycairo (a transitive dependency) from source on this
 # slim base image — without them, `pip install` fails before the app ever builds.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-hin \
         build-essential \
         pkg-config \
         libcairo2-dev \

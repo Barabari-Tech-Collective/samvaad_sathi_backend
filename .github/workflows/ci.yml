@@ -33,6 +33,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           # Matches the production EC2 host (3.12.3). Testing on a different minor
@@ -50,6 +51,10 @@ jobs:
       - run: pip install -r backend/backend/requirements.txt
       - name: Compile application
         run: python -m compileall -q backend/backend/src
+      - name: Enforce rollback-compatible migrations
+        run: python ops/check_migration_safety.py "$BASE_SHA" "$GITHUB_SHA"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
       - name: Run complete test suite with synthetic settings
         run: python ops/ci_tests.py -q --junitxml=test-results/backend.xml
         env:
@@ -58,7 +63,9 @@ jobs:
           # suite silently skips it and schema drift reaches production.
           SCHEMA_TEST_DATABASE_URL: postgresql+psycopg2://ci:ci-only-password@localhost:5432/samvaad_ci
       - name: Check release runner syntax
-        run: bash -n ops/ec2-release.sh
+        run: >-
+          bash -n ops/ec2-release.sh &&
+          python -m py_compile ops/release.py ops/check_migration_safety.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

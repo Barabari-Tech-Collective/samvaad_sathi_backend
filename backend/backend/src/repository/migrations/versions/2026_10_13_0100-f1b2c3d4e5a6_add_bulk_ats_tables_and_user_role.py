@@ -24,16 +24,22 @@ def upgrade() -> None:
     # data", role names the narrower recruiter/placement_staff grant so
     # neither flag has to be stretched to cover both. NULL (the default for
     # every existing row, students included) grants nothing.
-    op.execute(
-        'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS role VARCHAR(32)'
-    )
-    op.execute(
-        "ALTER TABLE \"user\" DROP CONSTRAINT IF EXISTS chk_user_role"
-    )
-    op.execute(
-        "ALTER TABLE \"user\" ADD CONSTRAINT chk_user_role "
-        "CHECK (role IS NULL OR role IN ('admin', 'recruiter', 'placement_staff'))"
-    )
+    inspector = sa.inspect(op.get_bind())
+    user_columns = {column["name"] for column in inspector.get_columns("user")}
+    if "role" not in user_columns:
+        op.add_column("user", sa.Column("role", sa.String(length=32), nullable=True))
+
+    user_checks = {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints("user")
+        if constraint.get("name")
+    }
+    if "chk_user_role" not in user_checks:
+        op.create_check_constraint(
+            "chk_user_role",
+            "user",
+            "role IS NULL OR role IN ('admin', 'recruiter', 'placement_staff')",
+        )
 
     op.create_table(
         "bulk_ats_batch",

@@ -49,6 +49,9 @@ dependencies = [
     # Background job queue (arq worker + Redis client)
     "arq==0.28.0",
     "redis==5.3.1",
+    # Bulk ATS spreadsheet ingestion and Jev semantic scoring
+    "openpyxl==3.1.5",
+    "typesafe-sdk==0.7.4",
 ]
 
 [project.optional-dependencies]
