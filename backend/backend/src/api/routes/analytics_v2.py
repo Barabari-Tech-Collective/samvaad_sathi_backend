@@ -252,6 +252,56 @@ def _to_date(value: datetime.date | datetime.datetime | None) -> datetime.date |
     return value
 
 
+async def verify_student_access(
+    student_id: int,
+    user: User,
+    session: SQLAlchemyAsyncSession,
+) -> User:
+    """Verify that user is authorized to access student_id's data.
+    - Super Admins, Global Admins, Creators, and Team Members have unrestricted access.
+    - Junior Facilitators can only access students enrolled in their assigned colleges.
+    """
+    allowed_colleges = await get_user_allowed_colleges(user, session)
+    student = (await session.execute(sqlalchemy.select(User).where(User.id == student_id))).scalar_one_or_none()
+    if student is None:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Student not found")
+    if allowed_colleges is not None:
+        student_univ = (getattr(student, "university", "") or "").strip().lower()
+        allowed_lower = {c.lower() for c in allowed_colleges}
+        if student_univ not in allowed_lower:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You do not have permission to view data for this student.",
+            )
+    return student
+
+
+async def verify_interview_access(
+    interview_id: int,
+    user: User,
+    session: SQLAlchemyAsyncSession,
+) -> Interview:
+    """Verify that user is authorized to access interview_id's data.
+    - Super Admins, Global Admins, Creators, and Team Members have unrestricted access.
+    - Junior Facilitators can only access interviews belonging to students from their assigned colleges.
+    """
+    allowed_colleges = await get_user_allowed_colleges(user, session)
+    stmt = sqlalchemy.select(Interview, User.university).join(User, Interview.user_id == User.id).where(Interview.id == interview_id)
+    res = (await session.execute(stmt)).first()
+    if res is None:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+    interview, univ = res[0], res[1]
+    if allowed_colleges is not None:
+        student_univ = (univ or "").strip().lower()
+        allowed_lower = {c.lower() for c in allowed_colleges}
+        if student_univ not in allowed_lower:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You do not have permission to view data for this interview.",
+            )
+    return interview
+
+
 @router.get(
     "/dashboard/overview",
     response_model=DashboardOverviewResponse,
@@ -282,6 +332,7 @@ async def get_dashboard_overview(
         role=role,
         difficulty=difficulty.value if difficulty else None,
         college=college,
+        allowed_colleges=allowed_colleges,
     )
 
     interviews_count_stmt = _apply_interview_filters(
@@ -489,7 +540,12 @@ async def get_dashboard_top_colleges(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if college:
+        await verify_college_access(current_user, college, session)
+    elif allowed_colleges is not None and len(allowed_colleges) == 1:
+        college = next(iter(allowed_colleges))
+
     service = AnalyticsService(session)
     items = await service.get_college_segment_analytics(
         start_date=start_date,
@@ -497,6 +553,7 @@ async def get_dashboard_top_colleges(
         role=role,
         difficulty=difficulty.value if difficulty else None,
         college=college,
+        allowed_colleges=allowed_colleges,
     )
     return DashboardTopListResponse(table_type="top_colleges", items=_zero_fill_metric_nulls(items[:limit]))
 
@@ -519,8 +576,15 @@ async def get_dashboard_students_per_college(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
-    
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if college:
+        await verify_college_access(current_user, college, session)
+    elif allowed_colleges is not None and len(allowed_colleges) == 1:
+        college = next(iter(allowed_colleges))
+
+    if allowed_colleges is not None and not allowed_colleges and not college:
+        return DashboardTopListResponse(table_type="students_per_college", items=[])
+
     if view_type == "interviewed":
         stmt = sqlalchemy.select(
             sqlalchemy.func.coalesce(User.university, "unknown").label("college"),
@@ -529,6 +593,8 @@ async def get_dashboard_students_per_college(
         
         if college:
             stmt = stmt.where(User.university == college)
+        elif allowed_colleges is not None:
+            stmt = stmt.where(User.university.in_(list(allowed_colleges)))
         if role:
             clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
             stmt = stmt.where(
@@ -554,6 +620,8 @@ async def get_dashboard_students_per_college(
         
         if college:
             stmt = stmt.where(User.university == college)
+        elif allowed_colleges is not None:
+            stmt = stmt.where(User.university.in_(list(allowed_colleges)))
         if role:
             clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
             stmt = stmt.where(
@@ -944,10 +1012,7 @@ async def get_student_profile(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
-    student = (await session.execute(sqlalchemy.select(User).where(User.id == student_id))).scalar_one_or_none()
-    if student is None:
-        raise fastapi.HTTPException(status_code=404, detail="Student not found")
+    student = await verify_student_access(student_id, current_user, session)
     last_active = (
         await session.execute(
             sqlalchemy.select(sqlalchemy.func.max(Interview.created_at)).where(Interview.user_id == student_id)
@@ -982,7 +1047,7 @@ async def get_student_summary(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
     metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
     performance = metrics.get("performance", {})
@@ -1017,7 +1082,7 @@ async def get_student_score_history(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
     metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
     points = metrics.get("performance", {}).get("score_history", [])
@@ -1032,7 +1097,7 @@ async def get_student_speech_vs_knowledge_history(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
     metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
     history = metrics.get("performance", {}).get("score_history", [])
@@ -1056,7 +1121,7 @@ async def get_student_skill_averages(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
     metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
     speech_metrics = metrics.get("skill_breakdown", {}).get("speech", {})
@@ -1083,7 +1148,7 @@ async def get_student_practice_completion(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
     metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
     practice = metrics.get("practice_compliance", {})
@@ -1109,7 +1174,7 @@ async def get_student_interviews(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_student_access(student_id, current_user, session)
     total_stmt = sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.user_id == student_id)
     total = (await session.execute(total_stmt)).scalar() or 0
     offset = (page - 1) * limit
@@ -1162,7 +1227,7 @@ async def get_student_latest_feedback(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_student_access(student_id, current_user, session)
     stmt = (
         sqlalchemy.select(SummaryReport)
         .join(Interview, Interview.id == SummaryReport.interview_id)
@@ -1221,9 +1286,9 @@ async def get_colleges_summary(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    service = AnalyticsService(session)
-    college_items = await service.get_college_segment_analytics()
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    service = AnalyticsService(session)
+    college_items = await service.get_college_segment_analytics(allowed_colleges=allowed_colleges)
     if allowed_colleges is not None:
         college_items = [item for item in college_items if item.get("college") in allowed_colleges]
 
@@ -1274,14 +1339,15 @@ async def get_colleges_table(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
     service = AnalyticsService(session)
     all_items = await service.get_college_segment_analytics(
         start_date=start_date,
         end_date=end_date,
         role=role,
         difficulty=difficulty.value if difficulty else None,
+        allowed_colleges=allowed_colleges,
     )
-    allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if allowed_colleges is not None:
         all_items = [item for item in all_items if item.get("college") in allowed_colleges]
 
@@ -1866,7 +1932,7 @@ async def get_interview_detail_summary(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_interview_access(interview_id, current_user, session)
     service = AnalyticsService(session)
     metrics = await service.get_interview_level_analytics(interview_id=interview_id)
     if metrics is None:
@@ -1909,7 +1975,7 @@ async def get_interview_question_scores(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_interview_access(interview_id, current_user, session)
     service = AnalyticsService(session)
     metrics = await service.get_interview_level_analytics(interview_id=interview_id)
     if metrics is None:
@@ -1931,7 +1997,7 @@ async def get_interview_speech_metrics_timeline(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_interview_access(interview_id, current_user, session)
     from src.services.analytics import AnalyticsService
     service = AnalyticsService(session)
     metrics = await service.get_interview_level_analytics(interview_id=interview_id)
@@ -1961,7 +2027,7 @@ async def get_interview_question_type_breakdown(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    await verify_interview_access(interview_id, current_user, session)
     stmt = (
         sqlalchemy.select(InterviewQuestion.category, sqlalchemy.func.count(InterviewQuestion.id))
         .where(InterviewQuestion.interview_id == interview_id)

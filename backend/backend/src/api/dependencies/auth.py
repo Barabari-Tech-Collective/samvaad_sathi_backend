@@ -46,7 +46,12 @@ async def get_current_user(
             )
     except SsoTokenError:
         try:
-            _, email = jwt_generator.retrieve_details_from_token(token=token, secret_key=settings.JWT_SECRET_KEY)
+            from jose import jwt as jose_jwt
+            payload = jose_jwt.decode(token=token, key=settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+            email = payload.get("email") or payload.get("username")
+            if not email:
+                raise ValueError("Missing email in token payload")
+            claims = payload
         except Exception:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
@@ -77,16 +82,17 @@ async def get_current_user(
 
     # Attach token claims and synchronize role metadata on the user instance
     if claims:
-        token_role = str(claims.get("role") or "").strip().upper()
+        raw_role = str(claims.get("role") or "").strip().upper()
+        norm_role = raw_role.replace("_", " ")
         setattr(user, "_token_claims", claims)
-        setattr(user, "_token_role", token_role)
+        setattr(user, "_token_role", raw_role)
 
-        if token_role == "SUPER_ADMIN":
+        if norm_role == "SUPER ADMIN":
             user.is_super_admin = True
             user.is_admin = True
-        elif token_role == "ADMIN":
+        elif norm_role == "ADMIN":
             user.is_admin = True
-        elif token_role in {
+        elif norm_role in {
             "CREATOR",
             "FACILITATOR",
             "SR FACILITATOR",
@@ -95,11 +101,14 @@ async def get_current_user(
             "JUNIOR FACILITATOR",
             "LEAD",
             "RECRUITER",
-            "PLACEMENT_STAFF",
+            "PLACEMENT STAFF",
+            "PLACEMENT COM",
+            "PROGRAM MANAGER",
+            "TEAM MEMBER",
             "STAFF",
         }:
             if not getattr(user, "role", None):
-                user.role = token_role.lower()
+                user.role = norm_role.lower()
 
     return user
 

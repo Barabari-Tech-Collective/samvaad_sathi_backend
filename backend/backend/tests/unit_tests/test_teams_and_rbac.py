@@ -813,4 +813,96 @@ async def test_team_member_creation_and_update_never_assigns_colleges():
     assert updated["colleges"] is None
 
 
+@pytest.mark.asyncio
+async def test_add_team_member_never_elevates_global_admin_flags():
+    """Creator or Lead role in a team must NOT escalate user.is_admin or user.is_super_admin."""
+    mock_session = AsyncMock()
+    team = Team(id=1, name="Placement Team", status="active")
+    user = _make_user(110, email="creator_safe@barabari.org", is_admin=False, is_super_admin=False)
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = None
+        elif "from \"user\"" in stmt_str or "user.email" in stmt_str:
+            result.scalar_one_or_none.return_value = user
+        elif "from team" in stmt_str:
+            result.scalar_one_or_none.return_value = team
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    member_data = TeamMemberCreate(
+        name="Creator Safe",
+        email="creator_safe@barabari.org",
+        access_role="Creator",
+    )
+    await repo.add_team_member(team_id=1, member_data=member_data)
+
+    # Verify global flags remained False
+    assert user.is_admin is False
+    assert user.is_super_admin is False
+
+
+def test_calculate_user_permissions_handles_member_team_tuples():
+    """calculate_user_permissions correctly parses (TeamMember, Team) tuples without lazy loading."""
+    from src.api.dependencies.admin import calculate_user_permissions
+
+    user = _make_user(111, is_admin=False, is_super_admin=False)
+    team = Team(id=1, name="Placement and Partnership", status="active")
+    member = TeamMember(id=5, team_id=1, user_id=111, access_role="Creator", status="active")
+
+    # Pass as tuple (member, team) as returned by select(TeamMember, Team).all()
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_ats"] is True
+    assert perms["colleges"] is None
+
+
+@pytest.mark.asyncio
+async def test_user_email_sanitization_in_crud():
+    """UserCRUDRepository.create_user strips and lowercases email."""
+    from src.repository.crud.user import UserCRUDRepository
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar.return_value = None
+    mock_session.execute.return_value = mock_result
+
+    repo = UserCRUDRepository(async_session=mock_session)
+    created_user = await repo.create_user(
+        email="  Test.User@Barabari.ORG  ",
+        password="SecurePassword123!",
+        name="Test User",
+    )
+    assert created_user.email == "test.user@barabari.org"
+
+
+@pytest.mark.asyncio
+async def test_analytics_v2_idor_student_access_rejected():
+    """Junior Facilitator cannot view student belonging to unauthorized college."""
+    from unittest.mock import patch
+    from src.api.routes.analytics_v2 import verify_student_access
+
+    jf_user = _make_user(112, is_admin=False, is_super_admin=False)
+    target_student = User(id=200, email="target@barabari.org", university="Unauthorized University")
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = target_student
+    mock_session.execute.return_value = mock_result
+
+    # Mock allowed colleges: jf_user only allowed at "Allowed College"
+    with patch("src.api.routes.analytics_v2.get_user_allowed_colleges", return_value={"Allowed College"}):
+        with pytest.raises(fastapi.HTTPException) as exc_info:
+            await verify_student_access(student_id=200, user=jf_user, session=mock_session)
+        assert exc_info.value.status_code == 403
+        assert "Access denied" in exc_info.value.detail
+
+
+
 

@@ -5,7 +5,7 @@ import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import calculate_user_permissions, is_admin_user, is_super_admin_user
+from src.api.dependencies.admin import calculate_user_permissions, extract_memberships_from_result, is_admin_user, is_super_admin_user
 from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
@@ -132,11 +132,17 @@ async def login_user(
             TeamMember.status == "active",
             Team.status == "active",
         )
+        .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
     )
     member_res = await session.execute(member_stmt)
-    memberships = member_res.all()
-    member = memberships[0][0] if memberships else None
-    primary_team = memberships[0][1] if memberships else None
+    memberships = extract_memberships_from_result(member_res)
+    first_item = memberships[0] if memberships else None
+    if isinstance(first_item, (tuple, list)):
+        member = first_item[0]
+        primary_team = first_item[1] if len(first_item) > 1 else None
+    else:
+        member = first_item
+        primary_team = getattr(member, "team", None) if member else None
 
     perms = calculate_user_permissions(user, memberships)
     access_role = member.access_role if member else None
@@ -283,7 +289,6 @@ async def get_me(
         if onboarding_resume_filename and ats_resume_filename:
             break
 
-    token = jwt_generator.generate_access_token_for_user(user=current_user)
     is_admin_flag = is_admin_user(current_user)
 
     from src.models.db.team import Team
@@ -296,11 +301,17 @@ async def get_me(
             TeamMember.status == "active",
             Team.status == "active",
         )
+        .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
     )
     member_res = await session.execute(member_stmt)
-    memberships = member_res.all()
-    member = memberships[0][0] if memberships else None
-    primary_team = memberships[0][1] if memberships else None
+    memberships = extract_memberships_from_result(member_res)
+    first_item = memberships[0] if memberships else None
+    if isinstance(first_item, (tuple, list)):
+        member = first_item[0]
+        primary_team = first_item[1] if len(first_item) > 1 else None
+    else:
+        member = first_item
+        primary_team = getattr(member, "team", None) if member else None
 
     perms = calculate_user_permissions(current_user, memberships)
     access_role = member.access_role if member else None
@@ -313,6 +324,19 @@ async def get_me(
     is_view_only = perms["is_view_only"]
     is_team_lead = perms["is_team_lead"]
     effective_role = access_role or getattr(current_user, "_token_role", None) or getattr(current_user, "role", None)
+
+    role_claim = (
+        "SUPER_ADMIN" if is_super_admin_user(current_user)
+        else ("ADMIN" if is_admin_flag
+        else (str(effective_role).upper() if effective_role else "STAFF"))
+    )
+    token = jwt_generator.generate_access_token_for_user(
+        user=current_user,
+        extra_claims={
+            "role": role_claim,
+            "access_role": access_role or (str(effective_role).lower() if effective_role else ""),
+        },
+    )
 
     return UserInResponse(
         user_id=current_user.id,

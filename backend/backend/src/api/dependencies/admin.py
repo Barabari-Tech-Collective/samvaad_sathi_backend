@@ -68,9 +68,16 @@ def is_admin_user(user: User) -> bool:
 
 from src.api.dependencies.session import get_async_session
 
+def normalize_role(role: str | None) -> str:
+    """Normalize a role string by trimming, lowercasing, and replacing underscores with spaces."""
+    if not role:
+        return ""
+    return str(role).strip().replace("_", " ").lower()
+
+
 STAFF_ROLES = {
     "admin",
-    "super_admin",
+    "super admin",
     "lead",
     "team lead",
     "manager",
@@ -81,20 +88,48 @@ STAFF_ROLES = {
     "senior facilitator",
     "jr facilitator",
     "junior facilitator",
-    "program_manager",
-    "placement_com",
+    "program manager",
+    "placement com",
     "recruiter",
-    "placement_staff",
+    "placement staff",
     "team member",
     "member",
 }
 
 
-CREATOR_ROLES = {"lead", "team lead", "creator", "admin", "super_admin", "sr facilitator", "senior facilitator"}
+CREATOR_ROLES = {"lead", "team lead", "creator", "admin", "super admin", "sr facilitator", "senior facilitator"}
 JUNIOR_ROLES = {"jr facilitator", "junior facilitator"}
 TEAM_MEMBER_ROLES = {"team member", "member", "staff"}
 UNRESTRICTED_COLLEGE_ROLES = CREATOR_ROLES | TEAM_MEMBER_ROLES
-LEAD_ROLES = {"lead", "team lead", "manager", "admin", "super_admin", "creator"}
+LEAD_ROLES = {"lead", "team lead", "manager", "admin", "super admin", "creator"}
+
+
+def extract_memberships_from_result(res) -> list:
+    """Extract list of membership records or (member, team) tuples from SQLAlchemy Result or Mock.
+
+    Prioritizes res.all() to preserve (TeamMember, Team) tuples without triggering
+    unawaited lazy loads on member.team. If res.all() returns a MagicMock (in unconfigured mocks),
+    it safely falls back to res.scalars().all().
+    """
+    if res is None:
+        return []
+    try:
+        if hasattr(res, "all") and callable(res.all):
+            a_res = res.all()
+            if isinstance(a_res, list):
+                return a_res
+    except Exception:
+        pass
+    try:
+        if hasattr(res, "scalars") and callable(res.scalars):
+            s_obj = res.scalars()
+            if hasattr(s_obj, "all") and callable(s_obj.all):
+                s_res = s_obj.all()
+                if isinstance(s_res, list):
+                    return s_res
+    except Exception:
+        pass
+    return []
 
 
 def calculate_user_permissions(
@@ -132,15 +167,19 @@ def calculate_user_permissions(
     junior_colleges: list[str] = []
 
     for item in memberships:
-        if isinstance(item, (tuple, list)):
-            member = item[0]
-            team = item[1] if len(item) > 1 else None
+        if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__"):
+            try:
+                member = item[0]
+                team = item[1] if len(item) > 1 else None
+            except Exception:
+                member = item
+                team = getattr(member, "team", None)
         else:
             member = item
             team = getattr(member, "team", None)
 
         t_name = (getattr(team, "name", "") or "").strip().lower() if team else ""
-        m_role = (getattr(member, "access_role", "") or "").strip().lower()
+        m_role = normalize_role(getattr(member, "access_role", ""))
 
         is_placement = any(kw in t_name for kw in ["placement", "partnership"])
 
@@ -157,7 +196,7 @@ def calculate_user_permissions(
             is_team_member = True
 
     # Fallback to token claims / user.role
-    token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().lower()
+    token_role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
     can_access_ats_token = token_role in _BULK_ATS_ROLES
 
     if not memberships:
@@ -188,7 +227,7 @@ def calculate_user_permissions(
         or (is_program_creator_or_sr and token_role in LEAD_ROLES)
         or token_role in LEAD_ROLES
         or any(
-            (getattr(item[0] if isinstance(item, (tuple, list)) else item, "access_role", "") or "").strip().lower() in LEAD_ROLES
+            normalize_role(getattr(item[0] if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__") else item, "access_role", "")) in LEAD_ROLES
             for item in memberships
         )
     )
@@ -252,7 +291,7 @@ async def get_current_creator_user(
     if is_admin_user(current_user):
         return current_user
 
-    role_from_token = (getattr(current_user, "_token_role", "") or getattr(current_user, "role", "") or "").strip().lower()
+    role_from_token = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
     if role_from_token in JUNIOR_ROLES:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_403_FORBIDDEN,
@@ -279,20 +318,25 @@ async def get_current_creator_user(
                     TeamMember.status == "active",
                     Team.status == "active",
                 )
+                .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
             )
             res = await session.execute(stmt)
-            s_res = res.scalars().all() if hasattr(res, "scalars") and callable(res.scalars) else None
-            if isinstance(s_res, list) and s_res:
-                memberships = s_res
-            else:
-                a_res = res.all() if hasattr(res, "all") and callable(res.all) else None
-                memberships = a_res if isinstance(a_res, list) else []
+            memberships = extract_memberships_from_result(res)
 
             if memberships:
                 perms = calculate_user_permissions(current_user, memberships)
                 if perms["can_create_roles"]:
                     return current_user
-                roles = {(getattr(item[0] if isinstance(item, (tuple, list)) else item, "access_role", "") or "").strip().lower() for item in memberships}
+                roles = {
+                    normalize_role(
+                        getattr(
+                            item[0] if isinstance(item, (tuple, list)) else item,
+                            "access_role",
+                            "",
+                        )
+                    )
+                    for item in memberships
+                }
                 if roles & JUNIOR_ROLES:
                     raise fastapi.HTTPException(
                         status_code=fastapi.status.HTTP_403_FORBIDDEN,
@@ -342,17 +386,13 @@ async def get_user_allowed_colleges(
             TeamMember.status == "active",
             Team.status == "active",
         )
+        .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
     )
     res = await session.execute(stmt)
-    s_res = res.scalars().all() if hasattr(res, "scalars") and callable(res.scalars) else None
-    if isinstance(s_res, list) and s_res:
-        memberships = s_res
-    else:
-        a_res = res.all() if hasattr(res, "all") and callable(res.all) else None
-        memberships = a_res if isinstance(a_res, list) else []
+    memberships = extract_memberships_from_result(res)
 
     if not memberships:
-        token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().lower()
+        token_role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
         if token_role in UNRESTRICTED_COLLEGE_ROLES:
             return None
         return set()
@@ -384,7 +424,7 @@ async def verify_college_access(
         )
 
 
-_BULK_ATS_ROLES = {"recruiter", "placement_staff", "admin", "super_admin"}
+_BULK_ATS_ROLES = {"recruiter", "placement staff", "placement_staff", "admin", "super admin", "super_admin"}
 
 
 def is_bulk_ats_user(user: User) -> bool:
@@ -397,7 +437,7 @@ def is_bulk_ats_user(user: User) -> bool:
     """
     if is_admin_user(user):
         return True
-    role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().lower()
+    role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
     return role in _BULK_ATS_ROLES
 
 
@@ -429,14 +469,10 @@ async def get_current_bulk_ats_user(
                 TeamMember.status == "active",
                 Team.status == "active",
             )
+            .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
         )
         res = await session.execute(stmt)
-        s_res = res.scalars().all() if hasattr(res, "scalars") and callable(res.scalars) else None
-        if isinstance(s_res, list) and s_res:
-            memberships = s_res
-        else:
-            a_res = res.all() if hasattr(res, "all") and callable(res.all) else None
-            memberships = a_res if isinstance(a_res, list) else []
+        memberships = extract_memberships_from_result(res)
 
         if memberships:
             perms = calculate_user_permissions(current_user, memberships)

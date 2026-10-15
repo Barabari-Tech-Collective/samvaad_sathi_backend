@@ -166,16 +166,14 @@ class TeamCRUDRepository(BaseCRUDRepository):
                 hashed_pw = ""
 
             clean_role = (member_data.access_role or "").strip().lower()
-            is_admin = clean_role in {"admin", "super_admin"}
-            is_super_admin = clean_role == "super_admin"
             user = User(
                 email=email_clean,
                 name=member_data.name.strip(),
                 password_hash=hashed_pw,
                 role=clean_role,
                 is_onboarded=False,
-                is_admin=is_admin,
-                is_super_admin=is_super_admin,
+                is_admin=False,
+                is_super_admin=False,
             )
             self.async_session.add(user)
             await self.async_session.flush()
@@ -183,10 +181,6 @@ class TeamCRUDRepository(BaseCRUDRepository):
             clean_role = (member_data.access_role or "").strip().lower()
             if not getattr(user, "role", None):
                 user.role = clean_role
-            if clean_role in {"admin", "super_admin"}:
-                user.is_admin = True
-            if clean_role == "super_admin":
-                user.is_super_admin = True
 
             if member_data.password:
                 is_uninitialized_pw = not user.password_hash

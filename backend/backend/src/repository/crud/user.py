@@ -19,12 +19,13 @@ class UserCRUDRepository(BaseCRUDRepository):
         return user  # type: ignore
 
     async def create_user(self, *, email: str, password: str, name: str) -> User:
-        stmt = sqlalchemy.select(User).where(User.email == email)
+        clean_email = (email or "").strip().lower()
+        stmt = sqlalchemy.select(User).where(sqlalchemy.func.lower(User.email) == clean_email)
         query = await self.async_session.execute(statement=stmt)
         if query.scalar():
             raise EntityAlreadyExists("User with this email already exists!")
 
-        new_user = User(email=email, name=name, password_hash="")
+        new_user = User(email=clean_email, name=(name or "").strip(), password_hash="")
         # Use a stable empty salt for User since the model does not store per-user salt
         new_user.password_hash = pwd_generator.generate_hashed_password(hash_salt="", new_password=password)
 
