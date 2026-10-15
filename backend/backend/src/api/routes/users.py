@@ -160,11 +160,11 @@ async def login_user(
     role_claim = (
         "SUPER_ADMIN" if is_super_admin_user(user)
         else ("ADMIN" if is_admin_flag
-        else (str(effective_role).upper() if effective_role else "STAFF"))
+        else (str(effective_role).upper() if effective_role else "STUDENT"))
     )
     token = jwt_generator.generate_access_token_for_user(
         user=user,
-        extra_claims={"role": role_claim, "access_role": access_role or (str(effective_role).lower() if effective_role else "")}
+        extra_claims={"role": role_claim, "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else "")}
     )
     refresh = await session_repo.create_session(user_id=user_id, expiry_minutes=settings.REFRESH_TOKEN_EXPIRY_MINUTES)
 
@@ -179,8 +179,8 @@ async def login_user(
             is_onboarded=user_is_onboarded,
             is_admin=is_admin_flag,
             is_super_admin=is_super_admin_user(user),
-            access_role=access_role or (str(effective_role).lower() if effective_role else None),
-            role=access_role or getattr(user, "role", None) or (str(effective_role).lower() if effective_role else None),
+            access_role=access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None),
+            role=access_role or getattr(user, "role", None) or (str(effective_role).lower() if effective_role else "student"),
             is_team_lead=is_team_lead,
             colleges=colleges,
             domain=domain,
@@ -328,13 +328,13 @@ async def get_me(
     role_claim = (
         "SUPER_ADMIN" if is_super_admin_user(current_user)
         else ("ADMIN" if is_admin_flag
-        else (str(effective_role).upper() if effective_role else "STAFF"))
+        else (str(effective_role).upper() if effective_role else "STUDENT"))
     )
     token = jwt_generator.generate_access_token_for_user(
         user=current_user,
         extra_claims={
             "role": role_claim,
-            "access_role": access_role or (str(effective_role).lower() if effective_role else ""),
+            "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else ""),
         },
     )
 
@@ -349,8 +349,8 @@ async def get_me(
             is_onboarded=getattr(current_user, 'is_onboarded', False),
             is_admin=is_admin_flag,
             is_super_admin=is_super_admin_user(current_user),
-            access_role=access_role or (str(effective_role).lower() if effective_role else None),
-            role=access_role or getattr(current_user, "role", None) or (str(effective_role).lower() if effective_role else None),
+            access_role=access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None),
+            role=access_role or getattr(current_user, "role", None) or (str(effective_role).lower() if effective_role else "student"),
             is_team_lead=is_team_lead,
             colleges=colleges,
             domain=domain,

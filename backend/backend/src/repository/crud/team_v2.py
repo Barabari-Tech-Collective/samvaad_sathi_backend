@@ -170,7 +170,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
                 email=email_clean,
                 name=member_data.name.strip(),
                 password_hash=hashed_pw,
-                role=clean_role,
+                role=None,
                 is_onboarded=False,
                 is_admin=False,
                 is_super_admin=False,
@@ -179,8 +179,8 @@ class TeamCRUDRepository(BaseCRUDRepository):
             await self.async_session.flush()
         else:
             clean_role = (member_data.access_role or "").strip().lower()
-            if not getattr(user, "role", None):
-                user.role = clean_role
+            # Security Note: Do not mutate global user.role with team-scoped access_role!
+            # Role authorization is evaluated dynamically from active TeamMember records.
 
             if member_data.password:
                 is_uninitialized_pw = not user.password_hash

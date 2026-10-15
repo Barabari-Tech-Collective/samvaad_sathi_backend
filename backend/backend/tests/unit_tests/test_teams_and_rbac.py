@@ -942,5 +942,280 @@ async def test_dashboard_top_roles_rejects_unauthorized_college():
         assert "Unauthorized College" in exc_info.value.detail
 
 
+# --- Tests for Senior Review Concerns (PR #129 Fixes) -------------------------
+
+
+@pytest.mark.asyncio
+async def test_ordinary_user_login_fallback_role_is_student_not_staff():
+    """An ordinary user with no staff membership receives STUDENT role_claim, not STAFF."""
+    from src.api.routes.users import login_user
+    from src.models.schemas.user import UserLogin
+
+    mock_user = User(
+        id=501,
+        email="student@barabari.org",
+        name="Student User",
+        is_admin=False,
+        is_super_admin=False,
+        role=None,
+        password_hash="somehash",
+        created_at=datetime.datetime.now(datetime.timezone.utc),
+        is_onboarded=True,
+    )
+    mock_session = AsyncMock()
+    mock_session_repo = AsyncMock()
+    mock_session_repo.create_session.return_value = MagicMock(token="ref-tok")
+
+    mock_user_repo = AsyncMock()
+    mock_user_repo.verify_password.return_value = mock_user
+
+    # Mock no team memberships in DB
+    mock_res = MagicMock()
+    mock_res.all.return_value = []
+    mock_session.execute.return_value = mock_res
+
+    with patch("src.api.routes.users.jwt_generator.generate_access_token_for_user") as mock_jwt:
+        mock_jwt.return_value = "jwt-student-token"
+        resp = await login_user(
+            payload=UserLogin(email="student@barabari.org", password="ValidPassword123!"),
+            user_repo=mock_user_repo,
+            session_repo=mock_session_repo,
+            session=mock_session,
+        )
+
+        call_claims = mock_jwt.call_args[1].get("extra_claims", {})
+        assert call_claims.get("role") == "STUDENT"
+        assert resp.authorized_user.access_role is None
+        assert resp.authorized_user.role == "student"
+
+
+@pytest.mark.asyncio
+async def test_student_token_rejected_by_get_current_admin_user():
+    """get_current_admin_user rejects users with STUDENT token and no staff memberships."""
+    from src.api.dependencies.admin import get_current_admin_user
+
+    student_user = _make_user(502, email="student2@barabari.org", is_admin=False, is_super_admin=False)
+    setattr(student_user, "_token_role", "STUDENT")
+
+    mock_session = AsyncMock()
+    mock_res = MagicMock()
+    mock_res.scalars.return_value.all.return_value = []
+    mock_session.execute.return_value = mock_res
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_admin_user(current_user=student_user, session=mock_session)
+    assert exc_info.value.status_code == 403
+    assert "Administrator access required" in exc_info.value.detail
+
+
+def test_auth_token_role_does_not_modify_sqlalchemy_persistent_fields():
+    """Token role claims must not mutate persistent SQLAlchemy fields is_admin, is_super_admin, or role."""
+    from src.api.dependencies.admin import is_admin_user, is_super_admin_user
+
+    # User loaded from DB
+    user = User(
+        id=503,
+        email="sso_admin@barabari.org",
+        is_admin=False,
+        is_super_admin=False,
+        role=None,
+    )
+
+    claims = {"role": "SUPER_ADMIN", "sub": "sso_admin@barabari.org"}
+    raw_role = str(claims.get("role") or "").strip().upper()
+    norm_role = raw_role.replace("_", " ")
+
+    # Emulate auth.py get_current_user behavior
+    setattr(user, "_token_claims", claims)
+    setattr(user, "_token_role", raw_role)
+    if norm_role == "SUPER ADMIN":
+        setattr(user, "_token_is_super_admin", True)
+        setattr(user, "_token_is_admin", True)
+    elif norm_role == "ADMIN":
+        setattr(user, "_token_is_admin", True)
+
+    # Persistent model fields remain pristine (False / None)
+    assert user.is_super_admin is False
+    assert user.is_admin is False
+    assert user.role is None
+
+    # Dependency functions correctly recognize token-derived admin flags
+    assert is_super_admin_user(user) is True
+    assert is_admin_user(user) is True
+
+
+@pytest.mark.asyncio
+async def test_add_team_member_does_not_persist_team_role_globally():
+    """add_team_member sets user.role=None and never mutates user.role for existing users."""
+    mock_session = AsyncMock()
+    team = Team(id=1, name="Placement Team", status="active")
+
+    # 1. New user creation
+    def exec_new(stmt):
+        res = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            res.scalar_one_or_none.return_value = None
+        elif "user" in stmt_str:
+            res.scalar_one_or_none.return_value = None
+        elif "team" in stmt_str:
+            res.scalar_one_or_none.return_value = team
+        else:
+            res.scalar_one_or_none.return_value = None
+        return res
+
+    mock_session.execute.side_effect = exec_new
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    # Capture added user
+    added_objects = []
+    mock_session.add = MagicMock(side_effect=lambda obj: added_objects.append(obj))
+
+    member_data = TeamMemberCreate(
+        name="New Member",
+        email="new_member@barabari.org",
+        access_role="Creator",
+    )
+    await repo.add_team_member(team_id=1, member_data=member_data)
+
+    new_users = [o for o in added_objects if isinstance(o, User)]
+    assert len(new_users) == 1
+    assert new_users[0].role is None
+
+    # 2. Existing user add to team
+    existing_user = User(
+        id=601,
+        email="existing@barabari.org",
+        name="Existing User",
+        role=None,
+        password_hash="somehash",
+    )
+
+    def exec_existing(stmt):
+        res = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            res.scalar_one_or_none.return_value = None
+        elif "user" in stmt_str:
+            res.scalar_one_or_none.return_value = existing_user
+        elif "team" in stmt_str:
+            res.scalar_one_or_none.return_value = team
+        else:
+            res.scalar_one_or_none.return_value = None
+        return res
+
+    mock_session.execute.side_effect = exec_existing
+    await repo.add_team_member(
+        team_id=1,
+        member_data=TeamMemberCreate(
+            name="Existing User",
+            email="existing@barabari.org",
+            access_role="Creator",
+        ),
+    )
+    # Existing user's role must NOT be mutated to 'creator'
+    assert existing_user.role is None
+
+
+@pytest.mark.asyncio
+async def test_get_current_creator_user_allows_multi_team_creator_despite_token_jr_role():
+    """A user who has a Junior Facilitator token role but is also a Creator in another team is allowed."""
+    from src.api.dependencies.admin import get_current_creator_user
+
+    user = _make_user(701, email="multi_team@barabari.org", is_admin=False, is_super_admin=False)
+    # Token reflects their oldest/first membership (Jr Facilitator)
+    setattr(user, "_token_role", "JUNIOR_FACILITATOR")
+
+    team_a = Team(id=1, name="Program Team Alpha", status="active")
+    member_a = TeamMember(id=10, team_id=1, user_id=701, access_role="Junior Facilitator", status="active")
+
+    team_b = Team(id=2, name="Program Team Beta", status="active")
+    member_b = TeamMember(id=11, team_id=2, user_id=701, access_role="Creator", status="active")
+
+    mock_session = AsyncMock()
+    mock_res = MagicMock()
+    # DB returns active memberships for both teams
+    mock_res.all.return_value = [(member_a, team_a), (member_b, team_b)]
+    mock_session.execute.return_value = mock_res
+
+    allowed_user = await get_current_creator_user(current_user=user, session=mock_session)
+    assert allowed_user is user
+
+
+@pytest.mark.asyncio
+async def test_analytics_v2_unassigned_college_scoping_for_junior_facilitators():
+    """Analytics routes apply get_user_allowed_colleges and filter out unassigned colleges."""
+    from src.api.routes.analytics_v2 import (
+        get_dashboard_recent_interviews,
+        get_dashboard_recent_students,
+        get_dashboard_attention_required,
+        get_students_summary,
+        get_roles_summary,
+        get_roles_performance,
+        get_roles_weak_skills,
+        get_role_detail,
+        get_difficulty_metrics,
+        get_questions_analytics,
+        get_dropoff_funnel,
+        get_predictive_alerts,
+        get_benchmarking,
+        get_forecasting,
+        global_search,
+    )
+
+    jf_user = _make_user(801, email="jf@barabari.org", is_admin=False, is_super_admin=False)
+    mock_session = AsyncMock()
+
+    # Case 1: Junior Facilitator with empty allowed colleges receives empty responses
+    with patch("src.api.routes.analytics_v2.get_user_allowed_colleges", return_value=set()):
+        r_int = await get_dashboard_recent_interviews(current_user=jf_user, session=mock_session)
+        assert r_int.items == []
+
+        r_stu = await get_dashboard_recent_students(current_user=jf_user, session=mock_session)
+        assert r_stu.items == []
+
+        r_att = await get_dashboard_attention_required(current_user=jf_user, session=mock_session)
+        assert r_att.items == []
+
+        r_sum = await get_students_summary(current_user=jf_user, session=mock_session)
+        assert all(kpi.value in (0, 0.0) for kpi in r_sum.kpis)
+
+        r_role_sum = await get_roles_summary(current_user=jf_user, session=mock_session)
+        assert any(kpi.key == "total_roles" and kpi.value == 0 for kpi in r_role_sum.kpis)
+
+        r_perf = await get_roles_performance(current_user=jf_user, session=mock_session)
+        assert r_perf.items == []
+
+        r_weak = await get_roles_weak_skills(current_user=jf_user, session=mock_session)
+        assert r_weak.items == []
+
+        r_detail = await get_role_detail(role_id="Software Engineer", current_user=jf_user, session=mock_session)
+        assert r_detail.items == []
+
+        r_diff = await get_difficulty_metrics(current_user=jf_user, session=mock_session)
+        assert r_diff.items == []
+
+        r_q = await get_questions_analytics(current_user=jf_user, session=mock_session)
+        assert r_q.items == []
+
+        r_fun = await get_dropoff_funnel(current_user=jf_user, session=mock_session)
+        assert r_fun.stages == []
+
+        r_pred = await get_predictive_alerts(current_user=jf_user, session=mock_session)
+        assert r_pred.items == []
+
+        r_bench = await get_benchmarking(current_user=jf_user, session=mock_session)
+        assert r_bench.items == []
+
+        r_fore = await get_forecasting(current_user=jf_user, session=mock_session)
+        assert r_fore.points == []
+
+        r_glob = await global_search(q="test", current_user=jf_user, session=mock_session)
+        assert r_glob.students == []
+        assert r_glob.colleges == []
+        assert r_glob.interviews == []
+
+
+
 
 

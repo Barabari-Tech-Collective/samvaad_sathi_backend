@@ -80,7 +80,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Attach token claims and synchronize role metadata on the user instance
+    # Attach token claims and synchronize role metadata on non-persistent attributes
     if claims:
         raw_role = str(claims.get("role") or "").strip().upper()
         norm_role = raw_role.replace("_", " ")
@@ -88,27 +88,10 @@ async def get_current_user(
         setattr(user, "_token_role", raw_role)
 
         if norm_role == "SUPER ADMIN":
-            user.is_super_admin = True
-            user.is_admin = True
+            setattr(user, "_token_is_super_admin", True)
+            setattr(user, "_token_is_admin", True)
         elif norm_role == "ADMIN":
-            user.is_admin = True
-        elif norm_role in {
-            "CREATOR",
-            "FACILITATOR",
-            "SR FACILITATOR",
-            "SENIOR FACILITATOR",
-            "JR FACILITATOR",
-            "JUNIOR FACILITATOR",
-            "LEAD",
-            "RECRUITER",
-            "PLACEMENT STAFF",
-            "PLACEMENT COM",
-            "PROGRAM MANAGER",
-            "TEAM MEMBER",
-            "STAFF",
-        }:
-            if not getattr(user, "role", None):
-                user.role = norm_role.lower()
+            setattr(user, "_token_is_admin", True)
 
     return user
 

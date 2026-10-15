@@ -699,15 +699,20 @@ async def get_dashboard_score_distribution(
 async def get_roles_performance_summary_endpoint(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return RolePerformanceSummaryResponse(roles=[])
     if start_date is None and end_date is None:
         end_date = datetime.date.today()
         start_date = end_date - datetime.timedelta(days=90)
         
     service = AnalyticsService(session)
-    results = await service.get_roles_performance_summary(start_date=start_date, end_date=end_date)
+    results = await service.get_roles_performance_summary(
+        start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges
+    )
     return RolePerformanceSummaryResponse(roles=results)
 
 
@@ -721,17 +726,23 @@ async def get_roles_performance_summary_endpoint(
 )
 async def get_dashboard_recent_interviews(
     limit: int = fastapi.Query(default=10, ge=1, le=100),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 10))
+        return TablePageResponse(table_type="recent_interviews", items=[], page=1, limit=limit_val, total=0)
+
     stmt = (
         sqlalchemy.select(Interview, User.name, User.university, Report, SummaryReport)
         .join(User, User.id == Interview.user_id)
         .outerjoin(Report, Report.interview_id == Interview.id)
         .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
-        .order_by(Interview.created_at.desc())
-        .limit(limit)
     )
+    if allowed_colleges is not None:
+        stmt = stmt.where(User.university.in_(list(allowed_colleges)))
+    stmt = stmt.order_by(Interview.created_at.desc()).limit(limit)
     rows = list((await session.execute(stmt)).all())
     
     from src.services.analytics import _extract_overall_score, _extract_sub_scores
@@ -768,8 +779,14 @@ async def get_dashboard_recent_students(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
-    stmt = sqlalchemy.select(User).order_by(User.created_at.desc()).limit(limit)
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 10))
+        return TablePageResponse(table_type="recent_students", items=[], page=1, limit=limit_val, total=0)
+    stmt = sqlalchemy.select(User)
+    if allowed_colleges is not None:
+        stmt = stmt.where(User.university.in_(list(allowed_colleges)))
+    stmt = stmt.order_by(User.created_at.desc()).limit(limit)
     users = list((await session.execute(stmt)).scalars().all())
     items = [
         {
@@ -792,10 +809,13 @@ async def get_dashboard_attention_required(
     end_date: datetime.date | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
-    ) -> TablePageResponse:
-    del current_user
+) -> TablePageResponse:
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 20))
+        return TablePageResponse(table_type="attention_required", items=[], page=1, limit=limit_val, total=0)
     service = AnalyticsService(session)
-    alerts = await service.get_alerts(start_date=start_date, end_date=end_date)
+    alerts = await service.get_alerts(start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges)
     items: list[dict[str, Any]] = []
     for alert in alerts.get("student_alerts", []):
         items.append({"entity_type": "student", "severity": "medium", **alert})
@@ -808,18 +828,51 @@ async def get_dashboard_attention_required(
 async def get_students_summary(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
-    ) -> StudentsSummaryResponse:
-    del current_user
+) -> StudentsSummaryResponse:
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return StudentsSummaryResponse(kpis=[
+            KpiCard(key="total_students", label="Total Students", value=0),
+            KpiCard(key="active_students_last_30_days", label="Active Students (Last 30 Days)", value=0),
+            KpiCard(key="average_score", label="Average Score", value=0.0),
+            KpiCard(key="total_interviews", label="Total Interviews", value=0),
+            KpiCard(key="overall_improvement_percent", label="Overall Improvement %", value=0.0, unit="percent"),
+            KpiCard(key="completion_rate", label="Completion Rate", value=0.0, unit="percent"),
+        ])
     service = AnalyticsService(session)
-    system_metrics = await service.get_system_analytics()
+    system_metrics = await service.get_system_analytics(allowed_colleges=allowed_colleges)
 
-    total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0
-    completed_interviews = (
-        (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.status == "completed"))).scalar() or 0
+    total_interviews_stmt = _apply_interview_filters(
+        sqlalchemy.select(sqlalchemy.func.count(Interview.id)),
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        allowed_colleges=allowed_colleges,
     )
+    total_interviews = (await session.execute(total_interviews_stmt)).scalar() or 0
+
+    completed_interviews_stmt = _apply_interview_filters(
+        sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.status == "completed"),
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        allowed_colleges=allowed_colleges,
+    )
+    completed_interviews = (await session.execute(completed_interviews_stmt)).scalar() or 0
+
     overview = system_metrics.get("overview", {})
+    if allowed_colleges is not None:
+        total_students_stmt = sqlalchemy.select(sqlalchemy.func.count(User.id)).where(User.university.in_(list(allowed_colleges)))
+        total_students = int((await session.execute(total_students_stmt)).scalar() or 0)
+    else:
+        total_students = int(overview.get("total_users", 0))
+
     kpis = [
-        KpiCard(key="total_students", label="Total Students", value=int(overview.get("total_users", 0))),
+        KpiCard(key="total_students", label="Total Students", value=total_students),
         KpiCard(key="active_students_last_30_days", label="Active Students (Last 30 Days)", value=int(overview.get("active_users_30d", 0))),
         KpiCard(key="average_score", label="Average Score", value=overview.get("avg_score")),
         KpiCard(key="total_interviews", label="Total Interviews", value=total_interviews),
@@ -1569,33 +1622,38 @@ async def global_search(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return GlobalSearchResponse(students=[], colleges=[], interviews=[])
+
     pattern = f"%{q.strip()}%"
 
     users_stmt = (
         sqlalchemy.select(User.id, User.name, User.email, User.university)
         .where(sqlalchemy.or_(User.name.ilike(pattern), User.email.ilike(pattern), User.university.ilike(pattern)))
-        .order_by(User.created_at.desc())
-        .limit(limit_per_bucket)
     )
+    if allowed_colleges is not None:
+        users_stmt = users_stmt.where(User.university.in_(list(allowed_colleges)))
+    users_stmt = users_stmt.order_by(User.created_at.desc()).limit(limit_per_bucket)
     users_rows = list((await session.execute(users_stmt)).all())
 
     colleges_stmt = (
         sqlalchemy.select(User.university, sqlalchemy.func.count(User.id).label("students_count"))
         .where(User.university.is_not(None), User.university.ilike(pattern))
-        .group_by(User.university)
-        .order_by(sqlalchemy.text("students_count DESC"))
-        .limit(limit_per_bucket)
     )
+    if allowed_colleges is not None:
+        colleges_stmt = colleges_stmt.where(User.university.in_(list(allowed_colleges)))
+    colleges_stmt = colleges_stmt.group_by(User.university).order_by(sqlalchemy.text("students_count DESC")).limit(limit_per_bucket)
     colleges_rows = list((await session.execute(colleges_stmt)).all())
 
     interviews_stmt = (
         sqlalchemy.select(Interview.id, Interview.track, Interview.difficulty, Interview.created_at, User.name)
         .join(User, User.id == Interview.user_id)
         .where(sqlalchemy.or_(Interview.track.ilike(pattern), Interview.difficulty.ilike(pattern), User.name.ilike(pattern)))
-        .order_by(Interview.created_at.desc())
-        .limit(limit_per_bucket)
     )
+    if allowed_colleges is not None:
+        interviews_stmt = interviews_stmt.where(User.university.in_(list(allowed_colleges)))
+    interviews_stmt = interviews_stmt.order_by(Interview.created_at.desc()).limit(limit_per_bucket)
     interviews_rows = list((await session.execute(interviews_stmt)).all())
 
     return GlobalSearchResponse(
@@ -2055,9 +2113,18 @@ async def get_roles_summary(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return DashboardOverviewResponse(kpis=[
+            KpiCard(key="total_roles", label="Total Roles", value=0),
+            KpiCard(key="most_popular_role", label="Most Popular Role", value=None),
+            KpiCard(key="highest_avg_role", label="Highest Average Score Role", value=None),
+            KpiCard(key="lowest_avg_role", label="Lowest Average Score Role", value=None),
+            KpiCard(key="total_interviews_across_roles", label="Total Interviews Across Roles", value=0),
+            KpiCard(key="overall_completion_rate", label="Overall Completion Rate", value=0.0, unit="percent"),
+        ])
     service = AnalyticsService(session)
-    items = await service.get_role_segment_analytics()
+    items = await service.get_role_segment_analytics(allowed_colleges=allowed_colleges)
     total_roles = len(items)
     all_interviews = sum(int(item.get("interviews", 0)) for item in items)
     completion_rates = [100.0 - float(item.get("drop_off_rate", 0.0)) for item in items]
@@ -2097,13 +2164,16 @@ async def get_roles_performance(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return TablePageResponse(table_type="role_performance", items=[], page=1, limit=1, total=0)
     service = AnalyticsService(session)
     items = await service.get_role_segment_analytics(
         start_date=start_date,
         end_date=end_date,
         difficulty=difficulty.value if difficulty else None,
         category=category.value if category else None,
+        allowed_colleges=allowed_colleges,
     )
     normalized_items = _zero_fill_metric_nulls(items)
     
@@ -2124,9 +2194,11 @@ async def get_roles_weak_skills(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return HeatmapResponse(chart_type="heatmap", items=[])
     service = AnalyticsService(session)
-    items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date)
+    items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges)
     cells: list[HeatmapCell] = []
     for role_item in items:
         role_name = role_item.get("role") or "unknown"
@@ -2141,9 +2213,11 @@ async def get_role_detail(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return DashboardTopListResponse(table_type="role_detail", items=[])
     service = AnalyticsService(session)
-    items = await service.get_role_segment_analytics(role=role_id)
+    items = await service.get_role_segment_analytics(role=role_id, allowed_colleges=allowed_colleges)
     return DashboardTopListResponse(table_type="role_detail", items=_zero_fill_metric_nulls(items))
 
 
@@ -2155,10 +2229,12 @@ async def get_difficulty_metrics(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return TablePageResponse(table_type="difficulty_metrics", items=[], page=1, limit=1, total=0)
     service = AnalyticsService(session)
     clean_role = role.strip() if role and role.strip() else None
-    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date, role=clean_role)
+    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date, role=clean_role, allowed_colleges=allowed_colleges)
     items = _sort_difficulty_items(items)
     normalized_items = _zero_fill_metric_nulls(items)
     return TablePageResponse(table_type="difficulty_metrics", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
@@ -2177,7 +2253,11 @@ async def get_questions_analytics(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        page_val = page if isinstance(page, int) else int(getattr(page, "default", 1))
+        limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 20))
+        return TablePageResponse(table_type="question_analytics", items=[], page=page_val, limit=limit_val, total=0)
     stmt = (
         sqlalchemy.select(
             InterviewQuestion.id,
@@ -2188,7 +2268,15 @@ async def get_questions_analytics(
         )
         .outerjoin(QuestionAttempt, QuestionAttempt.question_id == InterviewQuestion.id)
         .outerjoin(Report, Report.interview_id == InterviewQuestion.interview_id)
-        .group_by(InterviewQuestion.id)
+    )
+    if allowed_colleges is not None:
+        stmt = (
+            stmt.join(Interview, Interview.id == InterviewQuestion.interview_id)
+            .join(User, User.id == Interview.user_id)
+            .where(User.university.in_(list(allowed_colleges)))
+        )
+    stmt = (
+        stmt.group_by(InterviewQuestion.id)
         .order_by(InterviewQuestion.id.asc())
     )
     all_rows = list((await session.execute(stmt)).all())
@@ -2222,9 +2310,11 @@ async def get_dropoff_funnel(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return FunnelResponse(chart_type="funnel", stages=[])
     service = AnalyticsService(session)
-    system = await service.get_system_analytics(start_date=start_date, end_date=end_date)
+    system = await service.get_system_analytics(start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges)
     funnel = system.get("funnel", {})
     sequence = ["sign_up", "select_role", "start_interview", "complete_interview", "view_report", "do_practice"]
     previous_count: int | None = None
@@ -2252,9 +2342,13 @@ async def get_predictive_alerts(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        page_val = page if isinstance(page, int) else int(getattr(page, "default", 1))
+        limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 20))
+        return TablePageResponse(table_type="predictive_alerts", items=[], page=page_val, limit=limit_val, total=0)
     service = AnalyticsService(session)
-    alerts = await service.get_alerts(start_date=start_date, end_date=end_date)
+    alerts = await service.get_alerts(start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges)
     predicted_items: list[dict[str, Any]] = []
     for alert in alerts.get("student_alerts", []):
         predicted_items.append(
@@ -2295,9 +2389,11 @@ async def get_benchmarking(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return TablePageResponse(table_type="benchmarking", items=[], page=1, limit=1, total=0)
     service = AnalyticsService(session)
-    role_items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date)
+    role_items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges)
     
     total_completed = sum(item.get("completed_interviews", 0) for item in role_items)
     if total_completed > 0:
@@ -2347,10 +2443,16 @@ async def get_forecasting(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return ForecastResponse(chart_type="line", points=[])
     stmt = (
         sqlalchemy.select(sqlalchemy.func.date(Interview.created_at), sqlalchemy.func.count(Interview.id))
-        .group_by(sqlalchemy.func.date(Interview.created_at))
+    )
+    if allowed_colleges is not None:
+        stmt = stmt.join(User, User.id == Interview.user_id).where(User.university.in_(list(allowed_colleges)))
+    stmt = (
+        stmt.group_by(sqlalchemy.func.date(Interview.created_at))
         .order_by(sqlalchemy.func.date(Interview.created_at).asc())
     )
     rows = list((await session.execute(stmt)).all())

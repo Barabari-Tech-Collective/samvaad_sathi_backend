@@ -46,7 +46,7 @@ def _super_admin_allow_listed_emails() -> set[str]:
 
 def is_super_admin_user(user: User) -> bool:
     """True if user has full system access, including team creation and deletion."""
-    if getattr(user, "is_super_admin", False):
+    if getattr(user, "is_super_admin", False) or getattr(user, "_token_is_super_admin", False):
         return True
     email = (getattr(user, "email", "") or "").strip().lower()
     if bool(email) and email in _super_admin_allow_listed_emails():
@@ -57,7 +57,7 @@ def is_super_admin_user(user: User) -> bool:
 
 def is_admin_user(user: User) -> bool:
     """True if user may read cross-student data. Super Admins inherit this privilege."""
-    if is_super_admin_user(user) or getattr(user, "is_admin", False):
+    if is_super_admin_user(user) or getattr(user, "is_admin", False) or getattr(user, "_token_is_admin", False):
         return True
     email = (getattr(user, "email", "") or "").strip().lower()
     if bool(email) and email in _allow_listed_emails():
@@ -291,20 +291,6 @@ async def get_current_creator_user(
     if is_admin_user(current_user):
         return current_user
 
-    role_from_token = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
-    if role_from_token in JUNIOR_ROLES:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_403_FORBIDDEN,
-            detail="Junior Facilitators do not have permission to access the Creator Portal or modify interview roles.",
-        )
-    if role_from_token in TEAM_MEMBER_ROLES:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_403_FORBIDDEN,
-            detail="Team members have view-only access and do not have permission to access the Creator Portal or modify interview roles.",
-        )
-    if role_from_token in CREATOR_ROLES:
-        return current_user
-
     if session is not None:
         from sqlalchemy import select
         from src.models.db.team import Team
@@ -351,6 +337,20 @@ async def get_current_creator_user(
             raise
         except Exception:
             pass
+
+    role_from_token = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    if role_from_token in CREATOR_ROLES:
+        return current_user
+    if role_from_token in JUNIOR_ROLES:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Junior Facilitators do not have permission to access the Creator Portal or modify interview roles.",
+        )
+    if role_from_token in TEAM_MEMBER_ROLES:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Team members have view-only access and do not have permission to access the Creator Portal or modify interview roles.",
+        )
 
     raise fastapi.HTTPException(
         status_code=fastapi.status.HTTP_403_FORBIDDEN,

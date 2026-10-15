@@ -473,8 +473,16 @@ class AnalyticsService:
         role: str | None = None,
         difficulty: str | None = None,
         college: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date, role=role, difficulty=difficulty, college=college)
+        interviews = await self._list_interviews_all(
+            start_date=start_date,
+            end_date=end_date,
+            role=role,
+            difficulty=difficulty,
+            college=college,
+            allowed_colleges=allowed_colleges,
+        )
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
         grouped: dict[str, list[Interview]] = defaultdict(list)
@@ -793,7 +801,10 @@ class AnalyticsService:
         self,
         start_date: datetime.date | None = None,
         end_date: datetime.date | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
+        if allowed_colleges is not None and not allowed_colleges:
+            return []
         # Using load_only prevents loading heavy fields (e.g. transcriptions) into RAM.
         # We process aggregation in python because the JSON-based scores have highly complex fallbacks 
         # (Report vs SummaryReport, different json keys) which make a pure GROUP BY in SQL too fragile.
@@ -808,6 +819,8 @@ class AnalyticsService:
                 Load(SummaryReport).load_only(SummaryReport.report_json)
             )
         )
+        if allowed_colleges is not None:
+            stmt = stmt.join(User, User.id == Interview.user_id).where(User.university.in_(list(allowed_colleges)))
         if start_date:
             stmt = stmt.where(Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
         if end_date:
@@ -865,10 +878,17 @@ class AnalyticsService:
         user_id: int | None = None,
         start_date: datetime.date | None = None,
         end_date: datetime.date | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> dict[str, Any]:
+        if allowed_colleges is not None and not allowed_colleges:
+            return {
+                "student_alerts": [],
+                "system_alerts": [],
+            }
+
         system_alerts: list[dict[str, Any]] = []
 
-        users = await self._candidate_users(user_id=user_id)
+        users = await self._candidate_users(user_id=user_id, allowed_colleges=allowed_colleges)
         candidate_user_ids = [u.id for u in users]
         student_alerts = await self._student_alerts_batched(
             user_ids=candidate_user_ids,
@@ -882,8 +902,8 @@ class AnalyticsService:
         prev_window_start = (now - datetime.timedelta(days=14)).date()
         prev_window_end = (now - datetime.timedelta(days=8)).date()
 
-        current_scores = await self._overall_scores_between(current_window_start, now.date())
-        previous_scores = await self._overall_scores_between(prev_window_start, prev_window_end)
+        current_scores = await self._overall_scores_between(current_window_start, now.date(), allowed_colleges=allowed_colleges)
+        previous_scores = await self._overall_scores_between(prev_window_start, prev_window_end, allowed_colleges=allowed_colleges)
 
         current_avg = _avg_non_null(current_scores)
         prev_avg = _avg_non_null(previous_scores)
@@ -897,7 +917,7 @@ class AnalyticsService:
                 }
             )
 
-        interviews_all = await self._list_interviews_all()
+        interviews_all = await self._list_interviews_all(allowed_colleges=allowed_colleges)
         reports_all = await self._reports_by_interview([i.id for i in interviews_all])
         summaries_all = await self._summary_reports_by_interview([i.id for i in interviews_all])
         user_university_map = await self._user_university_map()
@@ -928,7 +948,10 @@ class AnalyticsService:
             if score is not None:
                 college_score_groups[college_name].append(score)
 
+        allowed_colleges_set = set(allowed_colleges) if allowed_colleges is not None else None
         for college_name, total in college_interview_counts.items():
+            if allowed_colleges_set is not None and college_name not in allowed_colleges_set:
+                continue
             avg_score = _avg_non_null(college_score_groups.get(college_name, []))
             if total >= 10 and avg_score is not None and avg_score < 40:
                 system_alerts.append(
@@ -1580,15 +1603,19 @@ class AnalyticsService:
         avg = _avg_non_null(improvements)
         return avg if avg is not None else 0.0
 
-    async def _candidate_users(self, *, user_id: int | None) -> list[User]:
+    async def _candidate_users(self, *, user_id: int | None, allowed_colleges: Sequence[str] | set[str] | None = None) -> list[User]:
+        if allowed_colleges is not None and not allowed_colleges:
+            return []
         stmt = sqlalchemy.select(User)
         if user_id is not None:
             stmt = stmt.where(User.id == user_id)
+        if allowed_colleges is not None:
+            stmt = stmt.where(User.university.in_(list(allowed_colleges)))
         users = list((await self._db.execute(stmt)).scalars().all())
         return users
 
-    async def _overall_scores_between(self, start_date: datetime.date, end_date: datetime.date) -> list[float]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date)
+    async def _overall_scores_between(self, start_date: datetime.date, end_date: datetime.date, allowed_colleges: Sequence[str] | set[str] | None = None) -> list[float]:
+        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges)
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
         scores = [_extract_overall_score(reports.get(i.id), summaries.get(i.id)) for i in interviews]
