@@ -77,6 +77,37 @@ def test_backend_release_accepts_a_timestamped_backup_reference(monkeypatch):
     assert release.verify_database_backup_reference().startswith("aiven-backup-")
 
 
+def test_hosted_smoke_check_identifies_itself_to_edge_security(monkeypatch):
+    release = load_release_module()
+    monkeypatch.setenv("HEALTH_URL", "https://backend.example.test/api/health")
+    captured = {}
+
+    class HealthyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def urlopen(request, *, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return HealthyResponse()
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", urlopen)
+
+    release.smoke()
+
+    assert captured["request"].full_url.endswith("/api/health")
+    assert captured["request"].get_header("User-agent") == (
+        "Samvaad-Release-Health-Check/1.0"
+    )
+    assert captured["request"].get_header("Accept") == "application/json"
+    assert captured["timeout"] == 30
+
+
 def test_ec2_release_verifies_migrations_before_restarting_services():
     script = EC2_RELEASE_PATH.read_text()
 
