@@ -25,6 +25,7 @@ async def get_current_user(
     # Cognito/local-password flow. Tried first since that's the path all new logins take;
     # falls back to the legacy verifier below so sessions minted before this migration (and
     # not yet re-authenticated through Sampark Saathi) keep working until they expire.
+    claims = None
     try:
         claims = decode_sso_access_token(token)
         email = claims.get("sub")
@@ -73,6 +74,32 @@ async def get_current_user(
             detail="User not found in database",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Attach token claims and synchronize role metadata on the user instance
+    if claims:
+        token_role = str(claims.get("role") or "").strip().upper()
+        setattr(user, "_token_claims", claims)
+        setattr(user, "_token_role", token_role)
+
+        if token_role == "SUPER_ADMIN":
+            user.is_super_admin = True
+            user.is_admin = True
+        elif token_role == "ADMIN":
+            user.is_admin = True
+        elif token_role in {
+            "CREATOR",
+            "FACILITATOR",
+            "SR FACILITATOR",
+            "SENIOR FACILITATOR",
+            "JR FACILITATOR",
+            "JUNIOR FACILITATOR",
+            "LEAD",
+            "RECRUITER",
+            "PLACEMENT_STAFF",
+            "STAFF",
+        }:
+            if not getattr(user, "role", None):
+                user.role = token_role.lower()
 
     return user
 

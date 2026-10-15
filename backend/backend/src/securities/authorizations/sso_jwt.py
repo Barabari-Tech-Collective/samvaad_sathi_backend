@@ -14,11 +14,13 @@ class SsoTokenError(Exception):
     """Raised when a Sampark Saathi auth-service access token fails to verify."""
 
 
-# Students are the product's own users; ADMIN/SUPER_ADMIN operate the /v2/analytics
-# dashboard embedded in the Sampark Saathi admin console. Other staff roles
-# (FACILITATOR, PROGRAM_MANAGER, PLACEMENT_COM) have no Samvaad surface today and can
-# be added through SSO_ALLOWED_ROLES without a code change if that stops being true.
-DEFAULT_SSO_ALLOWED_ROLES = "STUDENT,ADMIN,SUPER_ADMIN"
+# Students are the product's primary users; ADMIN/SUPER_ADMIN operate the
+# console; CREATOR, FACILITATOR, LEAD, and staff roles operate the interview role
+# management, analytics, and team workflows.
+DEFAULT_SSO_ALLOWED_ROLES = (
+    "STUDENT,ADMIN,SUPER_ADMIN,CREATOR,FACILITATOR,SR FACILITATOR,SENIOR FACILITATOR,"
+    "JR FACILITATOR,JUNIOR FACILITATOR,LEAD,STAFF,PROGRAM_MANAGER,PLACEMENT_COM,RECRUITER,PLACEMENT_STAFF"
+)
 
 
 def _allowed_roles() -> set[str]:

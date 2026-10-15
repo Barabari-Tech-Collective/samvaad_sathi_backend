@@ -25,9 +25,11 @@ regresses. The rest assert the builder cannot reintroduce the crossover.
 import ast
 import pathlib
 import types
+from typing import cast
 
 import pytest
 
+from src.models.db.interview_question import InterviewQuestion
 from src.services.question_snapshot import (
     QUESTION_GENERATION_LOCK_NAMESPACE,
     question_items_from_persisted,
@@ -42,6 +44,8 @@ _EXEMPT_WRITERS = {
     # Always inserts against an interview it just created via create_interview(),
     # whose id no other request can know yet, so there is nothing to race with.
     "create_structure_practice_session",
+    # Bulk ATS creates resume screening batches, not interview questions.
+    "create_batch",
 }
 
 
@@ -94,7 +98,7 @@ def test_every_question_writer_takes_the_lock():
     )
 
 
-def _row(question_id: int, text: str, **overrides):
+def _row(question_id: int, text: str, **overrides) -> InterviewQuestion:
     """A stand-in for a persisted InterviewQuestion row.
 
     The builder only ever reads attributes, so a namespace keeps the test honest
@@ -111,7 +115,7 @@ def _row(question_id: int, text: str, **overrides):
         "audio_url": None,
     }
     fields.update(overrides)
-    return types.SimpleNamespace(**fields)
+    return cast(InterviewQuestion, types.SimpleNamespace(**fields))
 
 
 def test_text_always_belongs_to_the_id_it_is_returned_with():
@@ -139,7 +143,7 @@ def test_builder_cannot_be_handed_generated_text():
     back in, this fails and they have to justify it.
     """
     with pytest.raises(TypeError):
-        question_items_from_persisted([_row(1, "stored")], items=[{"text": "generated"}])
+        question_items_from_persisted([_row(1, "stored")], items=[{"text": "generated"}])  # type: ignore[call-arg]
 
 
 def test_difficulty_is_uniform_so_a_refresh_cannot_disagree():

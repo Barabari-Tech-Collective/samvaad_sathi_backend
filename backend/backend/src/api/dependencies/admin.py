@@ -49,7 +49,10 @@ def is_super_admin_user(user: User) -> bool:
     if getattr(user, "is_super_admin", False):
         return True
     email = (getattr(user, "email", "") or "").strip().lower()
-    return bool(email) and email in _super_admin_allow_listed_emails()
+    if bool(email) and email in _super_admin_allow_listed_emails():
+        return True
+    token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().upper()
+    return token_role == "SUPER_ADMIN"
 
 
 def is_admin_user(user: User) -> bool:
@@ -57,28 +60,331 @@ def is_admin_user(user: User) -> bool:
     if is_super_admin_user(user) or getattr(user, "is_admin", False):
         return True
     email = (getattr(user, "email", "") or "").strip().lower()
-    return bool(email) and email in _allow_listed_emails()
+    if bool(email) and email in _allow_listed_emails():
+        return True
+    token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().upper()
+    return token_role in {"ADMIN", "SUPER_ADMIN"}
+
+
+from src.api.dependencies.session import get_async_session
+
+STAFF_ROLES = {
+    "admin",
+    "super_admin",
+    "lead",
+    "team lead",
+    "manager",
+    "creator",
+    "facilitator",
+    "staff",
+    "sr facilitator",
+    "senior facilitator",
+    "jr facilitator",
+    "junior facilitator",
+    "program_manager",
+    "placement_com",
+    "recruiter",
+    "placement_staff",
+    "team member",
+    "member",
+}
+
+
+CREATOR_ROLES = {"lead", "team lead", "creator", "admin", "super_admin", "sr facilitator", "senior facilitator"}
+JUNIOR_ROLES = {"jr facilitator", "junior facilitator"}
+TEAM_MEMBER_ROLES = {"team member", "member", "staff"}
+UNRESTRICTED_COLLEGE_ROLES = CREATOR_ROLES | TEAM_MEMBER_ROLES
+LEAD_ROLES = {"lead", "team lead", "manager", "admin", "super_admin", "creator"}
+
+
+def calculate_user_permissions(
+    user: User,
+    memberships: list,
+) -> dict:
+    """Calculate explicit role-based permissions for a user across teams.
+
+    Enforces the following rules:
+    1. Partnership / Placement Team:
+       - Creator: can_create_roles=True, can_access_ats=True, can_edit=True, is_view_only=False, colleges=None
+       - Team Member: can_create_roles=False, can_access_ats=False, can_edit=False, is_view_only=True, colleges=None
+    2. Program Team:
+       - Creator: can_create_roles=True, can_access_ats=False, can_edit=True, is_view_only=False, colleges=None
+       - Senior Facilitator: can_create_roles=True, can_access_ats=False, can_edit=True, is_view_only=False, colleges=None
+       - Junior Facilitator: can_create_roles=False, can_access_ats=False, can_edit=False, is_view_only=True, colleges=member.colleges
+       - Team Member: can_create_roles=False, can_access_ats=False, can_edit=False, is_view_only=True, colleges=None
+    3. Global Admin / Super Admin:
+       - All permissions=True, is_view_only=False, colleges=None
+    """
+    if is_admin_user(user):
+        return {
+            "can_create_roles": True,
+            "can_access_ats": True,
+            "can_edit": True,
+            "is_view_only": False,
+            "colleges": None,
+            "is_team_lead": True,
+        }
+
+    is_placement_creator = False
+    is_program_creator_or_sr = False
+    is_junior_facilitator = False
+    is_team_member = False
+    junior_colleges: list[str] = []
+
+    for item in memberships:
+        if isinstance(item, (tuple, list)):
+            member = item[0]
+            team = item[1] if len(item) > 1 else None
+        else:
+            member = item
+            team = getattr(member, "team", None)
+
+        t_name = (getattr(team, "name", "") or "").strip().lower() if team else ""
+        m_role = (getattr(member, "access_role", "") or "").strip().lower()
+
+        is_placement = any(kw in t_name for kw in ["placement", "partnership"])
+
+        if m_role in CREATOR_ROLES:
+            if is_placement:
+                is_placement_creator = True
+            else:
+                is_program_creator_or_sr = True
+        elif m_role in JUNIOR_ROLES:
+            is_junior_facilitator = True
+            if member and getattr(member, "colleges", None) and isinstance(member.colleges, list):
+                junior_colleges.extend([c for c in member.colleges if isinstance(c, str) and c.strip()])
+        elif m_role in TEAM_MEMBER_ROLES:
+            is_team_member = True
+
+    # Fallback to token claims / user.role
+    token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().lower()
+    can_access_ats_token = token_role in _BULK_ATS_ROLES
+
+    if not memberships:
+        if token_role in CREATOR_ROLES:
+            is_program_creator_or_sr = True
+        elif token_role in JUNIOR_ROLES:
+            is_junior_facilitator = True
+        elif token_role in TEAM_MEMBER_ROLES:
+            is_team_member = True
+
+    can_access_ats = is_placement_creator or can_access_ats_token
+    can_create_roles = is_placement_creator or is_program_creator_or_sr
+    can_edit = can_create_roles
+    is_view_only = not can_edit
+
+    # Scoping colleges:
+    # Junior Facilitators are strictly restricted to their assigned colleges.
+    # Creators, Senior Facilitators, and Team Members have unrestricted access (None).
+    if is_placement_creator or is_program_creator_or_sr:
+        colleges = None
+    elif is_junior_facilitator and not is_team_member:
+        colleges = junior_colleges if junior_colleges else []
+    else:
+        colleges = None
+
+    is_team_lead = bool(
+        is_placement_creator
+        or (is_program_creator_or_sr and token_role in LEAD_ROLES)
+        or token_role in LEAD_ROLES
+        or any(
+            (getattr(item[0] if isinstance(item, (tuple, list)) else item, "access_role", "") or "").strip().lower() in LEAD_ROLES
+            for item in memberships
+        )
+    )
+
+    return {
+        "can_create_roles": can_create_roles,
+        "can_access_ats": can_access_ats,
+        "can_edit": can_edit,
+        "is_view_only": is_view_only,
+        "colleges": colleges,
+        "is_team_lead": is_team_lead,
+    }
 
 
 async def get_current_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
+    session = fastapi.Depends(get_async_session),
 ) -> User:
     """Require an authenticated user authorised for cross-student data.
-
-    Returns 403 (not 404) because the caller is legitimately authenticated -
-    they simply aren't authorized for this resource, and hiding that fact
-    provides no benefit here: the endpoints are already discoverable in the
-    OpenAPI schema.
+    Allows:
+    1. Global Admins and Super Admins.
+    2. Users with staff/creator/facilitator roles from token claims.
+    3. Active team members (staff/facilitators).
     """
-    if not is_admin_user(current_user):
+    if is_admin_user(current_user):
+        return current_user
+
+    role_from_token = (getattr(current_user, "_token_role", "") or getattr(current_user, "role", "") or "").strip().lower()
+    if role_from_token in STAFF_ROLES:
+        return current_user
+
+    if session is not None:
+        from sqlalchemy import select
+        from src.models.db.team_member import TeamMember
+        try:
+            stmt = select(TeamMember).where(
+                TeamMember.user_id == current_user.id,
+                TeamMember.status == "active",
+            )
+            res = await session.execute(stmt)
+            members = res.scalars().all()
+            if members:
+                return current_user
+        except Exception:
+            pass
+
+    raise fastapi.HTTPException(
+        status_code=fastapi.status.HTTP_403_FORBIDDEN,
+        detail="Administrator access required.",
+    )
+
+
+async def get_current_creator_user(
+    current_user: User = fastapi.Depends(get_current_user),
+    session = fastapi.Depends(get_async_session),
+) -> User:
+    """Require user to have Creator Portal permissions.
+    - Super Admins, Global Admins, Leads, Creators, and Sr Facilitators have full access.
+    - Jr Facilitators and standard Team Members are rejected with 403 Forbidden.
+    """
+    if is_admin_user(current_user):
+        return current_user
+
+    role_from_token = (getattr(current_user, "_token_role", "") or getattr(current_user, "role", "") or "").strip().lower()
+    if role_from_token in JUNIOR_ROLES:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_403_FORBIDDEN,
-            detail="Administrator access required.",
+            detail="Junior Facilitators do not have permission to access the Creator Portal or modify interview roles.",
         )
-    return current_user
+    if role_from_token in TEAM_MEMBER_ROLES:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Team members have view-only access and do not have permission to access the Creator Portal or modify interview roles.",
+        )
+    if role_from_token in CREATOR_ROLES:
+        return current_user
+
+    if session is not None:
+        from sqlalchemy import select
+        from src.models.db.team import Team
+        from src.models.db.team_member import TeamMember
+        try:
+            stmt = (
+                select(TeamMember, Team)
+                .join(Team, TeamMember.team_id == Team.id)
+                .where(
+                    TeamMember.user_id == current_user.id,
+                    TeamMember.status == "active",
+                    Team.status == "active",
+                )
+            )
+            res = await session.execute(stmt)
+            s_res = res.scalars().all() if hasattr(res, "scalars") and callable(res.scalars) else None
+            if isinstance(s_res, list) and s_res:
+                memberships = s_res
+            else:
+                a_res = res.all() if hasattr(res, "all") and callable(res.all) else None
+                memberships = a_res if isinstance(a_res, list) else []
+
+            if memberships:
+                perms = calculate_user_permissions(current_user, memberships)
+                if perms["can_create_roles"]:
+                    return current_user
+                roles = {(getattr(item[0] if isinstance(item, (tuple, list)) else item, "access_role", "") or "").strip().lower() for item in memberships}
+                if roles & JUNIOR_ROLES:
+                    raise fastapi.HTTPException(
+                        status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                        detail="Junior Facilitators do not have permission to access the Creator Portal or modify interview roles.",
+                    )
+                if roles & TEAM_MEMBER_ROLES:
+                    raise fastapi.HTTPException(
+                        status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                        detail="Team members have view-only access and do not have permission to access the Creator Portal or modify interview roles.",
+                    )
+        except fastapi.HTTPException:
+            raise
+        except Exception:
+            pass
+
+    raise fastapi.HTTPException(
+        status_code=fastapi.status.HTTP_403_FORBIDDEN,
+        detail="Creator Portal access required. Only Senior Facilitators, Creators, and Administrators can create or modify interview roles.",
+    )
 
 
-_BULK_ATS_ROLES = {"recruiter", "placement_staff", "admin"}
+async def get_user_allowed_colleges(
+    user: User,
+    session,
+) -> set[str] | None:
+    """Return set of allowed college names, or None if unrestricted.
+    - Super Admins and Global Admins return None (access to all colleges).
+    - Placement Creators, Program Creators, and Senior Facilitators return None (unrestricted).
+    - Team Members return None (view access across all colleges without college filtering).
+    - Junior Facilitators return set of assigned colleges from active team memberships.
+    """
+    if is_admin_user(user):
+        return None
+
+    if session is None:
+        return set()
+
+    from sqlalchemy import select
+    from src.models.db.team import Team
+    from src.models.db.team_member import TeamMember
+
+    stmt = (
+        select(TeamMember, Team)
+        .join(Team, TeamMember.team_id == Team.id)
+        .where(
+            TeamMember.user_id == user.id,
+            TeamMember.status == "active",
+            Team.status == "active",
+        )
+    )
+    res = await session.execute(stmt)
+    s_res = res.scalars().all() if hasattr(res, "scalars") and callable(res.scalars) else None
+    if isinstance(s_res, list) and s_res:
+        memberships = s_res
+    else:
+        a_res = res.all() if hasattr(res, "all") and callable(res.all) else None
+        memberships = a_res if isinstance(a_res, list) else []
+
+    if not memberships:
+        token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().lower()
+        if token_role in UNRESTRICTED_COLLEGE_ROLES:
+            return None
+        return set()
+
+    perms = calculate_user_permissions(user, memberships)
+    if perms["colleges"] is None:
+        return None
+    return set(perms["colleges"])
+
+
+async def verify_college_access(
+    user: User,
+    college_name: str,
+    session,
+) -> None:
+    """Verify if user has permission to access the specified college.
+    Raises 403 Forbidden if user is restricted to assigned colleges and college is not in that list.
+    """
+    allowed = await get_user_allowed_colleges(user, session)
+    if allowed is None:
+        return  # Unrestricted admin access
+
+    clean_req = (college_name or "").strip().lower()
+    allowed_lower = {c.lower() for c in allowed}
+    if clean_req not in allowed_lower:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied. You do not have permission to access data for '{college_name}'.",
+        )
+
+
+_BULK_ATS_ROLES = {"recruiter", "placement_staff", "admin", "super_admin"}
 
 
 def is_bulk_ats_user(user: User) -> bool:
@@ -91,25 +397,56 @@ def is_bulk_ats_user(user: User) -> bool:
     """
     if is_admin_user(user):
         return True
-    role = (getattr(user, "role", "") or "").strip().lower()
+    role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().lower()
     return role in _BULK_ATS_ROLES
 
 
 async def get_current_bulk_ats_user(
     current_user: User = fastapi.Depends(get_current_user),
+    session = fastapi.Depends(get_async_session),
 ) -> User:
-    """Require an authenticated recruiter/placement_staff/admin user.
+    """Require an authenticated recruiter/placement_staff/admin user or
+    a Creator/Lead in the Placement or Partnerships team.
 
-    Students (role is NULL, is_admin false) are rejected with 403. This is a
-    backend-level gate, not a UI hide: every Bulk ATS route depends on this,
-    not on get_current_user alone.
+    - Super Admins, Global Admins, and users with recruiter/placement_staff roles have full access.
+    - Creators / Leads in the Placement / Partnerships team have full access to Bulk ATS.
+    - Regular Team Members (in Placement or Program team) are rejected with 403 Forbidden.
+    - Students are rejected with 403 Forbidden.
     """
-    if not is_bulk_ats_user(current_user):
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_403_FORBIDDEN,
-            detail="Bulk ATS access is restricted to recruiter, placement staff, or admin accounts.",
+    if is_bulk_ats_user(current_user):
+        return current_user
+
+    if session is not None:
+        from sqlalchemy import select
+        from src.models.db.team import Team
+        from src.models.db.team_member import TeamMember
+
+        stmt = (
+            select(TeamMember, Team)
+            .join(Team, TeamMember.team_id == Team.id)
+            .where(
+                TeamMember.user_id == current_user.id,
+                TeamMember.status == "active",
+                Team.status == "active",
+            )
         )
-    return current_user
+        res = await session.execute(stmt)
+        s_res = res.scalars().all() if hasattr(res, "scalars") and callable(res.scalars) else None
+        if isinstance(s_res, list) and s_res:
+            memberships = s_res
+        else:
+            a_res = res.all() if hasattr(res, "all") and callable(res.all) else None
+            memberships = a_res if isinstance(a_res, list) else []
+
+        if memberships:
+            perms = calculate_user_permissions(current_user, memberships)
+            if perms["can_access_ats"]:
+                return current_user
+
+    raise fastapi.HTTPException(
+        status_code=fastapi.status.HTTP_403_FORBIDDEN,
+        detail="Bulk ATS access is restricted to Placement/Partnership team creators, recruiters, and administrators. Regular team members do not have access.",
+    )
 async def get_current_super_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
 ) -> User:
@@ -120,9 +457,6 @@ async def get_current_super_admin_user(
             detail="Super Administrator access required.",
         )
     return current_user
-
-
-LEAD_ROLES = {"lead", "creator", "admin"}
 
 
 async def check_team_permission(

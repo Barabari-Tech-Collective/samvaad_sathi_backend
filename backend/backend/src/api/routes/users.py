@@ -5,7 +5,7 @@ import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import is_admin_user, is_super_admin_user
+from src.api.dependencies.admin import calculate_user_permissions, is_admin_user, is_super_admin_user
 from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
@@ -109,9 +109,10 @@ async def login_user(
             window_seconds=60,
         )
     ),
+    session=fastapi.Depends(get_async_session),
 ) -> UserInResponse:
     try:
-        user = await user_repo.verify_password(email=payload.email, password=payload.password)
+        user = await user_repo.verify_password(email=payload.email.strip().lower(), password=payload.password)
     except (EntityDoesNotExist, PasswordDoesNotMatch):
         raise await http_exc_400_credentials_bad_signin_request()
 
@@ -121,27 +122,77 @@ async def login_user(
     user_created_at = user.created_at
     user_is_onboarded = user.is_onboarded if hasattr(user, "is_onboarded") else False
 
-    token = jwt_generator.generate_access_token_for_user(user=user)
+    from src.models.db.team import Team
+    from src.models.db.team_member import TeamMember
+    member_stmt = (
+        sqlalchemy.select(TeamMember, Team)
+        .join(Team, TeamMember.team_id == Team.id)
+        .where(
+            TeamMember.user_id == user.id,
+            TeamMember.status == "active",
+            Team.status == "active",
+        )
+    )
+    member_res = await session.execute(member_stmt)
+    memberships = member_res.all()
+    member = memberships[0][0] if memberships else None
+    primary_team = memberships[0][1] if memberships else None
+
+    perms = calculate_user_permissions(user, memberships)
+    access_role = member.access_role if member else None
+    colleges = perms["colleges"]
+    domain = member.domain if member else None
+    purposes = member.purposes if member and isinstance(member.purposes, list) else None
+    is_admin_flag = is_admin_user(user)
+    can_access_ats = perms["can_access_ats"]
+    can_create_roles = perms["can_create_roles"]
+    can_edit = perms["can_edit"]
+    is_view_only = perms["is_view_only"]
+    is_team_lead = perms["is_team_lead"]
+    effective_role = access_role or getattr(user, "_token_role", None) or getattr(user, "role", None)
+
+    role_claim = (
+        "SUPER_ADMIN" if is_super_admin_user(user)
+        else ("ADMIN" if is_admin_flag
+        else (str(effective_role).upper() if effective_role else "STAFF"))
+    )
+    token = jwt_generator.generate_access_token_for_user(
+        user=user,
+        extra_claims={"role": role_claim, "access_role": access_role or (str(effective_role).lower() if effective_role else "")}
+    )
     refresh = await session_repo.create_session(user_id=user_id, expiry_minutes=settings.REFRESH_TOKEN_EXPIRY_MINUTES)
 
     return UserInResponse(
         user_id=user_id,
-        authorized_user=UserWithToken(token=token, 
-                                    refresh_token=refresh.token,
-                                    email=user_email,
-                                    name=user_name,
-                                    created_at=user_created_at,
-                                    is_onboarded=user_is_onboarded,
-                                    is_admin=is_admin_user(user),
-                                    is_super_admin=is_super_admin_user(user),
-                                    degree=None,
-                                    university=None,
-                                    target_position=None,
-                                    years_experience=None,
-                                    total_attempts=0,
-                                    has_resume_text=bool(getattr(user, "resume_text", None)),
-                                    skills=user.skills.get("items", []) if isinstance(getattr(user, "skills", None), dict) else [],
-                                    company=None),
+        authorized_user=UserWithToken(
+            token=token, 
+            refresh_token=refresh.token,
+            email=user_email,
+            name=user_name,
+            created_at=user_created_at,
+            is_onboarded=user_is_onboarded,
+            is_admin=is_admin_flag,
+            is_super_admin=is_super_admin_user(user),
+            access_role=access_role or (str(effective_role).lower() if effective_role else None),
+            role=access_role or getattr(user, "role", None) or (str(effective_role).lower() if effective_role else None),
+            is_team_lead=is_team_lead,
+            colleges=colleges,
+            domain=domain,
+            purposes=purposes,
+            can_create_roles=can_create_roles,
+            can_access_ats=can_access_ats,
+            can_edit=can_edit,
+            is_view_only=is_view_only,
+            team_name=primary_team.name if primary_team else None,
+            degree=None,
+            university=None,
+            target_position=None,
+            years_experience=None,
+            total_attempts=0,
+            has_resume_text=bool(getattr(user, "resume_text", None)),
+            skills=user.skills.get("items", []) if isinstance(getattr(user, "skills", None), dict) else [],
+            company=None,
+        ),
     )
 
 # How long a refresh token stays usable after being rotated away. Long enough to cover
@@ -234,6 +285,35 @@ async def get_me(
 
     token = jwt_generator.generate_access_token_for_user(user=current_user)
     is_admin_flag = is_admin_user(current_user)
+
+    from src.models.db.team import Team
+    from src.models.db.team_member import TeamMember
+    member_stmt = (
+        sqlalchemy.select(TeamMember, Team)
+        .join(Team, TeamMember.team_id == Team.id)
+        .where(
+            TeamMember.user_id == current_user.id,
+            TeamMember.status == "active",
+            Team.status == "active",
+        )
+    )
+    member_res = await session.execute(member_stmt)
+    memberships = member_res.all()
+    member = memberships[0][0] if memberships else None
+    primary_team = memberships[0][1] if memberships else None
+
+    perms = calculate_user_permissions(current_user, memberships)
+    access_role = member.access_role if member else None
+    colleges = perms["colleges"]
+    domain = member.domain if member else None
+    purposes = member.purposes if member and isinstance(member.purposes, list) else None
+    can_access_ats = perms["can_access_ats"]
+    can_create_roles = perms["can_create_roles"]
+    can_edit = perms["can_edit"]
+    is_view_only = perms["is_view_only"]
+    is_team_lead = perms["is_team_lead"]
+    effective_role = access_role or getattr(current_user, "_token_role", None) or getattr(current_user, "role", None)
+
     return UserInResponse(
         user_id=current_user.id,
         authorized_user=UserWithToken(
@@ -245,6 +325,17 @@ async def get_me(
             is_onboarded=getattr(current_user, 'is_onboarded', False),
             is_admin=is_admin_flag,
             is_super_admin=is_super_admin_user(current_user),
+            access_role=access_role or (str(effective_role).lower() if effective_role else None),
+            role=access_role or getattr(current_user, "role", None) or (str(effective_role).lower() if effective_role else None),
+            is_team_lead=is_team_lead,
+            colleges=colleges,
+            domain=domain,
+            purposes=purposes,
+            can_create_roles=can_create_roles,
+            can_access_ats=can_access_ats,
+            can_edit=can_edit,
+            is_view_only=is_view_only,
+            team_name=primary_team.name if primary_team else None,
             degree=current_user.degree,
             university=current_user.university,
             target_position=current_user.target_position,

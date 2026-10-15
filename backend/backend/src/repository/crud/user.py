@@ -34,7 +34,8 @@ class UserCRUDRepository(BaseCRUDRepository):
         return new_user
 
     async def get_user_by_email(self, *, email: str) -> User:
-        stmt = sqlalchemy.select(User).where(User.email == email)
+        clean_email = email.strip().lower()
+        stmt = sqlalchemy.select(User).where(sqlalchemy.func.lower(User.email) == clean_email)
         query = await self.async_session.execute(statement=stmt)
         user = query.scalar()
         if not user:

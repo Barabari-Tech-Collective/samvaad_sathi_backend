@@ -154,25 +154,51 @@ class TeamCRUDRepository(BaseCRUDRepository):
 
         # 2. Check if user exists by email
         email_clean = member_data.email.strip().lower()
-        stmt = select(User).where(User.email == email_clean)
+        stmt = select(User).where(func.lower(User.email) == email_clean)
         result = await self.async_session.execute(stmt)
         user = result.scalar_one_or_none()
         
         if not user:
-            if not member_data.password:
-                raise ValueError("Password is required when creating a new team member account.")
-            hashed_pw = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password)
+            if member_data.password:
+                hashed_pw = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
+            else:
+                # Password optional: accounts utilizing Central SSO authentication do not require a local password
+                hashed_pw = ""
+
+            clean_role = (member_data.access_role or "").strip().lower()
+            is_admin = clean_role in {"admin", "super_admin"}
+            is_super_admin = clean_role == "super_admin"
             user = User(
                 email=email_clean,
                 name=member_data.name.strip(),
-                password_hash=hashed_pw, 
+                password_hash=hashed_pw,
+                role=clean_role,
                 is_onboarded=False,
-                is_admin=False,
-                is_super_admin=False,
+                is_admin=is_admin,
+                is_super_admin=is_super_admin,
             )
             self.async_session.add(user)
             await self.async_session.flush()
-        # Security Note: If user already exists, NEVER overwrite their global password or email.
+        else:
+            clean_role = (member_data.access_role or "").strip().lower()
+            if not getattr(user, "role", None):
+                user.role = clean_role
+            if clean_role in {"admin", "super_admin"}:
+                user.is_admin = True
+            if clean_role == "super_admin":
+                user.is_super_admin = True
+
+            if member_data.password:
+                is_uninitialized_pw = not user.password_hash
+                if not is_uninitialized_pw:
+                    try:
+                        is_uninitialized_pw = pwd_generator.is_password_authenticated(hash_salt="", password="", hashed_password=user.password_hash)
+                    except Exception:
+                        is_uninitialized_pw = False
+                if is_uninitialized_pw:
+                    # If user existed without a real password (e.g. from student SSO), initialize their password so they can log in
+                    user.password_hash = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
+        # Security Note: If user already exists with an established password, NEVER overwrite their global password.
 
         # 3. Check existing membership (prevent duplicate rows / reactivate soft-deleted)
         mem_stmt = select(TeamMember).where(TeamMember.team_id == team_id, TeamMember.user_id == user.id)

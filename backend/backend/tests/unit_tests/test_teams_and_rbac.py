@@ -403,3 +403,357 @@ async def test_get_active_members_query_status_deleted_requires_lead_privilege()
     with pytest.raises(fastapi.HTTPException) as exc_info:
         await get_active_members(team_id=1, status="deleted", current_user=regular_member, team_repo=mock_repo)
     assert exc_info.value.status_code == 403
+
+
+# --- Senior vs Junior Facilitator RBAC & College Scoping Tests -----------------
+
+
+@pytest.mark.asyncio
+async def test_get_current_creator_user_allows_senior_facilitator():
+    from src.api.dependencies.admin import get_current_creator_user
+    sr_user = _make_user(10, email="sr@barabari.org", is_admin=False, is_super_admin=False)
+    session = AsyncMock()
+    member_record = TeamMember(id=1, team_id=1, user_id=10, access_role="Sr Facilitator", status="active")
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [member_record]
+    session.execute.return_value = mock_result
+
+    user = await get_current_creator_user(current_user=sr_user, session=session)
+    assert user is sr_user
+
+
+@pytest.mark.asyncio
+async def test_get_current_creator_user_denies_junior_facilitator():
+    from src.api.dependencies.admin import get_current_creator_user
+    jr_user = _make_user(11, email="jr@barabari.org", is_admin=False, is_super_admin=False)
+    session = AsyncMock()
+    member_record = TeamMember(id=2, team_id=1, user_id=11, access_role="Jr Facilitator", status="active")
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [member_record]
+    session.execute.return_value = mock_result
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_creator_user(current_user=jr_user, session=session)
+    assert exc_info.value.status_code == 403
+    assert "Junior Facilitators do not have permission" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_get_current_creator_user_allows_super_admin():
+    from src.api.dependencies.admin import get_current_creator_user
+    admin = _make_user(1, is_super_admin=True)
+    session = AsyncMock()
+    user = await get_current_creator_user(current_user=admin, session=session)
+    assert user is admin
+
+
+@pytest.mark.asyncio
+async def test_verify_college_access_allows_assigned_college():
+    from src.api.dependencies.admin import verify_college_access
+    facilitator = _make_user(20, email="fac@barabari.org", is_admin=False, is_super_admin=False)
+    session = AsyncMock()
+    team = Team(id=1, name="Program Team", status="active")
+    member = TeamMember(id=1, team_id=1, user_id=20, access_role="Sr Facilitator", status="active", colleges=["IIT Bombay", "BITS Pilani"])
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(member, team)]
+    session.execute.return_value = mock_result
+
+    # Should succeed without raising
+    await verify_college_access(facilitator, "IIT Bombay", session)
+    await verify_college_access(facilitator, "BITS Pilani", session)
+
+
+@pytest.mark.asyncio
+async def test_verify_college_access_rejects_unassigned_college():
+    from src.api.dependencies.admin import verify_college_access
+    facilitator = _make_user(21, email="fac2@barabari.org", is_admin=False, is_super_admin=False)
+    session = AsyncMock()
+    team = Team(id=1, name="Program Team", status="active")
+    member = TeamMember(id=2, team_id=1, user_id=21, access_role="Jr Facilitator", status="active", colleges=["IIT Bombay"])
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(member, team)]
+    session.execute.return_value = mock_result
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await verify_college_access(facilitator, "Delhi University", session)
+    assert exc_info.value.status_code == 403
+    assert "Delhi University" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_placement_creator_gets_unrestricted_college_access():
+    """Placement / Partnership Team Creators get unrestricted access to all student analytics across colleges."""
+    from src.api.dependencies.admin import verify_college_access, get_user_allowed_colleges
+    creator = _make_user(22, email="placement_creator@barabari.org", is_admin=False, is_super_admin=False)
+    session = AsyncMock()
+    team = Team(id=2, name="Placement Team", status="active")
+    member = TeamMember(id=3, team_id=2, user_id=22, access_role="Creator", status="active", colleges=[])
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(member, team)]
+    session.execute.return_value = mock_result
+
+    allowed = await get_user_allowed_colleges(creator, session)
+    assert allowed is None  # None indicates unrestricted access to all colleges
+
+    # Should not raise for ANY college name
+    await verify_college_access(creator, "Any College In India", session)
+
+
+@pytest.mark.asyncio
+async def test_placement_creator_gets_bulk_ats_access():
+    """Placement / Partnership Team Creators get full access to Bulk ATS."""
+    from src.api.dependencies.admin import get_current_bulk_ats_user
+    creator = _make_user(23, email="placement_creator2@barabari.org", is_admin=False, is_super_admin=False)
+    session = AsyncMock()
+    team = Team(id=2, name="Placement Team", status="active")
+    member = TeamMember(id=4, team_id=2, user_id=23, access_role="Creator", status="active")
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(member, team)]
+    session.execute.return_value = mock_result
+
+    user = await get_current_bulk_ats_user(current_user=creator, session=session)
+    assert user is creator
+
+
+@pytest.mark.asyncio
+async def test_placement_team_member_is_denied_bulk_ats_access():
+    """Regular Team Members in the Placement Team are denied Bulk ATS access."""
+    from src.api.dependencies.admin import get_current_bulk_ats_user
+    member_user = _make_user(24, email="placement_member@barabari.org", is_admin=False, is_super_admin=False)
+    session = AsyncMock()
+    team = Team(id=2, name="Placement Team", status="active")
+    member = TeamMember(id=5, team_id=2, user_id=24, access_role="Team Member", status="active")
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(member, team)]
+    session.execute.return_value = mock_result
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_bulk_ats_user(current_user=member_user, session=session)
+    assert exc_info.value.status_code == 403
+    assert "Bulk ATS access is restricted" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_program_team_creator_is_denied_bulk_ats_access():
+    """Creators in Program Team do NOT get Bulk ATS access (Bulk ATS is reserved for Placement Creators and Recruiters)."""
+    from src.api.dependencies.admin import get_current_bulk_ats_user
+    program_creator = _make_user(25, email="prog_creator@barabari.org", is_admin=False, is_super_admin=False)
+    session = AsyncMock()
+    team = Team(id=1, name="Program Team", status="active")
+    member = TeamMember(id=6, team_id=1, user_id=25, access_role="Creator", status="active")
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(member, team)]
+    session.execute.return_value = mock_result
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_bulk_ats_user(current_user=program_creator, session=session)
+    assert exc_info.value.status_code == 403
+
+
+def test_is_super_admin_user_from_token_role():
+    user = _make_user(30, email="sso_super@corp.org", is_super_admin=False)
+    setattr(user, "_token_role", "SUPER_ADMIN")
+    assert is_super_admin_user(user) is True
+
+
+def test_is_admin_user_from_token_role():
+    user = _make_user(31, email="sso_admin@corp.org", is_admin=False)
+    setattr(user, "_token_role", "ADMIN")
+    assert is_admin_user(user) is True
+
+
+@pytest.mark.asyncio
+async def test_get_current_creator_user_allows_creator_token_role():
+    from src.api.dependencies.admin import get_current_creator_user
+    user = _make_user(32, email="sso_creator@corp.org", is_admin=False)
+    setattr(user, "_token_role", "CREATOR")
+    session = AsyncMock()
+    result = await get_current_creator_user(current_user=user, session=session)
+    assert result is user
+
+
+@pytest.mark.asyncio
+async def test_get_current_creator_user_denies_jr_facilitator_token_role():
+    from src.api.dependencies.admin import get_current_creator_user
+    user = _make_user(33, email="sso_jr@corp.org", is_admin=False)
+    setattr(user, "_token_role", "JR FACILITATOR")
+    session = AsyncMock()
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_creator_user(current_user=user, session=session)
+    assert exc_info.value.status_code == 403
+    assert "Junior Facilitators do not have permission" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_add_team_member_allows_creation_without_password_for_sso():
+    """Central Auth: Adding a member without a password creates a placeholder SSO account."""
+    mock_session = AsyncMock()
+    team = Team(id=1, name="Core", status="active")
+    
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = None
+        elif "from \"user\"" in stmt_str or "user.email" in stmt_str:
+            result.scalar_one_or_none.return_value = None
+        elif "from team" in stmt_str or "team.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = team
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+
+    repo = TeamCRUDRepository(async_session=mock_session)
+    member_data = TeamMemberCreate(name="SSO Creator", email="creator@barabari.org", access_role="creator")
+    created = await repo.add_team_member(team_id=1, member_data=member_data)
+    assert created["email"] == "creator@barabari.org"
+    assert created["access_role"] == "creator"
+    assert mock_session.add.call_count >= 1
+
+
+# --- 6 Operational Roles Matrix Tests (Placement Team & Program Team) --------
+
+
+def test_permission_matrix_placement_creator():
+    """1. Placement Team Creator: full creator portal, bulk ATS, unrestricted colleges, edit access."""
+    from src.api.dependencies.admin import calculate_user_permissions
+    user = _make_user(101, email="place_creator@barabari.org")
+    team = Team(id=1, name="Placement Team", status="active")
+    member = TeamMember(id=1, team_id=1, user_id=101, access_role="Creator", status="active")
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_ats"] is True
+    assert perms["can_edit"] is True
+    assert perms["is_view_only"] is False
+    assert perms["colleges"] is None
+    assert perms["is_team_lead"] is True
+
+
+def test_permission_matrix_placement_team_member():
+    """2. Placement Team Member: view access only, no colleges assigned, no edit access, no ATS."""
+    from src.api.dependencies.admin import calculate_user_permissions
+    user = _make_user(102, email="place_member@barabari.org")
+    team = Team(id=1, name="Placement Team", status="active")
+    member = TeamMember(id=2, team_id=1, user_id=102, access_role="Team Member", status="active")
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_create_roles"] is False
+    assert perms["can_access_ats"] is False
+    assert perms["can_edit"] is False
+    assert perms["is_view_only"] is True
+    assert perms["colleges"] is None  # View access across colleges without restrictions
+    assert perms["is_team_lead"] is False
+
+
+def test_permission_matrix_program_creator():
+    """3. Program Team Creator: creator portal, all colleges, interview/analyst access, NO bulk ATS."""
+    from src.api.dependencies.admin import calculate_user_permissions
+    user = _make_user(103, email="prog_creator@barabari.org")
+    team = Team(id=2, name="Program Team", status="active")
+    member = TeamMember(id=3, team_id=2, user_id=103, access_role="Creator", status="active")
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_ats"] is False
+    assert perms["can_edit"] is True
+    assert perms["is_view_only"] is False
+    assert perms["colleges"] is None  # Unrestricted all colleges
+    assert perms["is_team_lead"] is True
+
+
+def test_permission_matrix_program_senior_facilitator():
+    """4. Program Team Senior Facilitator: all colleges, creator portal, NO bulk ATS."""
+    from src.api.dependencies.admin import calculate_user_permissions
+    user = _make_user(104, email="sr_facilitator@barabari.org")
+    team = Team(id=2, name="Program Team", status="active")
+    member = TeamMember(id=4, team_id=2, user_id=104, access_role="Sr Facilitator", status="active")
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_ats"] is False
+    assert perms["can_edit"] is True
+    assert perms["is_view_only"] is False
+    assert perms["colleges"] is None  # Unrestricted access to all colleges
+
+
+def test_permission_matrix_program_junior_facilitator():
+    """5. Program Team Junior Facilitator: strictly restricted to assigned colleges, NO creator portal, NO bulk ATS."""
+    from src.api.dependencies.admin import calculate_user_permissions
+    user = _make_user(105, email="jr_facilitator@barabari.org")
+    team = Team(id=2, name="Program Team", status="active")
+    member = TeamMember(
+        id=5,
+        team_id=2,
+        user_id=105,
+        access_role="Jr Facilitator",
+        colleges=["BITS Pilani", "IIT Delhi"],
+        status="active",
+    )
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_create_roles"] is False
+    assert perms["can_access_ats"] is False
+    assert perms["can_edit"] is False
+    assert perms["is_view_only"] is True
+    assert set(perms["colleges"]) == {"BITS Pilani", "IIT Delhi"}
+    assert perms["is_team_lead"] is False
+
+
+def test_permission_matrix_program_team_member():
+    """6. Program Team Member: view access only, no colleges assigned, no edit access, NO creator portal, NO ATS."""
+    from src.api.dependencies.admin import calculate_user_permissions
+    user = _make_user(106, email="prog_member@barabari.org")
+    team = Team(id=2, name="Program Team", status="active")
+    member = TeamMember(id=6, team_id=2, user_id=106, access_role="Team Member", status="active")
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_create_roles"] is False
+    assert perms["can_access_ats"] is False
+    assert perms["can_edit"] is False
+    assert perms["is_view_only"] is True
+    assert perms["colleges"] is None
+    assert perms["is_team_lead"] is False
+
+
+@pytest.mark.asyncio
+async def test_creator_portal_denies_team_member():
+    """Team members cannot create or modify roles in Creator Portal."""
+    from src.api.dependencies.admin import get_current_creator_user
+    member_user = _make_user(107, email="member@barabari.org")
+    session = AsyncMock()
+    team = Team(id=1, name="Program Team", status="active")
+    member = TeamMember(id=7, team_id=1, user_id=107, access_role="Team Member", status="active")
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(member, team)]
+    session.execute.return_value = mock_result
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_creator_user(current_user=member_user, session=session)
+    assert exc_info.value.status_code == 403
+    assert "Team members have view-only access" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_allowed_colleges_for_senior_facilitator_and_team_member():
+    """Senior Facilitator and Team Member get unrestricted college access (None)."""
+    from src.api.dependencies.admin import get_user_allowed_colleges
+    sr_user = _make_user(108, email="sr@barabari.org")
+    session = AsyncMock()
+    team = Team(id=1, name="Program Team", status="active")
+    member = TeamMember(id=8, team_id=1, user_id=108, access_role="Sr Facilitator", status="active")
+    mock_result = MagicMock()
+    mock_result.all.return_value = [(member, team)]
+    session.execute.return_value = mock_result
+
+    allowed = await get_user_allowed_colleges(user=sr_user, session=session)
+    assert allowed is None
+
+    # Now test Team Member
+    member.access_role = "Team Member"
+    allowed_tm = await get_user_allowed_colleges(user=sr_user, session=session)
+    assert allowed_tm is None
+
+
