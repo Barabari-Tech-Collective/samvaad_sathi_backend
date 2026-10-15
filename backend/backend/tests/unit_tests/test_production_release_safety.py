@@ -95,5 +95,6 @@ def test_ec2_release_has_a_local_health_gate_and_application_rollback():
     script = EC2_RELEASE_PATH.read_text()
 
     assert "http://127.0.0.1:8000/api/health" in script
-    assert 'git checkout --quiet --force "$previous_sha"' in script
+    rollback_checkout = script.index('git checkout --quiet --force "$previous_sha"')
+    assert script.rfind('cd "$APP_ROOT"', 0, rollback_checkout) != -1
     assert "Database downgrade is intentionally NOT automatic" in script
