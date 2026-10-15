@@ -24,13 +24,38 @@ class InterviewQuestionOut(BaseSchemaModel):
     )
 
 
+class ResumeQuestionOut(InterviewQuestionOut):
+    """One immutable question plus the latest durable answer checkpoint."""
+
+    question_attempt_id: int | None = None
+    answer_saved: bool = False
+    answer_version: int = pydantic.Field(default=0, ge=0)
+    answer_kind: Literal["audio", "text"] | None = None
+    transcription_status: (
+        Literal["pending", "processing", "transcribed", "failed"] | None
+    ) = None
+
+
 class CreateAttemptResponse(BaseSchemaModel):
     question_attempt_id: int
+    created: bool = pydantic.Field(
+        default=True, description="False when an idempotent retry returned the existing attempt"
+    )
 
 
 class CreateAttemptRequest(BaseSchemaModel):
     interview_id: int
     question_id: int
+    client_attempt_id: str | None = pydantic.Field(
+        default=None,
+        min_length=8,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+        description="Stable client idempotency key for this interview question",
+    )
+    session_lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
 
     # Swagger example
     model_config = BaseSchemaModel.model_config.copy()
@@ -108,6 +133,8 @@ class InterviewInResponse(BaseSchemaModel):
     status: str
     created_at: datetime.datetime
     resumed: bool
+    paused_at: datetime.datetime | None = None
+    expires_at: datetime.datetime | None = None
     interview_mode: str = pydantic.Field(
         default="practice",
         description=(
@@ -212,6 +239,43 @@ class QuestionAttemptsListResponse(BaseSchemaModel):
 
 class CompleteInterviewRequest(BaseSchemaModel):
     interview_id: int
+    session_lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
+
+
+class PauseInterviewRequest(BaseSchemaModel):
+    interview_id: int
+    session_lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
+
+
+class PauseInterviewResponse(BaseSchemaModel):
+    interview_id: int
+    status: Literal["paused"]
+    paused_at: datetime.datetime | None = None
+    expires_at: datetime.datetime | None = None
+
+
+class ClaimSessionLeaseRequest(BaseSchemaModel):
+    interview_id: int
+    lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
+    force: bool = False
+
+
+class HeartbeatSessionLeaseRequest(BaseSchemaModel):
+    interview_id: int
+    lease_token: str = pydantic.Field(min_length=20, max_length=256)
+
+
+class SessionLeaseResponse(BaseSchemaModel):
+    interview_id: int
+    lease_token: str
+    lease_expires_at: datetime.datetime
+    state: Literal["acquired", "renewed", "taken_over"]
 
 
 #: What the client is allowed to report. Anything else is a 422, not a free-text
@@ -239,10 +303,23 @@ class ResumeInterviewResponse(BaseSchemaModel):
     interview_id: int = pydantic.Field(description="ID of the interview")
     track: str = pydantic.Field(description="Interview track")
     difficulty: str = pydantic.Field(description="Interview difficulty")
-    questions: list[InterviewQuestionOut] = pydantic.Field(description="Questions without attempts")
+    questions: list[ResumeQuestionOut] = pydantic.Field(
+        description="The complete immutable question snapshot with durable answer checkpoints"
+    )
     total_questions: int = pydantic.Field(description="Total number of questions in the interview")
     attempted_questions: int = pydantic.Field(description="Number of questions with attempts")
-    remaining_questions: int = pydantic.Field(description="Number of questions without attempts")
+    answered_questions: int = pydantic.Field(
+        description="Number of questions whose answer is durably saved"
+    )
+    remaining_questions: int = pydantic.Field(
+        description="Number of questions without a durably saved answer"
+    )
+    resume_question_index: int | None = pydantic.Field(
+        description="Zero-based first question without a durable answer, or null when all are saved"
+    )
+    status: str = pydantic.Field(description="Authoritative interview lifecycle status")
+    paused_at: datetime.datetime | None = None
+    expires_at: datetime.datetime | None = None
     interview_mode: str = pydantic.Field(
         default="practice",
         description=(

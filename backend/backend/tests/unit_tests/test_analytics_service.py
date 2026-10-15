@@ -17,6 +17,24 @@ class _ScalarResult:
         return self._rows
 
 
+class _RowsResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class AnswerHealthDB:
+    def __init__(self, rows):
+        self._rows = rows
+        self.statement = None
+
+    async def execute(self, stmt):
+        self.statement = stmt
+        return _RowsResult(self._rows)
+
+
 class DummyDB:
     def __init__(self, users):
         self._users = users
@@ -165,3 +183,54 @@ async def test_system_analytics_falls_back_to_legacy_when_events_missing(monkeyp
 
     assert result["report_usage"]["time_spent_on_report_seconds"] is None
     assert result["report_usage"]["recommendation_clicks"] is None
+
+
+@pytest.mark.asyncio
+async def test_answer_processing_alerts_report_only_aggregate_operational_metadata():
+    now = datetime.datetime(2026, 10, 13, 12, 0, tzinfo=datetime.timezone.utc)
+    rows = [
+        SimpleNamespace(
+            status="failed",
+            answer_count=2,
+            oldest_update=now - datetime.timedelta(minutes=31),
+        ),
+        SimpleNamespace(
+            status="processing",
+            answer_count=1,
+            oldest_update=now - datetime.timedelta(minutes=14),
+        ),
+    ]
+    db = AnswerHealthDB(rows)
+    service = AnalyticsService(db=db)
+
+    alerts = await service._answer_processing_alerts(
+        user_id=42,
+        start_date=datetime.date(2026, 10, 1),
+        end_date=datetime.date(2026, 10, 13),
+        now=now,
+    )
+
+    assert alerts == [
+        {
+            "type": "PRACTICE_ANSWER_FEEDBACK_FAILED",
+            "severity": "high",
+            "count": 2,
+            "oldest_age_minutes": 31,
+            "message": (
+                "2 saved practice answers could not be transcribed. Student answers are safe, "
+                "but detailed feedback needs recovery."
+            ),
+        },
+        {
+            "type": "PRACTICE_ANSWER_FEEDBACK_STUCK",
+            "severity": "medium",
+            "count": 1,
+            "oldest_age_minutes": 14,
+            "message": "1 saved practice answer has been waiting over 10 minutes for speech processing.",
+        },
+    ]
+    assert "audio_url" not in str(alerts)
+    assert "transcription_error" not in str(alerts)
+    compiled = str(db.statement.compile(compile_kwargs={"literal_binds": True}))
+    assert "interview.user_id = 42" in compiled
+    assert "question_attempt.answer_saved_at IS NOT NULL" in compiled

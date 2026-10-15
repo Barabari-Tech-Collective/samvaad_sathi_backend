@@ -15,12 +15,14 @@ logger = logging.getLogger(__name__)
 try:
     # Explicitly pass credentials from .env via config()
     s3_client = boto3.client(
-        's3',
+        "s3",
         aws_access_key_id=config("AWS_ACCESS_KEY_ID", default=None),
         aws_secret_access_key=config("AWS_SECRET_ACCESS_KEY", default=None),
-        region_name=config("AWS_REGION", default="ap-south-1")
+        region_name=config("AWS_REGION", default="ap-south-1"),
     )
-    BUCKET_NAME = config("AWS_S3_BUCKET_NAME", default="barabari-edtech-service-staging")
+    BUCKET_NAME = config(
+        "AWS_S3_BUCKET_NAME", default="barabari-edtech-service-staging"
+    )
 except Exception as e:
     logger.warning(f"Could not initialize S3 client: {e}")
     s3_client = None
@@ -72,28 +74,34 @@ def upload_audio_to_s3(audio_bytes: bytes, question_id: int) -> Optional[str]:
             Body=audio_bytes,
             ContentType="audio/mpeg",
         )
-        
+
         region = config("AWS_REGION", default="ap-south-1")
         # Construct the public URL
         public_url = f"https://{BUCKET_NAME}.s3.{region}.amazonaws.com/{s3_file_path}"
         logger.info(f"Successfully uploaded TTS audio to S3: {public_url}")
-        
+
         return public_url
-        
+
     except ClientError as e:
         logger.error(f"Failed to upload audio to S3: {e}")
         return None
 
-def upload_resume_to_s3(file_bytes: bytes, user_id: int, filename: str, content_type: str = "application/pdf") -> Optional[str]:
+
+def upload_resume_to_s3(
+    file_bytes: bytes,
+    user_id: int,
+    filename: str,
+    content_type: str = "application/pdf",
+) -> Optional[str]:
     """
     Uploads a resume file byte stream to the S3 bucket.
-    
+
     Args:
         file_bytes: The raw file data.
         user_id: The ID of the user uploading the resume.
         filename: The original filename.
         content_type: The MIME type of the file.
-        
+
     Returns:
         The S3 object key if successful, or None if failed.
     """
@@ -104,10 +112,11 @@ def upload_resume_to_s3(file_bytes: bytes, user_id: int, filename: str, content_
     unique_suffix = str(uuid.uuid4())[:8]
     # Keep the original extension
     import os
+
     _, ext = os.path.splitext(filename)
     if not ext:
         ext = ".pdf" if "pdf" in content_type.lower() else ".txt"
-        
+
     # The key (path) inside the bucket
     s3_object_key = f"Samvaad-Saathi/resumes/user_{user_id}_{unique_suffix}{ext}"
 
@@ -120,10 +129,11 @@ def upload_resume_to_s3(file_bytes: bytes, user_id: int, filename: str, content_
         )
         logger.info(f"Successfully uploaded resume to S3: {s3_object_key}")
         return s3_object_key
-        
+
     except ClientError as e:
         logger.error(f"Failed to upload resume to S3: {e}")
         return None
+
 
 #: Prefix for student answer recordings. Kept distinct from tts-audio/ and
 #: resumes/ so a bucket lifecycle or retention rule can target voice recordings
@@ -131,11 +141,16 @@ def upload_resume_to_s3(file_bytes: bytes, user_id: int, filename: str, content_
 ANSWER_AUDIO_PREFIX = "Samvaad-Saathi/answer-audio"
 
 
-def answer_audio_s3_key(user_id: int, question_attempt_id: int, extension: str = ".wav") -> str:
+def answer_audio_s3_key(
+    user_id: int,
+    question_attempt_id: int,
+    extension: str = ".wav",
+    checksum: str | None = None,
+) -> str:
     """Stable, non-guessable key for one student's answer recording."""
     return (
         f"{ANSWER_AUDIO_PREFIX}/user_{user_id}/attempt_{question_attempt_id}"
-        f"_{uuid.uuid4().hex[:12]}{extension}"
+        f"_{checksum or uuid.uuid4().hex}{extension}"
     )
 
 
@@ -144,6 +159,8 @@ async def upload_answer_audio_to_s3(
     user_id: int,
     question_attempt_id: int,
     extension: str = ".wav",
+    checksum: str | None = None,
+    content_type: str = "audio/wav",
 ) -> Optional[str]:
     """Stores a student's answer recording and returns its object key.
 
@@ -168,14 +185,14 @@ async def upload_answer_audio_to_s3(
 
     import asyncio
 
-    object_key = answer_audio_s3_key(user_id, question_attempt_id, extension)
+    object_key = answer_audio_s3_key(user_id, question_attempt_id, extension, checksum)
 
     def _put() -> None:
         s3_client.put_object(
             Bucket=BUCKET_NAME,
             Key=object_key,
             Body=audio_bytes,
-            ContentType="audio/wav",
+            ContentType=content_type,
             # Student voice recordings are personal data; encrypt at rest.
             ServerSideEncryption="AES256",
         )
@@ -216,14 +233,21 @@ def bulk_ats_resume_s3_key(batch_id: int, filename: str) -> str:
     return f"{BULK_ATS_RESUME_PREFIX}/batch_{batch_id}/{unique_suffix}{ext or '.pdf'}"
 
 
-def upload_bulk_ats_resume_to_s3(file_bytes: bytes, batch_id: int, filename: str, content_type: str) -> Optional[str]:
+def upload_bulk_ats_resume_to_s3(
+    file_bytes: bytes, batch_id: int, filename: str, content_type: str
+) -> Optional[str]:
     if not s3_client or not BUCKET_NAME:
         logger.error("S3 client is not configured. Ensure AWS credentials are in .env.")
         return None
 
     object_key = bulk_ats_resume_s3_key(batch_id, filename)
     try:
-        s3_client.put_object(Bucket=BUCKET_NAME, Key=object_key, Body=file_bytes, ContentType=content_type)
+        s3_client.put_object(
+            Bucket=BUCKET_NAME,
+            Key=object_key,
+            Body=file_bytes,
+            ContentType=content_type,
+        )
         return object_key
     except ClientError as e:
         logger.error(f"Failed to upload bulk ATS resume to S3: {e}")
@@ -247,6 +271,31 @@ async def fetch_bulk_ats_resume_from_s3(object_key: str) -> Optional[bytes]:
     except Exception as error:  # noqa: BLE001
         logger.error("Failed to read bulk ATS resume | Key=%s | %s", object_key, error)
         return None
+
+
+async def delete_bulk_ats_resumes_from_s3(object_keys: list[str]) -> dict:
+    """Delete a batch's stored resumes in S3, returning an auditable result."""
+    keys = sorted({key for key in object_keys if key})
+    if not keys:
+        return {"deleted": 0, "errors": []}
+    if not s3_client or not BUCKET_NAME:
+        return {"deleted": 0, "errors": ["s3_not_configured"]}
+
+    import asyncio
+
+    def _delete() -> dict:
+        response = s3_client.delete_objects(
+            Bucket=BUCKET_NAME,
+            Delete={"Objects": [{"Key": key} for key in keys], "Quiet": True},
+        )
+        errors = [str(item.get("Key")) for item in response.get("Errors", [])]
+        return {"deleted": len(keys) - len(errors), "errors": errors}
+
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, _delete)
+    except Exception as error:  # noqa: BLE001
+        logger.error("Failed to delete Bulk ATS resumes | %s", error)
+        return {"deleted": 0, "errors": [str(error)]}
 
 
 async def fetch_answer_audio_from_s3(object_key: str) -> Optional[bytes]:
@@ -274,11 +323,11 @@ async def fetch_answer_audio_from_s3(object_key: str) -> Optional[bytes]:
 def get_presigned_url(object_key: str, expiration: int = 3600) -> Optional[str]:
     """
     Generates a short-lived presigned URL to securely download a file.
-    
+
     Args:
         object_key: The S3 object key (e.g. 'Samvaad-Saathi/resumes/...').
         expiration: How many seconds the URL should be valid for (default 1 hr).
-        
+
     Returns:
         The presigned URL string, or None if failed.
     """
@@ -288,21 +337,22 @@ def get_presigned_url(object_key: str, expiration: int = 3600) -> Optional[str]:
 
     try:
         url = s3_client.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': BUCKET_NAME, 'Key': object_key},
-            ExpiresIn=expiration
+            "get_object",
+            Params={"Bucket": BUCKET_NAME, "Key": object_key},
+            ExpiresIn=expiration,
         )
         return url
     except ClientError as e:
         logger.error(f"Failed to generate presigned URL: {e}")
         return None
 
+
 async def _background_upload_and_enforce_limit(
-    file_bytes: bytes, 
-    user_id: int, 
-    filename: str, 
-    content_type: str, 
-    resume_text: str | None, 
+    file_bytes: bytes,
+    user_id: int,
+    filename: str,
+    content_type: str,
+    resume_text: str | None,
     source: str,
     size_bytes: int | None = None,
     file_sha256: str | None = None,
@@ -324,25 +374,26 @@ async def _background_upload_and_enforce_limit(
         if file_sha256:
             async with async_db.get_session() as session:
                 dedup_stmt = sqlalchemy.select(UserResume).where(
-                    UserResume.user_id == user_id, 
-                    UserResume.file_sha256 == file_sha256
+                    UserResume.user_id == user_id, UserResume.file_sha256 == file_sha256
                 )
                 dedup_result = await session.execute(dedup_stmt)
                 existing_resume = dedup_result.scalar_one_or_none()
                 if existing_resume:
                     # Dedup: Identical PDF already exists, update timestamp to make it newest
-                    existing_resume.created_at = datetime.datetime.now(datetime.timezone.utc)
+                    existing_resume.created_at = datetime.datetime.now(
+                        datetime.timezone.utc
+                    )
                     await session.commit()
-                    logger.info(f"Dedup matched! Returning existing S3 key for user {user_id}")
+                    logger.info(
+                        f"Dedup matched! Returning existing S3 key for user {user_id}"
+                    )
                     return existing_resume.s3_key
 
         loop = asyncio.get_running_loop()
         s3_key = await loop.run_in_executor(
-            None, 
-            upload_resume_to_s3, 
-            file_bytes, user_id, filename, content_type
+            None, upload_resume_to_s3, file_bytes, user_id, filename, content_type
         )
-        
+
         if s3_key:
             s3_keys_to_delete = []
             try:
@@ -359,7 +410,7 @@ async def _background_upload_and_enforce_limit(
                         source=source,
                         content_type=content_type,
                         size_bytes=size_bytes,
-                        file_sha256=file_sha256
+                        file_sha256=file_sha256,
                     )
                     try:
                         session.add(new_resume)
@@ -367,28 +418,36 @@ async def _background_upload_and_enforce_limit(
                     except IntegrityError:
                         # Raced with another upload of the same file. Treat as deduplication success.
                         await session.rollback()
-                        logger.info(f"IntegrityError: Concurrent upload detected for user {user_id}. Using existing.")
-                        
+                        logger.info(
+                            f"IntegrityError: Concurrent upload detected for user {user_id}. Using existing."
+                        )
+
                         # Clean up the orphaned S3 object we just uploaded
                         if s3_client and BUCKET_NAME:
                             try:
                                 await loop.run_in_executor(
                                     None,
-                                    lambda k: s3_client.delete_object(Bucket=BUCKET_NAME, Key=k),
-                                    s3_key
+                                    lambda k: s3_client.delete_object(
+                                        Bucket=BUCKET_NAME, Key=k
+                                    ),
+                                    s3_key,
                                 )
                             except Exception as e:
-                                logger.error(f"Failed to cleanup S3 object {s3_key} after IntegrityError: {e}")
-                        
+                                logger.error(
+                                    f"Failed to cleanup S3 object {s3_key} after IntegrityError: {e}"
+                                )
+
                         # Query the existing file that caused the conflict and return its key
                         dedup_stmt = select(UserResume).where(
-                            UserResume.user_id == user_id, 
-                            UserResume.file_sha256 == file_sha256
+                            UserResume.user_id == user_id,
+                            UserResume.file_sha256 == file_sha256,
                         )
                         dedup_result = await session.execute(dedup_stmt)
                         existing_resume = dedup_result.scalar_one_or_none()
                         if existing_resume:
-                            existing_resume.created_at = datetime.datetime.now(datetime.timezone.utc)
+                            existing_resume.created_at = datetime.datetime.now(
+                                datetime.timezone.utc
+                            )
                             await session.commit()
                             return existing_resume.s3_key
                         else:
@@ -419,12 +478,18 @@ async def _background_upload_and_enforce_limit(
                     try:
                         await loop.run_in_executor(
                             None,
-                            lambda k: s3_client.delete_object(Bucket=BUCKET_NAME, Key=k),
-                            s3_key
+                            lambda k: s3_client.delete_object(
+                                Bucket=BUCKET_NAME, Key=k
+                            ),
+                            s3_key,
                         )
-                        logger.info(f"Cleaned up orphaned S3 object after DB failure: {s3_key}")
+                        logger.info(
+                            f"Cleaned up orphaned S3 object after DB failure: {s3_key}"
+                        )
                     except Exception as s3_cleanup_err:
-                        logger.error(f"Failed to clean up orphaned S3 object {s3_key}: {s3_cleanup_err}")
+                        logger.error(
+                            f"Failed to clean up orphaned S3 object {s3_key}: {s3_cleanup_err}"
+                        )
                 raise db_err
 
             # DB commit succeeded. Now perform best-effort S3 cleanup for old resumes.
@@ -433,14 +498,18 @@ async def _background_upload_and_enforce_limit(
                     try:
                         await loop.run_in_executor(
                             None,
-                            lambda k: s3_client.delete_object(Bucket=BUCKET_NAME, Key=k),
-                            old_key
+                            lambda k: s3_client.delete_object(
+                                Bucket=BUCKET_NAME, Key=k
+                            ),
+                            old_key,
                         )
                         logger.info(f"Deleted old resume from S3: {old_key}")
                     except Exception as e:
                         logger.error(f"Failed to delete old resume from S3: {e}")
 
-            logger.info(f"Successfully processed _background_upload_and_enforce_limit for user {user_id}")
+            logger.info(
+                f"Successfully processed _background_upload_and_enforce_limit for user {user_id}"
+            )
             return s3_key
         else:
             raise Exception("S3 upload returned None")

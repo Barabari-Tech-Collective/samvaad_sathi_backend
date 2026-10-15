@@ -60,6 +60,8 @@ class UserWithToken(BaseSchemaModel):
     is_onboarded: bool
     is_admin: bool = False
     is_super_admin: bool = False
+    role: str | None = None
+    can_use_bulk_ats: bool = False
     degree: str | None
     university: str | None
     target_position: str | None

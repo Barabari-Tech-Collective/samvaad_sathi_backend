@@ -68,7 +68,11 @@ def _question_writers(source: str) -> dict[str, bool]:
                 continue
             func = inner.func
             if isinstance(func, ast.Attribute) and func.attr == "create_batch":
-                writes = True
+                # InterviewQuestionCRUDRepository.create_batch is keyword-only
+                # and always receives interview_id. Other domains (for example
+                # Bulk ATS batches) legitimately expose a method with the same
+                # generic name and are not interview-question writers.
+                writes = any(keyword.arg == "interview_id" for keyword in inner.keywords)
             elif isinstance(func, ast.Name) and func.id == "lock_question_generation":
                 locks = True
         if writes:
@@ -96,6 +100,18 @@ def test_every_question_writer_takes_the_lock():
         + "\nCall lock_question_generation(session, interview_id=...) before reading "
         "whether questions exist, or add a justified entry to _EXEMPT_WRITERS."
     )
+
+
+def test_writer_detection_ignores_unrelated_create_batch_methods():
+    source = """
+async def create_bulk_batch(repo):
+    await repo.create_batch(name="placement drive")
+
+async def create_questions(question_repo):
+    await question_repo.create_batch(interview_id=123, questions_data=[])
+"""
+
+    assert _question_writers(source) == {"create_questions": False}
 
 
 def _row(question_id: int, text: str, **overrides) -> InterviewQuestion:

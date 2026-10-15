@@ -1,27 +1,94 @@
 import fastapi
 import time
 import logging
+import hashlib
 from pathlib import Path
 
 from fastapi import Form, UploadFile, File
 
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
-from src.models.schemas.audio import AudioTranscriptionResponse, TranscriptionStatusResponse
+from src.models.schemas.audio import (
+    AudioTranscriptionResponse,
+    TextAnswerRequest,
+    TextAnswerResponse,
+    TranscriptionStatusResponse,
+)
 from src.models.db.question_attempt import (
     TERMINAL_TRANSCRIPTION_STATUSES,
     TranscriptionStatus,
 )
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
-from src.services.audio_processor import validate_audio_file, save_audio_file, get_audio_duration_estimate, cleanup_temp_audio_file
+from src.services.audio_processor import validate_audio_file, get_audio_duration_estimate
 from src.services.whisper import transcribe_audio_with_whisper, validate_transcription_language, extract_word_count, strip_word_level_data
 from src.services.follow_up import FollowUpService
+from src.services.interview_lifecycle import interview_has_expired
+from src.services.interview_session_lease import (
+    session_lease_is_active,
+    session_lease_matches,
+)
 from src.services.s3_service import upload_answer_audio_to_s3
 
 
 router = fastapi.APIRouter(prefix="", tags=["audio"])
 logger = logging.getLogger(__name__)
+
+
+async def _require_active_interview(
+    question_attempt,
+    interview_repo,
+    *,
+    lease_token: str | None = None,
+    user_id: int | None = None,
+    lock: bool = False,
+) -> None:
+    if lock and user_id is not None and hasattr(interview_repo, "lock_by_id_and_user"):
+        parent_interview = await interview_repo.lock_by_id_and_user(
+            interview_id=question_attempt.interview_id, user_id=user_id
+        )
+    else:
+        parent_interview = await interview_repo.get_by_id(
+            interview_id=question_attempt.interview_id
+        )
+    if parent_interview is not None and (
+        parent_interview.status == "expired"
+        or (
+            parent_interview.status in ("active", "paused")
+            and interview_has_expired(parent_interview)
+        )
+    ):
+        await interview_repo.mark_expired(interview_id=parent_interview.id)
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_410_GONE,
+            detail="This Practice interview has expired. Start a new interview.",
+        )
+    if parent_interview is not None and parent_interview.status != "active":
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail="This interview is paused or has ended and cannot accept answers.",
+        )
+    if (
+        parent_interview is not None
+        and getattr(parent_interview, "interview_mode", None) == "practice"
+        and getattr(parent_interview, "session_lease_required", False)
+    ):
+        if not session_lease_matches(parent_interview, lease_token):
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "SESSION_LEASE_REPLACED",
+                    "message": "This interview is active on another device or tab.",
+                },
+            )
+        if not session_lease_is_active(parent_interview):
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "SESSION_LEASE_EXPIRED",
+                    "message": "Reconnect before saving this answer.",
+                },
+            )
 
 
 @router.post(
@@ -39,6 +106,9 @@ async def transcribe_audio_answer(
     question_attempt_id: str = Form(..., description="ID of the question attempt this audio answer belongs to"),
     language: str = Form(default="en", description="Language code for transcription (e.g., 'en', 'es', 'fr')"),
     file: UploadFile = File(..., description="Audio file to transcribe. Supported: .mp3, .wav, .m4a, .flac (max 25MB)"),
+    session_lease_token: str | None = Form(
+        default=None, min_length=20, max_length=256
+    ),
     current_user = fastapi.Depends(get_current_user),
     question_repo: QuestionAttemptCRUDRepository = fastapi.Depends(get_repository(repo_type=QuestionAttemptCRUDRepository)),
     interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
@@ -88,12 +158,12 @@ async def transcribe_audio_answer(
     # question attempt that was already created before it ended - otherwise a
     # proctoring termination only locks the student out of *starting* new
     # questions, not from finishing the one they were on when they left.
-    parent_interview = await interview_repo.get_by_id(interview_id=question_attempt.interview_id)
-    if parent_interview is not None and parent_interview.status != "active":
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_409_CONFLICT,
-            detail="This interview has ended and can no longer accept answers.",
-        )
+    await _require_active_interview(
+        question_attempt,
+        interview_repo,
+        lease_token=session_lease_token,
+        user_id=current_user.id,
+    )
 
     # Step 2: Validate audio file
     try:
@@ -118,122 +188,135 @@ async def transcribe_audio_answer(
 
     # Step 4: Validate and normalize language
     validated_language = validate_transcription_language(language)
-    whisper_start = time.perf_counter()
-    logger.info(
-      "Whisper transcription started | QuestionAttempt=%s",
-      question_attempt_id_int,
+    # Persist the recording before any external AI call. The upload response may
+    # take longer while synchronous transcription remains in place, but a
+    # Whisper outage can no longer turn a valid answer into data loss.
+    checksum = hashlib.sha256(audio_bytes).hexdigest()
+    same_answer = (
+        question_attempt.answer_checksum == checksum
+        and question_attempt.audio_url
+        and question_attempt.answer_kind == "audio"
     )
-    # Step 5: Transcribe with Whisper API
+    if same_answer:
+        stored_attempt = question_attempt
+        audio_url = question_attempt.audio_url
+    else:
+        try:
+            audio_url = await upload_answer_audio_to_s3(
+                audio_bytes=audio_bytes,
+                user_id=current_user.id,
+                question_attempt_id=question_attempt_id_int,
+                extension=Path(file_metadata["filename"]).suffix.lower() or ".wav",
+                checksum=checksum,
+                content_type=file_metadata["content_type"],
+            )
+        except Exception:  # storage details must never leak to the student
+            audio_url = None
+        if not audio_url:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Your answer is still on this device but could not be stored. Retry the upload.",
+                headers={"Retry-After": "3"},
+            )
+        # Acquire the interview row immediately before the durable answer
+        # commit. A concurrent takeover must wait for this transaction, so an
+        # old device can never pass validation and save after being replaced.
+        await _require_active_interview(
+            question_attempt,
+            interview_repo,
+            lease_token=session_lease_token,
+            user_id=current_user.id,
+            lock=True,
+        )
+        try:
+            stored_attempt = await question_repo.save_audio_asset(
+                question_attempt_id=question_attempt_id_int,
+                audio_url=audio_url,
+                checksum=checksum,
+            )
+        except Exception:
+            await question_repo.async_session.rollback()
+            stored_attempt = None
+        if stored_attempt is None:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Your answer is still on this device but could not be committed. Retry the upload.",
+                headers={"Retry-After": "3"},
+            )
+
+    if same_answer and question_attempt.transcription_status == "transcribed":
+        existing_transcription = question_attempt.transcription
+        return AudioTranscriptionResponse(
+            question_attempt_id=question_attempt_id_int,
+            filename=file_metadata["filename"],
+            content_type=file_metadata["content_type"],
+            size=file_metadata["size"],
+            duration_seconds=duration_seconds,
+            audio_url=audio_url,
+            transcription=strip_word_level_data(existing_transcription),
+            word_count=extract_word_count(existing_transcription),
+            whisper_model=None,
+            whisper_latency_ms=0,
+            whisper_error=None,
+            message="Answer was already saved.",
+            saved=True,
+            save_error=None,
+            answer_version=max(1, question_attempt.answer_version),
+            transcription_status="transcribed",
+        )
+
+    whisper_start = time.perf_counter()
     transcription, whisper_error, whisper_latency_ms, whisper_model = await transcribe_audio_with_whisper(
         audio_bytes=audio_bytes,
-        filename=file_metadata["filename"], 
-        language=validated_language
+        filename=file_metadata["filename"],
+        language=validated_language,
     )
     logger.info(
-    "Whisper completed | QuestionAttempt=%s | Time=%.2fs | Error=%s | WordCount=%d",
-      question_attempt_id_int,
-      time.perf_counter() - whisper_start,
-      whisper_error,
-      extract_word_count(transcription) or 0,
+        "Whisper completed | QuestionAttempt=%s | Time=%.2fs | Error=%s | WordCount=%d",
+        question_attempt_id_int,
+        time.perf_counter() - whisper_start,
+        whisper_error,
+        extract_word_count(transcription) or 0,
     )
 
-    follow_up_service = FollowUpService(async_session=question_repo.async_session)
-
-    # Step 6: Create temporary file for processing
-    temp_file_path = ""
-    audio_url = ""
-    save_error = None
-    try:
-        save_audio_start = time.perf_counter()
-        temp_file_path, audio_url = await save_audio_file(
-            audio_bytes=audio_bytes,
-            filename=file_metadata["filename"],
-            user_id=current_user.id,
-            question_attempt_id=question_attempt_id_int
-        )
-        logger.info(
-        "Audio file saved | QuestionAttempt=%s | Time=%.2fs | AudioURL=%s",
-        question_attempt_id_int,
-        time.perf_counter() - save_audio_start,
-        audio_url,
-        )
-        # save_audio_file only produces a temporary file and a reference name,
-        # and the temporary file is deleted before this request returns. Stored
-        # on its own, the recording would be unrecoverable: a failed
-        # transcription would lose the answer for good, it could never be
-        # re-transcribed after a provider outage, and a disputed score could not
-        # be checked against what the student actually said. It is also what
-        # lets transcription move off the request path later - a background
-        # worker needs something to fetch.
-        stored_key = await upload_answer_audio_to_s3(
-            audio_bytes=audio_bytes,
-            user_id=current_user.id,
-            question_attempt_id=question_attempt_id_int,
-            extension=Path(file_metadata["filename"]).suffix.lower() or ".wav",
-        )
-        if stored_key:
-            audio_url = stored_key
-        else:
-            # Transcription still runs from the temporary file below, so the
-            # answer is not lost right now - only its recoverability is. Worth
-            # an error rather than failing a student's upload over it.
-            logger.error(
-                "Answer audio was not stored durably | QuestionAttempt=%s | "
-                "Transcription will proceed but the recording cannot be recovered",
-                question_attempt_id_int,
-            )
-    except Exception as e:
-        save_error = str(e)
-
-    # Step 7: Update question attempt in database (only metadata, no file storage)
-    saved = False
-    db_save_error = None
-    if audio_url and transcription and not save_error:
+    transcription_status = "failed" if whisper_error or not transcription else "transcribed"
+    if transcription_status == "transcribed":
         try:
-            db_start = time.perf_counter()
-            updated_qa = await question_repo.update_audio_transcription(
+            transcribed_attempt = await question_repo.update_audio_transcription(
                 question_attempt_id=question_attempt_id_int,
-                audio_url=audio_url,  # Just a reference name, not a real file path
-                transcription=transcription
+                audio_url=audio_url,
+                transcription=transcription,
+                checksum=checksum,
             )
-            saved = updated_qa is not None
-            logger.info(
-               "Database updated | QuestionAttempt=%s | Time=%.2fs | Saved=%s",
-               question_attempt_id_int,
-               time.perf_counter() - db_start,
-               updated_qa is not None,
-            )
-        except Exception as e:
-            db_save_error = str(e)
-            saved = False
-
-    # Step 8: Clean up temporary file
-    if temp_file_path:
-        try:
-            await cleanup_temp_audio_file(temp_file_path)
+            if transcribed_attempt is not None:
+                stored_attempt = transcribed_attempt
+            else:
+                transcription_status = "failed"
         except Exception:
-            # Cleanup cannot turn a committed answer into an apparent save failure.
-            logger.warning("Temporary audio cleanup failed | QuestionAttempt=%s", question_attempt_id_int)
+            await question_repo.async_session.rollback()
+            transcription_status = "failed"
+    if transcription_status == "failed":
+        try:
+            failed_attempt = await question_repo.mark_transcription_failed(
+                question_attempt_id=question_attempt_id_int,
+                checksum=checksum,
+                error="Detailed feedback is delayed because speech processing failed. Your answer is saved.",
+            )
+            if failed_attempt is not None:
+                stored_attempt = failed_attempt
+        except Exception:
+            await question_repo.async_session.rollback()
 
-    # Step 9: Extract metadata for response
+    # From here onward `saved` means the student's answer is durable, not that
+    # every downstream AI operation happened to succeed.
+    final_saved = stored_attempt is not None and bool(stored_attempt.audio_url)
+    final_save_error = None
     word_count = extract_word_count(transcription)
-    
-    # Determine overall save status and error message
-    final_save_error = save_error or db_save_error
-    final_saved = saved and not final_save_error
-
-    if not final_saved:
-        await question_repo.async_session.rollback()
-        logger.error("Answer persistence failed | QuestionAttempt=%s", question_attempt_id_int)
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Your answer was not saved. Keep this page open and retry the upload.",
-            headers={"Retry-After": "3"},
-        )
+    follow_up_service = FollowUpService(async_session=question_repo.async_session)
     
     follow_up_metadata = None
     follow_up_question = None
-    if final_saved:
+    if final_saved and transcription_status == "transcribed":
         try:
             followup_start = time.perf_counter()
 
@@ -268,12 +351,10 @@ async def transcribe_audio_answer(
             )
 
     # Generate status message
-    if final_saved:
-        message = "Audio uploaded and transcribed successfully"
-    elif transcription and not whisper_error:
-        message = "Audio transcribed but failed to save"
-    elif whisper_error:
-        message = f"Audio uploaded but transcription failed: {whisper_error}"
+    if final_saved and transcription_status == "transcribed":
+        message = "Answer saved and transcribed successfully"
+    elif final_saved:
+        message = "Answer saved. Detailed feedback is taking longer than usual."
     else:
         message = "Audio upload failed"
     logger.info(
@@ -301,6 +382,66 @@ async def transcribe_audio_answer(
         follow_up_generated=follow_up_metadata is not None,
         follow_up_metadata=follow_up_metadata,
         follow_up_question=follow_up_question,
+        answer_version=max(1, stored_attempt.answer_version if stored_attempt else 1),
+        transcription_status=transcription_status,
+    )
+
+
+@router.post(
+    path="/answers/text",
+    name="audio:save-text-answer",
+    response_model=TextAnswerResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Save a typed interview answer",
+)
+async def save_text_answer(
+    payload: TextAnswerRequest,
+    current_user=fastapi.Depends(get_current_user),
+    question_repo: QuestionAttemptCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=QuestionAttemptCRUDRepository)
+    ),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
+) -> TextAnswerResponse:
+    attempt = await question_repo.get_by_id_and_user(
+        question_attempt_id=payload.question_attempt_id, user_id=current_user.id
+    )
+    if attempt is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="Question attempt not found or access denied",
+        )
+    await _require_active_interview(
+        attempt,
+        interview_repo,
+        lease_token=payload.session_lease_token,
+        user_id=current_user.id,
+        lock=True,
+    )
+    normalized = " ".join(payload.text.split())
+    if not normalized:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Type an answer before saving.",
+        )
+    try:
+        saved = await question_repo.save_text_answer(
+            question_attempt_id=attempt.id,
+            text=normalized,
+            language=validate_transcription_language(payload.language),
+        )
+    except Exception:
+        await question_repo.async_session.rollback()
+        saved = None
+    if saved is None:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Your typed answer could not be saved. Keep this page open and retry.",
+        )
+    return TextAnswerResponse(
+        question_attempt_id=saved.id,
+        answer_version=max(1, saved.answer_version),
     )
 
 
@@ -345,7 +486,7 @@ async def get_transcription_status(
         # The recording is stored before the job is queued, so an answer in
         # flight is already safe. Reporting otherwise would tell a student their
         # answer was lost while it is merely still being processed.
-        saved=bool(attempt.audio_url),
+        saved=bool(attempt.audio_url or attempt.transcription),
         transcription=strip_word_level_data(transcription) if transcription else None,
         word_count=extract_word_count(transcription) if transcription else None,
         error=attempt.transcription_error,

@@ -6,7 +6,9 @@ import decouple
 import pydantic
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ROOT_DIR: pathlib.Path = pathlib.Path(__file__).parent.parent.parent.parent.parent.resolve()
+ROOT_DIR: pathlib.Path = pathlib.Path(
+    __file__
+).parent.parent.parent.parent.parent.resolve()
 
 
 class BackendBaseSettings(BaseSettings):
@@ -100,17 +102,17 @@ class BackendBaseSettings(BaseSettings):
         "http://127.0.0.1:5173",  # Qwik docker port
         "http://127.0.0.1:5174",
         "https://backend-samvaad-saathi.barabaricollective.org",
-        "https://samvaad-saathi-frontend.vercel.app", #vercel new prod
+        "https://samvaad-saathi-frontend.vercel.app",  # vercel new prod
         "https://samvaad-saathi-frontend.vercel.app",  # vercel new prod
         "https://samvaad-sathi.barabaricollective.org",  # Production frontend (without www)
         "https://www.samvaad-sathi.barabaricollective.org",  # Production frontend (with www)
         "https://dev-backend-samvaadsathi.barabaricollective.org",  # Dev backend (for local frontend testing)
         "https://samvaad-saathi-dashboard.onrender.com",  # Dashboard frontend on Render
         "https://samvaad-dashboard.barabaricollective.org",
-        "https://samvaad-saathi.barabaricollective.org", #new domain for production
+        "https://samvaad-saathi.barabaricollective.org",  # new domain for production
         "https://master.d30wpikvvj1kc2.amplifyapp.com",
-        "https://main.d36hlrn367i0rr.amplifyapp.com", #new aws production
-        "https://master.d1ljdkppy5vau1.amplifyapp.com", #new aws dashboard prod
+        "https://main.d36hlrn367i0rr.amplifyapp.com",  # new aws production
+        "https://master.d1ljdkppy5vau1.amplifyapp.com",  # new aws dashboard prod
         # staging
         "https://samvaad-saathi-staging.barabaricollective.org",
         "https://api-staging.barabaricollective.org",
@@ -133,7 +135,9 @@ class BackendBaseSettings(BaseSettings):
         for origin in origins:
             parsed = urllib.parse.urlparse(origin)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
-                raise ValueError(f"ALLOWED_ORIGINS entry is not a valid origin: {origin!r}")
+                raise ValueError(
+                    f"ALLOWED_ORIGINS entry is not a valid origin: {origin!r}"
+                )
             # CORS compares the Origin header literally, so anything past the host
             # (path, query, trailing slash) can never match — and "://" appearing twice
             # is the signature of the missing-comma concatenation described above.
@@ -184,7 +188,9 @@ class BackendBaseSettings(BaseSettings):
     )  # type: ignore
     # This product's row in auth-service's `products` table (already seeded as SAMVAAD_SAATHI).
     SAMPARK_PRODUCT_UNIQUE_ID: str = decouple.config(
-        "SAMPARK_PRODUCT_UNIQUE_ID", cast=str, default="81c53f68-35f4-4133-9e35-06f5c30354b785"
+        "SAMPARK_PRODUCT_UNIQUE_ID",
+        cast=str,
+        default="81c53f68-35f4-4133-9e35-06f5c30354b785",
     )  # type: ignore
     # The exact callback URL registered in auth-service's SSO_ALLOWED_REDIRECT_URIS.
     # auth-service compares this by exact string, so it must NOT be derived from the
@@ -245,16 +251,22 @@ class BackendBaseSettings(BaseSettings):
     # others later) binds its own queue to independently. Defaults to the prod name; local
     # dev against a local auth-service should override to the "-local"-suffixed one.
     RABBITMQ_ACCESS_REVOKED_EXCHANGE: str = decouple.config(
-        "RABBITMQ_ACCESS_REVOKED_EXCHANGE", cast=str, default="barabari.user-access-revoked-exchange"
+        "RABBITMQ_ACCESS_REVOKED_EXCHANGE",
+        cast=str,
+        default="barabari.user-access-revoked-exchange",
     )  # type: ignore
     RABBITMQ_ACCESS_REVOKED_ROUTING_KEY: str = decouple.config(
-        "RABBITMQ_ACCESS_REVOKED_ROUTING_KEY", cast=str, default="barabari.user-access-revoked-routing-key"
+        "RABBITMQ_ACCESS_REVOKED_ROUTING_KEY",
+        cast=str,
+        default="barabari.user-access-revoked-routing-key",
     )  # type: ignore
     # This product's own durable queue name, bound to the exchange above. Distinct from
     # any other product's queue name so a topic-exchange fan-out reaches every consumer
     # independently rather than round-robin-splitting one shared queue between them.
     RABBITMQ_ACCESS_REVOKED_QUEUE: str = decouple.config(
-        "RABBITMQ_ACCESS_REVOKED_QUEUE", cast=str, default="barabari.samvaad-saathi.access-revoked-queue"
+        "RABBITMQ_ACCESS_REVOKED_QUEUE",
+        cast=str,
+        default="barabari.samvaad-saathi.access-revoked-queue",
     )  # type: ignore
     # How long a revoked-flag lives in Redis once set. Deliberately longer than
     # auth-service's own access-token lifetime (default 1 hour) rather than trying to
@@ -282,7 +294,7 @@ class BackendBaseSettings(BaseSettings):
     # Jev (TypeSafe) - typed-decision model used by Bulk ATS for the semantic
     # judgment calls only (project quality/complexity, resume hygiene, etc).
     # Deterministic parsing, link checks and the final weighted score never
-    # go through this. Empty JEV_API_KEY/JEV_API_BASE_URL makes
+    # go through this. An empty JEV_API_KEY makes
     # bulk/jev_client.py fall back to a local stub provider so Bulk ATS stays
     # usable (candidates land in needs_review) before Jev is wired up.
     JEV_API_KEY: str = decouple.config("JEV_API_KEY", cast=str, default="")  # type: ignore
@@ -293,11 +305,36 @@ class BackendBaseSettings(BaseSettings):
     JEV_TIMEOUT_SECONDS: float = decouple.config("JEV_TIMEOUT_SECONDS", cast=float, default=60.0)  # type: ignore
 
     # Bulk ATS ingestion limits.
-    BULK_ATS_MAX_FILES_PER_BATCH: int = decouple.config("BULK_ATS_MAX_FILES_PER_BATCH", cast=int, default=200)  # type: ignore
+    BULK_ATS_MAX_FILES_PER_BATCH: int = decouple.config("BULK_ATS_MAX_FILES_PER_BATCH", cast=int, default=100)  # type: ignore
     BULK_ATS_MAX_FILE_SIZE_MB: int = decouple.config("BULK_ATS_MAX_FILE_SIZE_MB", cast=int, default=10)  # type: ignore
     RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR: int = decouple.config("RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR", cast=int, default=20)  # type: ignore
     DEEPSEEK_BASE_URL: str = decouple.config("DEEPSEEK_BASE_URL", cast=str, default="https://api.deepseek.com")  # type: ignore
     DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-v4-flash")  # type: ignore
+    # DeepSeek only turns the already-computed compact scorecard into a brief;
+    # it never receives the full resume and never changes a score.
+    BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED: bool = decouple.config("BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED", cast=bool, default=True)  # type: ignore
+    BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS: int = decouple.config("BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS", cast=int, default=350)  # type: ignore
+    BULK_ATS_DEEPSEEK_TIMEOUT_SECONDS: float = decouple.config("BULK_ATS_DEEPSEEK_TIMEOUT_SECONDS", cast=float, default=45.0)  # type: ignore
+    BULK_ATS_DEEPSEEK_PROMPT_VERSION: str = decouple.config("BULK_ATS_DEEPSEEK_PROMPT_VERSION", cast=str, default="v1")  # type: ignore
+    BULK_ATS_DEFAULT_RETENTION_DAYS: int = decouple.config("BULK_ATS_DEFAULT_RETENTION_DAYS", cast=int, default=90)  # type: ignore
+    BULK_ATS_MAX_RETENTION_DAYS: int = decouple.config("BULK_ATS_MAX_RETENTION_DAYS", cast=int, default=365)  # type: ignore
+    BULK_ATS_OCR_ENABLED: bool = decouple.config("BULK_ATS_OCR_ENABLED", cast=bool, default=False)  # type: ignore
+    BULK_ATS_OCR_LANGUAGE: str = decouple.config("BULK_ATS_OCR_LANGUAGE", cast=str, default="eng+hin")  # type: ignore
+    BULK_ATS_OCR_DPI: int = decouple.config("BULK_ATS_OCR_DPI", cast=int, default=200)  # type: ignore
+    BULK_ATS_DOCX_MAX_UNCOMPRESSED_MB: int = decouple.config("BULK_ATS_DOCX_MAX_UNCOMPRESSED_MB", cast=int, default=50)  # type: ignore
+    BULK_ATS_CLAMAV_HOST: str = decouple.config("BULK_ATS_CLAMAV_HOST", cast=str, default="")  # type: ignore
+    BULK_ATS_CLAMAV_PORT: int = decouple.config("BULK_ATS_CLAMAV_PORT", cast=int, default=3310)  # type: ignore
+    BULK_ATS_CLAMAV_TIMEOUT_SECONDS: float = decouple.config("BULK_ATS_CLAMAV_TIMEOUT_SECONDS", cast=float, default=10.0)  # type: ignore
+    BULK_ATS_CLAMAV_FAIL_CLOSED: bool = decouple.config("BULK_ATS_CLAMAV_FAIL_CLOSED", cast=bool, default=False)  # type: ignore
+    # Recruiter-consented Google Drive OAuth. The callback URI must exactly
+    # match Google Cloud, and refresh tokens are encrypted before DB storage.
+    GOOGLE_DRIVE_OAUTH_CLIENT_ID: str = decouple.config("GOOGLE_DRIVE_OAUTH_CLIENT_ID", cast=str, default="")  # type: ignore
+    GOOGLE_DRIVE_OAUTH_CLIENT_SECRET: str = decouple.config("GOOGLE_DRIVE_OAUTH_CLIENT_SECRET", cast=str, default="")  # type: ignore
+    GOOGLE_DRIVE_OAUTH_REDIRECT_URI: str = decouple.config("GOOGLE_DRIVE_OAUTH_REDIRECT_URI", cast=str, default="")  # type: ignore
+    GOOGLE_DRIVE_OAUTH_FRONTEND_RETURN_URL: str = decouple.config("GOOGLE_DRIVE_OAUTH_FRONTEND_RETURN_URL", cast=str, default="")  # type: ignore
+    GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY: str = decouple.config("GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY", cast=str, default="")  # type: ignore
+    GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY_ID: str = decouple.config("GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY_ID", cast=str, default="v1")  # type: ignore
+    GOOGLE_DRIVE_OAUTH_STATE_MAX_AGE_SECONDS: int = decouple.config("GOOGLE_DRIVE_OAUTH_STATE_MAX_AGE_SECONDS", cast=int, default=600)  # type: ignore
 
     # Which provider src/services/whisper.py's transcribe_audio_with_whisper()
     # actually uses. "groq" (default, as of 2026-09-11 - live-verified against
@@ -348,6 +385,9 @@ class BackendBaseSettings(BaseSettings):
     REDIS_PORT: int = decouple.config("REDIS_PORT", cast=int, default=6379)  # type: ignore
     REDIS_DB: int = decouple.config("REDIS_DB", cast=int, default=0)  # type: ignore
     REDIS_PASSWORD: str = decouple.config("REDIS_PASSWORD", cast=str, default="")  # type: ignore
+    # Hosted environments such as Render expose one connection string instead
+    # of split host/port/password fields. When present it takes precedence.
+    REDIS_URL: str = decouple.config("REDIS_URL", cast=str, default="")  # type: ignore
 
     # Per-user rate limits on endpoints calling metered third-party APIs
     # (OpenAI/ElevenLabs) - protects the API bill from runaway usage by a
@@ -373,7 +413,7 @@ class BackendBaseSettings(BaseSettings):
         case_sensitive=True,
         env_file=f"{str(ROOT_DIR)}/.env",
         validate_assignment=True,
-        extra='allow'
+        extra="allow",
     )
 
     @property

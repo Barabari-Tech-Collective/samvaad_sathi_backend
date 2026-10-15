@@ -8,21 +8,14 @@ is briefly down. This pool fails fast instead so enqueueing can stay best-effort
 
 import logging
 
-from arq.connections import ArqRedis, RedisSettings, create_pool
+from arq.connections import ArqRedis, create_pool
 from arq.jobs import Job as ArqJob
 
-from src.config.manager import settings
+from src.worker.settings import build_redis_settings
 
 logger = logging.getLogger(__name__)
 
-_enqueue_redis_settings = RedisSettings(
-    host=settings.REDIS_HOST,
-    port=settings.REDIS_PORT,
-    database=settings.REDIS_DB,
-    password=settings.REDIS_PASSWORD or None,
-    conn_timeout=1,
-    conn_retries=0,
-)
+_enqueue_redis_settings = build_redis_settings(fail_fast=True)
 
 _pool: ArqRedis | None = None
 

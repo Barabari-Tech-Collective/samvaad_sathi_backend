@@ -1,6 +1,7 @@
 import pytest
 
 from src.worker import queue as queue_module
+from src.worker import settings as worker_settings_module
 
 
 class _FakeJob:
@@ -89,3 +90,19 @@ async def test_falsy_on_failure_and_truthy_on_success(monkeypatch):
 
 async def _async_return(value):
     return value
+
+
+def test_hosted_redis_url_takes_precedence(monkeypatch):
+    monkeypatch.setattr(
+        worker_settings_module.settings,
+        "REDIS_URL",
+        "rediss://user:secret@redis.internal:6380/4",
+    )
+
+    parsed = worker_settings_module.build_redis_settings(fail_fast=True)
+
+    assert parsed.host == "redis.internal"
+    assert parsed.port == 6380
+    assert parsed.database == 4
+    assert parsed.ssl is True
+    assert parsed.conn_retries == 0

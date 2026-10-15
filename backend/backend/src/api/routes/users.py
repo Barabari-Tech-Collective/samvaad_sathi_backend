@@ -5,7 +5,7 @@ import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import calculate_user_permissions, extract_memberships_from_result, is_admin_user, is_super_admin_user
+from src.api.dependencies.admin import calculate_user_permissions, extract_memberships_from_result, is_admin_user, is_bulk_ats_user, is_super_admin_user
 from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
@@ -360,6 +360,7 @@ async def get_me(
             can_edit=can_edit,
             is_view_only=is_view_only,
             team_name=primary_team.name if primary_team else None,
+            can_use_bulk_ats=is_bulk_ats_user(current_user),
             degree=current_user.degree,
             university=current_user.university,
             target_position=current_user.target_position,

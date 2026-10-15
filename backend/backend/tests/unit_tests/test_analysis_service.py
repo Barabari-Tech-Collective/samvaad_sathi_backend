@@ -1,10 +1,12 @@
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
 from src.models.db.question_attempt import QuestionAttempt
+from src.models.schemas.analysis import AggregatedAnalysis
 from src.services.analysis import AnalysisAggregationService
 
 
@@ -67,3 +69,33 @@ async def test_ensure_recorded_attempts_analyzed_only_fills_missing_sections():
     assert len(calls) == 1
     assert calls[0]["question_attempt_id"] == 10
     assert calls[0]["analysis_types"] == ["communication", "pace", "pause"]
+
+
+@pytest.mark.asyncio
+async def test_stale_analysis_is_not_saved_over_a_newer_answer_version():
+    class Result:
+        rowcount = 0
+
+    class DB:
+        execute = AsyncMock(return_value=Result())
+        commit = AsyncMock()
+        rollback = AsyncMock()
+
+    db = DB()
+    service = AnalysisAggregationService()
+    attempt = cast(
+        QuestionAttempt,
+        DummyQA(id=12, answer_version=2, analysis_json=None),
+    )
+
+    saved, error = await service._save_analysis_to_db(
+        attempt,
+        AggregatedAnalysis(domain={"domainScore": 90}),
+        cast(SQLAlchemyAsyncSession, db),
+        answer_version=1,
+    )
+
+    assert saved is False
+    assert error == "The answer changed while feedback was being prepared."
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_called()

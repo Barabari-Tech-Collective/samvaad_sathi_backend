@@ -95,9 +95,6 @@ class ATSEngine:
 
         has_email = bool(email_match)
 
-        print("phone of Candidate:", phone_match)
-        print("email of Candidate:", email_match)
-
         master_report["hygieneCheck"]["phoneRegexMatch"] = has_phone
         master_report["hygieneCheck"]["hasPhone"] = has_phone
         master_report["hygieneCheck"]["hasEmail"] = has_email
