@@ -110,6 +110,16 @@ def _parse_skills(value: str) -> list[str]:
     return skills
 
 
+def _parse_resume_urls(value: str) -> list[dict]:
+    """Convert a newline-separated paste into the existing import row shape."""
+    rows: list[dict] = []
+    for line in value.splitlines():
+        resume_url = line.strip()
+        if resume_url:
+            rows.append({"resume_url": resume_url, "source": "pasted_link"})
+    return rows
+
+
 def _require_role_rubric(
     *,
     job_profile_id: int | None,
@@ -430,6 +440,17 @@ async def upload_resumes(
         repo, batch_id=batch_id, current_user=current_user
     )
 
+    existing_count = await repo.count_candidates(batch_id=batch_id)
+    remaining_capacity = settings.BULK_ATS_MAX_FILES_PER_BATCH - existing_count
+    if len(files) > remaining_capacity:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This batch has room for {max(remaining_capacity, 0)} more "
+                f"candidate(s); the batch limit is "
+                f"{settings.BULK_ATS_MAX_FILES_PER_BATCH}"
+            ),
+        )
     if len(files) > settings.BULK_ATS_MAX_FILES_PER_BATCH:
         raise HTTPException(
             status_code=400,
@@ -532,7 +553,8 @@ async def upload_resumes(
 @router.post("/batches/{batch_id}/import-links", status_code=202)
 async def import_links(
     batch_id: int,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    resume_urls: str = Form("", max_length=210000),
     current_user: User = Depends(get_current_bulk_ats_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
     _rate_limit=Depends(
@@ -548,7 +570,17 @@ async def import_links(
     actual resume_url fetch happens in the worker task (see
     process_bulk_ats_candidate_task), not here, so one slow/dead link can't
     hold up the request."""
-    if file.content_type not in _ALLOWED_EXCEL_CONTENT_TYPES:
+    if file is None and not resume_urls.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Upload a CSV/XLSX file or paste at least one resume URL",
+        )
+    if file is not None and resume_urls.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Choose either a spreadsheet or pasted resume URLs, not both",
+        )
+    if file is not None and file.content_type not in _ALLOWED_EXCEL_CONTENT_TYPES:
         raise HTTPException(
             status_code=400, detail="Only CSV or Excel (.xlsx) files are supported"
         )
@@ -558,11 +590,21 @@ async def import_links(
         repo, batch_id=batch_id, current_user=current_user
     )
 
-    rows = await _read_candidate_rows(file)
-    if len(rows) > settings.BULK_ATS_MAX_FILES_PER_BATCH:
+    rows = (
+        await _read_candidate_rows(file)
+        if file is not None
+        else _parse_resume_urls(resume_urls)
+    )
+    existing_count = await repo.count_candidates(batch_id=batch_id)
+    remaining_capacity = settings.BULK_ATS_MAX_FILES_PER_BATCH - existing_count
+    if len(rows) > remaining_capacity:
         raise HTTPException(
             status_code=400,
-            detail=f"At most {settings.BULK_ATS_MAX_FILES_PER_BATCH} rows per import",
+            detail=(
+                f"This batch has room for {max(remaining_capacity, 0)} more "
+                f"candidate(s); the batch limit is "
+                f"{settings.BULK_ATS_MAX_FILES_PER_BATCH}"
+            ),
         )
 
     accepted: list[dict] = []
