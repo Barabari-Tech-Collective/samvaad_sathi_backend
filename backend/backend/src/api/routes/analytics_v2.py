@@ -1486,29 +1486,96 @@ async def get_interviews_summary(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
-    total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0
-    completed_interviews = (
-        (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.status == "completed"))).scalar() or 0
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if allowed_colleges is not None and not allowed_colleges:
+        return InterviewsSummaryResponse(kpis=[
+            KpiCard(key="total_interviews", label="Total Interviews", value=0),
+            KpiCard(key="average_score", label="Average Score", value=0.0),
+            KpiCard(key="completion_rate", label="Completion Rate", value=0.0, unit="percent"),
+            KpiCard(key="average_duration", label="Average Duration", value=0, unit="seconds"),
+            KpiCard(key="most_popular_role", label="Most Popular Role", value=None),
+            KpiCard(key="most_popular_difficulty", label="Most Popular Difficulty", value=None),
+        ])
+
+    total_stmt = _apply_interview_filters(
+        sqlalchemy.select(sqlalchemy.func.count(Interview.id)),
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        allowed_colleges=allowed_colleges,
     )
-    average_duration = (await session.execute(sqlalchemy.select(sqlalchemy.func.avg(Interview.duration_seconds)))).scalar_one_or_none()
+    total_interviews = (await session.execute(total_stmt)).scalar() or 0
+
+    completed_stmt = _apply_interview_filters(
+        sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.status == "completed"),
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        allowed_colleges=allowed_colleges,
+    )
+    completed_interviews = (await session.execute(completed_stmt)).scalar() or 0
+
+    duration_stmt = _apply_interview_filters(
+        sqlalchemy.select(sqlalchemy.func.avg(Interview.duration_seconds)),
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        allowed_colleges=allowed_colleges,
+    )
+    average_duration = (await session.execute(duration_stmt)).scalar_one_or_none()
+
+    role_stmt = _apply_interview_filters(
+        sqlalchemy.select(Interview.track, sqlalchemy.func.count(Interview.id).label("interviews_count")),
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        allowed_colleges=allowed_colleges,
+    )
     popular_role = (
         await session.execute(
-            sqlalchemy.select(Interview.track, sqlalchemy.func.count(Interview.id).label("interviews_count"))
-            .group_by(Interview.track)
+            role_stmt.group_by(Interview.track)
             .order_by(sqlalchemy.text("interviews_count DESC"))
             .limit(1)
         )
     ).first()
+
+    diff_stmt = _apply_interview_filters(
+        sqlalchemy.select(Interview.difficulty, sqlalchemy.func.count(Interview.id).label("interviews_count")),
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        allowed_colleges=allowed_colleges,
+    )
     popular_difficulty = (
         await session.execute(
-            sqlalchemy.select(Interview.difficulty, sqlalchemy.func.count(Interview.id).label("interviews_count"))
-            .group_by(Interview.difficulty)
+            diff_stmt.group_by(Interview.difficulty)
             .order_by(sqlalchemy.text("interviews_count DESC"))
             .limit(1)
         )
     ).first()
-    average_score = (await session.execute(sqlalchemy.select(sqlalchemy.func.avg(Report.overall_score)))).scalar_one_or_none()
+
+    score_stmt = _apply_interview_filters(
+        sqlalchemy.select(sqlalchemy.func.avg(Report.overall_score))
+        .select_from(Interview)
+        .join(Report, Report.interview_id == Interview.id),
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        allowed_colleges=allowed_colleges,
+    )
+    average_score = (await session.execute(score_stmt)).scalar_one_or_none()
 
     kpis = [
         KpiCard(key="total_interviews", label="Total Interviews", value=total_interviews),

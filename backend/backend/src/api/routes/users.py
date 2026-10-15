@@ -5,7 +5,14 @@ import sqlalchemy
 
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import calculate_user_permissions, extract_memberships_from_result, is_admin_user, is_bulk_ats_user, is_super_admin_user
+from src.api.dependencies.admin import (
+    calculate_user_permissions,
+    extract_memberships_from_result,
+    get_user_active_memberships,
+    is_admin_user,
+    is_bulk_ats_user,
+    is_super_admin_user,
+)
 from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
@@ -122,20 +129,7 @@ async def login_user(
     user_created_at = user.created_at
     user_is_onboarded = user.is_onboarded if hasattr(user, "is_onboarded") else False
 
-    from src.models.db.team import Team
-    from src.models.db.team_member import TeamMember
-    member_stmt = (
-        sqlalchemy.select(TeamMember, Team)
-        .join(Team, TeamMember.team_id == Team.id)
-        .where(
-            TeamMember.user_id == user.id,
-            TeamMember.status == "active",
-            Team.status == "active",
-        )
-        .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
-    )
-    member_res = await session.execute(member_stmt)
-    memberships = extract_memberships_from_result(member_res)
+    memberships = await get_user_active_memberships(user.id, session)
     first_item = memberships[0] if memberships else None
     if isinstance(first_item, (tuple, list)):
         member = first_item[0]
@@ -292,20 +286,7 @@ async def get_me(
 
     is_admin_flag = is_admin_user(current_user)
 
-    from src.models.db.team import Team
-    from src.models.db.team_member import TeamMember
-    member_stmt = (
-        sqlalchemy.select(TeamMember, Team)
-        .join(Team, TeamMember.team_id == Team.id)
-        .where(
-            TeamMember.user_id == current_user.id,
-            TeamMember.status == "active",
-            Team.status == "active",
-        )
-        .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
-    )
-    member_res = await session.execute(member_stmt)
-    memberships = extract_memberships_from_result(member_res)
+    memberships = await get_user_active_memberships(current_user.id, session)
     first_item = memberships[0] if memberships else None
     if isinstance(first_item, (tuple, list)):
         member = first_item[0]

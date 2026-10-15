@@ -35,13 +35,49 @@ class UserCRUDRepository(BaseCRUDRepository):
         return new_user
 
     async def get_user_by_email(self, *, email: str) -> User:
-        clean_email = email.strip().lower()
-        stmt = sqlalchemy.select(User).where(sqlalchemy.func.lower(User.email) == clean_email)
-        query = await self.async_session.execute(statement=stmt)
-        user = query.scalar()
-        if not user:
-            raise EntityDoesNotExist("User with this email does not exist!")
-        return user  # type: ignore
+        raw_email = (email or "").strip()
+        clean_email = raw_email.lower()
+
+        # 1. First attempt exact match
+        stmt_exact = sqlalchemy.select(User).where(User.email == raw_email)
+        query_exact = await self.async_session.execute(statement=stmt_exact)
+        try:
+            user = query_exact.scalar_one_or_none() if hasattr(query_exact, "scalar_one_or_none") else None
+            if isinstance(user, User):
+                return user
+            if hasattr(query_exact, "scalar"):
+                user_s = query_exact.scalar()
+                if isinstance(user_s, User):
+                    return user_s
+        except Exception:
+            pass
+
+        # 2. Case-insensitive fallback with deterministic ordering
+        stmt_ci = (
+            sqlalchemy.select(User)
+            .where(sqlalchemy.func.lower(User.email) == clean_email)
+            .order_by(User.id.asc())
+        )
+        query_ci = await self.async_session.execute(statement=stmt_ci)
+        try:
+            if hasattr(query_ci, "scalars"):
+                s_obj = query_ci.scalars()
+                if hasattr(s_obj, "all"):
+                    matched_users = [u for u in s_obj.all() if isinstance(u, User)]
+                    if matched_users:
+                        return matched_users[0]
+            if hasattr(query_ci, "scalar_one_or_none"):
+                user_ci = query_ci.scalar_one_or_none()
+                if isinstance(user_ci, User):
+                    return user_ci
+            if hasattr(query_ci, "scalar"):
+                user_ci_s = query_ci.scalar()
+                if isinstance(user_ci_s, User):
+                    return user_ci_s
+        except Exception:
+            pass
+
+        raise EntityDoesNotExist("User with this email does not exist!")
 
     async def verify_password(self, *, email: str, password: str) -> User:
         user = await self.get_user_by_email(email=email)

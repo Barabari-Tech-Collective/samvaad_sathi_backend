@@ -934,10 +934,15 @@ async def list_bulk_ats_staff(
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     """Admin-only: who currently has Bulk ATS access. Gated by
-    get_current_admin_user (the existing is_admin/ADMIN_EMAILS grant,
+    is_admin_user (the existing is_admin/ADMIN_EMAILS grant,
     reachable today via SamvaadAdminsTab) rather than
     get_current_bulk_ats_user, so granting access can't be bootstrapped by
     someone who only has access themselves."""
+    if not is_admin_user(current_user):
+        raise HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Administrator access required.",
+        )
     user_repo = UserCRUDRepository(async_session=session)
     staff = await user_repo.list_bulk_ats_staff()
     return [{"email": u.email, "name": u.name, "role": u.role} for u in staff]
@@ -949,6 +954,11 @@ async def set_bulk_ats_staff_role(
     current_user: User = Depends(get_current_admin_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    if not is_admin_user(current_user):
+        raise HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Administrator access required.",
+        )
     from src.utilities.exceptions.database import EntityDoesNotExist
 
     user_repo = UserCRUDRepository(async_session=session)

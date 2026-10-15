@@ -295,10 +295,16 @@ class TeamCRUDRepository(BaseCRUDRepository):
             member.domain = member_data.domain
 
         effective_role = (member_data.access_role or member.access_role or "").strip().lower()
+        is_updating_to_jf = (
+            member_data.access_role is not None
+            and effective_role in {"jr facilitator", "junior facilitator"}
+        )
         if effective_role in {"team member", "member", "staff"}:
             member.colleges = None
         elif member_data.colleges is not None:
-            member.colleges = member_data.colleges
+            member.colleges = [c for c in member_data.colleges if isinstance(c, str) and c.strip()]
+        elif is_updating_to_jf and (not member.colleges or not isinstance(member.colleges, list)):
+            raise ValueError("Assigned colleges are required when changing role to Junior Facilitator.")
             
         # Security Note: Never mutate user's email or password in team-scoped endpoint!
         stmt = select(User).where(User.id == member.user_id)

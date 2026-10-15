@@ -719,6 +719,42 @@ def test_permission_matrix_program_team_member():
     assert perms["is_team_lead"] is False
 
 
+def test_junior_facilitator_with_team_member_role_elsewhere_retains_college_restrictions():
+    """Junior Facilitator in one team who is also a Team Member in another team
+    must NOT get widened college access (colleges=None). Their colleges must remain restricted.
+    """
+    from src.api.dependencies.admin import calculate_user_permissions
+
+    user = _make_user(108, email="jf_multiteam@barabari.org")
+    team_prog = Team(id=1, name="Program Team", status="active")
+    member_jf = TeamMember(
+        id=10,
+        team_id=1,
+        user_id=108,
+        access_role="Jr Facilitator",
+        colleges=["BITS Pilani", "IIT Delhi"],
+        status="active",
+    )
+    team_place = Team(id=2, name="Placement Team", status="active")
+    member_tm = TeamMember(
+        id=11,
+        team_id=2,
+        user_id=108,
+        access_role="Team Member",
+        status="active",
+    )
+
+    perms = calculate_user_permissions(user, [(member_jf, team_prog), (member_tm, team_place)])
+    assert perms["can_create_roles"] is False
+    assert perms["can_access_ats"] is False
+    assert perms["can_edit"] is False
+    assert perms["is_view_only"] is True
+    # Colleges must NOT be widened to None (unrestricted)
+    assert perms["colleges"] is not None
+    assert set(perms["colleges"]) == {"BITS Pilani", "IIT Delhi"}
+    assert perms["is_team_lead"] is False
+
+
 @pytest.mark.asyncio
 async def test_creator_portal_denies_team_member():
     """Team members cannot create or modify roles in Creator Portal."""
@@ -1214,6 +1250,112 @@ async def test_analytics_v2_unassigned_college_scoping_for_junior_facilitators()
         assert r_glob.students == []
         assert r_glob.colleges == []
         assert r_glob.interviews == []
+
+        from src.api.routes.analytics_v2 import get_interviews_summary
+        r_int_sum = await get_interviews_summary(current_user=jf_user, session=mock_session)
+        assert all(kpi.value in (0, 0.0, None) for kpi in r_int_sum.kpis)
+
+
+@pytest.mark.asyncio
+async def test_creator_portal_rejects_revoked_member_with_stale_creator_token():
+    """If a user was removed from a team (0 active memberships, but has team member history), their stale
+    CREATOR token must NOT grant them Creator Portal access."""
+    from src.api.dependencies.admin import get_current_creator_user
+
+    revoked_user = _make_user(901, email="revoked_creator@barabari.org", is_admin=False, is_super_admin=False)
+    setattr(revoked_user, "_token_role", "CREATOR")
+
+    mock_session = AsyncMock()
+
+    def exec_mock(stmt):
+        stmt_str = str(stmt).lower()
+        res = MagicMock()
+        if "team.status" in stmt_str and "team_member.status" in stmt_str:
+            res.all.return_value = []
+        else:
+            res.scalars.return_value.all.return_value = [999]
+        return res
+
+    mock_session.execute.side_effect = exec_mock
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_creator_user(current_user=revoked_user, session=mock_session)
+    assert exc_info.value.status_code == 403
+    assert "no longer active" in exc_info.value.detail or "Creator Portal access required" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_update_team_member_to_junior_facilitator_without_colleges_fails():
+    """Updating a member whose current colleges is None to Junior Facilitator without
+    providing colleges must fail with ValueError."""
+    mock_session = AsyncMock()
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    # Existing member was a Creator with colleges=None
+    existing_member = TeamMember(
+        id=20,
+        team_id=1,
+        user_id=902,
+        access_role="Creator",
+        colleges=None,
+        status="active",
+    )
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = existing_member
+    mock_session.execute.return_value = mock_res
+
+    update_payload = TeamMemberUpdate(
+        access_role="Junior Facilitator",
+        colleges=None,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await repo.update_team_member(team_id=1, member_id=20, member_data=update_payload)
+    assert "Assigned colleges are required" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_get_user_by_email_exact_match_priority():
+    """get_user_by_email checks exact match first, falling back to case-insensitive match with deterministic ordering."""
+    from src.repository.crud.user import UserCRUDRepository
+
+    mock_session = AsyncMock()
+    repo = UserCRUDRepository(async_session=mock_session)
+
+    exact_user = _make_user(903, email="User.Case@Barabari.org")
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = exact_user
+    mock_session.execute.return_value = mock_res
+
+    found = await repo.get_user_by_email(email="User.Case@Barabari.org")
+    assert found.id == 903
+    assert found.email == "User.Case@Barabari.org"
+
+
+@pytest.mark.asyncio
+async def test_job_profiles_v2_routes_require_creator_permission():
+    """get_recent_activity, get_job_profiles_summary, and get_job_profile_questions_v2
+    are protected by get_current_creator_user and reject plain team members."""
+    from src.api.routes.job_profiles_v2 import (
+        get_recent_activity,
+        get_job_profiles_summary,
+        get_job_profile_questions_v2,
+    )
+
+    team_member_user = _make_user(904, email="plain_tm@barabari.org", is_admin=False, is_super_admin=False)
+    team = Team(id=1, name="Program Team", status="active")
+    member = TeamMember(id=21, team_id=1, user_id=904, access_role="Team Member", status="active")
+
+    mock_session = AsyncMock()
+    mock_res = MagicMock()
+    mock_res.all.return_value = [(member, team)]
+    mock_session.execute.return_value = mock_res
+
+    from src.api.dependencies.admin import get_current_creator_user
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_creator_user(current_user=team_member_user, session=mock_session)
+    assert exc_info.value.status_code == 403
+
 
 
 

@@ -3,7 +3,7 @@ from fastapi import File, UploadFile
 from typing import List, Optional
 import logging
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import get_current_admin_user, get_current_creator_user
+from src.api.dependencies.admin import get_current_creator_user
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.job_profile import (
     JobProfileSummaryResponse,
@@ -63,7 +63,7 @@ router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles-v2"])
     summary="Get recent role-related activity",
 )
 async def get_recent_activity(
-    current_user=fastapi.Depends(get_current_admin_user),
+    current_user=fastapi.Depends(get_current_creator_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> List[JobProfileActivityResponse]:
     """
@@ -81,7 +81,7 @@ async def get_recent_activity(
     summary="Get summary counts for Job Profiles",
 )
 async def get_job_profiles_summary(
-    current_user=fastapi.Depends(get_current_admin_user),
+    current_user=fastapi.Depends(get_current_creator_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileSummaryResponse:
     """
@@ -728,7 +728,7 @@ async def get_generate_questions_status(
 )
 async def get_job_profile_questions_v2(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_admin_user),
+    current_user=fastapi.Depends(get_current_creator_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileQuestionsListResponse:
     # 1. Validate job_profile_id exists

@@ -214,10 +214,11 @@ def calculate_user_permissions(
 
     # Scoping colleges:
     # Junior Facilitators are strictly restricted to their assigned colleges.
-    # Creators, Senior Facilitators, and Team Members have unrestricted access (None).
+    # Being a generic Team Member elsewhere does not widen a Junior Facilitator's college access.
+    # Creators and Senior Facilitators (and pure Team Members) have unrestricted access (None).
     if is_placement_creator or is_program_creator_or_sr:
         colleges = None
-    elif is_junior_facilitator and not is_team_member:
+    elif is_junior_facilitator:
         colleges = junior_colleges if junior_colleges else []
     else:
         colleges = None
@@ -242,6 +243,35 @@ def calculate_user_permissions(
     }
 
 
+async def get_user_active_memberships(
+    user_id: int,
+    session,
+) -> list:
+    """Fetch active (TeamMember, Team) tuples for a user across active teams,
+    deterministically ordered by TeamMember.created_at asc, TeamMember.id asc.
+    """
+    if session is None or not user_id:
+        return []
+    from sqlalchemy import select
+    from src.models.db.team import Team
+    from src.models.db.team_member import TeamMember
+    try:
+        stmt = (
+            select(TeamMember, Team)
+            .join(Team, TeamMember.team_id == Team.id)
+            .where(
+                TeamMember.user_id == user_id,
+                TeamMember.status == "active",
+                Team.status == "active",
+            )
+            .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
+        )
+        res = await session.execute(stmt)
+        return extract_memberships_from_result(res)
+    except Exception:
+        return []
+
+
 async def get_current_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
     session = fastapi.Depends(get_async_session),
@@ -249,30 +279,25 @@ async def get_current_admin_user(
     """Require an authenticated user authorised for cross-student data.
     Allows:
     1. Global Admins and Super Admins.
-    2. Users with staff/creator/facilitator roles from token claims.
-    3. Active team members (staff/facilitators).
+    2. Active staff / team members verified from the database.
     """
     if is_admin_user(current_user):
         return current_user
 
-    role_from_token = (getattr(current_user, "_token_role", "") or getattr(current_user, "role", "") or "").strip().lower()
+    if session is not None:
+        memberships = await get_user_active_memberships(current_user.id, session)
+        if memberships:
+            return current_user
+        # When DB session exists but user has no active memberships, fail closed
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Administrator access required.",
+        )
+
+    # Fallback only when session is None (e.g. lightweight tests)
+    role_from_token = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
     if role_from_token in STAFF_ROLES:
         return current_user
-
-    if session is not None:
-        from sqlalchemy import select
-        from src.models.db.team_member import TeamMember
-        try:
-            stmt = select(TeamMember).where(
-                TeamMember.user_id == current_user.id,
-                TeamMember.status == "active",
-            )
-            res = await session.execute(stmt)
-            members = res.scalars().all()
-            if members:
-                return current_user
-        except Exception:
-            pass
 
     raise fastapi.HTTPException(
         status_code=fastapi.status.HTTP_403_FORBIDDEN,
@@ -292,52 +317,58 @@ async def get_current_creator_user(
         return current_user
 
     if session is not None:
-        from sqlalchemy import select
-        from src.models.db.team import Team
-        from src.models.db.team_member import TeamMember
-        try:
-            stmt = (
-                select(TeamMember, Team)
-                .join(Team, TeamMember.team_id == Team.id)
-                .where(
-                    TeamMember.user_id == current_user.id,
-                    TeamMember.status == "active",
-                    Team.status == "active",
+        memberships = await get_user_active_memberships(current_user.id, session)
+        if memberships:
+            perms = calculate_user_permissions(current_user, memberships)
+            if perms["can_create_roles"]:
+                return current_user
+            roles = {
+                normalize_role(
+                    getattr(
+                        item[0] if isinstance(item, (tuple, list)) else item,
+                        "access_role",
+                        "",
+                    )
                 )
-                .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
-            )
-            res = await session.execute(stmt)
-            memberships = extract_memberships_from_result(res)
-
-            if memberships:
-                perms = calculate_user_permissions(current_user, memberships)
-                if perms["can_create_roles"]:
-                    return current_user
-                roles = {
-                    normalize_role(
-                        getattr(
-                            item[0] if isinstance(item, (tuple, list)) else item,
-                            "access_role",
-                            "",
-                        )
-                    )
-                    for item in memberships
-                }
-                if roles & JUNIOR_ROLES:
+                for item in memberships
+            }
+            if roles & JUNIOR_ROLES:
+                raise fastapi.HTTPException(
+                    status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                    detail="Junior Facilitators do not have permission to access the Creator Portal or modify interview roles.",
+                )
+            if roles & TEAM_MEMBER_ROLES:
+                raise fastapi.HTTPException(
+                    status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                    detail="Team members have view-only access and do not have permission to access the Creator Portal or modify interview roles.",
+                )
+        else:
+            # Check if this user had team memberships that are no longer active (revoked / deleted)
+            from sqlalchemy import select
+            from src.models.db.team_member import TeamMember
+            try:
+                stmt_any = select(TeamMember.id).where(TeamMember.user_id == current_user.id).limit(1)
+                res_any = await session.execute(stmt_any)
+                has_records = False
+                if hasattr(res_any, "scalars") and callable(res_any.scalars):
+                    s_res = res_any.scalars().all()
+                    if isinstance(s_res, list) and s_res:
+                        has_records = True
+                elif hasattr(res_any, "all") and callable(res_any.all):
+                    a_res = res_any.all()
+                    if isinstance(a_res, list) and a_res:
+                        has_records = True
+                if has_records:
                     raise fastapi.HTTPException(
                         status_code=fastapi.status.HTTP_403_FORBIDDEN,
-                        detail="Junior Facilitators do not have permission to access the Creator Portal or modify interview roles.",
+                        detail="Creator Portal access required. Your team membership is no longer active.",
                     )
-                if roles & TEAM_MEMBER_ROLES:
-                    raise fastapi.HTTPException(
-                        status_code=fastapi.status.HTTP_403_FORBIDDEN,
-                        detail="Team members have view-only access and do not have permission to access the Creator Portal or modify interview roles.",
-                    )
-        except fastapi.HTTPException:
-            raise
-        except Exception:
-            pass
+            except fastapi.HTTPException:
+                raise
+            except Exception:
+                pass
 
+    # Fallback to token claims (for SSO users without team records)
     role_from_token = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
     if role_from_token in CREATOR_ROLES:
         return current_user
@@ -374,23 +405,7 @@ async def get_user_allowed_colleges(
     if session is None:
         return set()
 
-    from sqlalchemy import select
-    from src.models.db.team import Team
-    from src.models.db.team_member import TeamMember
-
-    stmt = (
-        select(TeamMember, Team)
-        .join(Team, TeamMember.team_id == Team.id)
-        .where(
-            TeamMember.user_id == user.id,
-            TeamMember.status == "active",
-            Team.status == "active",
-        )
-        .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
-    )
-    res = await session.execute(stmt)
-    memberships = extract_memberships_from_result(res)
-
+    memberships = await get_user_active_memberships(user.id, session)
     if not memberships:
         token_role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
         if token_role in UNRESTRICTED_COLLEGE_ROLES:
@@ -457,23 +472,7 @@ async def get_current_bulk_ats_user(
         return current_user
 
     if session is not None:
-        from sqlalchemy import select
-        from src.models.db.team import Team
-        from src.models.db.team_member import TeamMember
-
-        stmt = (
-            select(TeamMember, Team)
-            .join(Team, TeamMember.team_id == Team.id)
-            .where(
-                TeamMember.user_id == current_user.id,
-                TeamMember.status == "active",
-                Team.status == "active",
-            )
-            .order_by(TeamMember.created_at.asc(), TeamMember.id.asc())
-        )
-        res = await session.execute(stmt)
-        memberships = extract_memberships_from_result(res)
-
+        memberships = await get_user_active_memberships(current_user.id, session)
         if memberships:
             perms = calculate_user_permissions(current_user, memberships)
             if perms["can_access_ats"]:
