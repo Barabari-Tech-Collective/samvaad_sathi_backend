@@ -11,7 +11,7 @@ Covers:
 
 import datetime
 from typing import cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 import fastapi
 import pydantic
 import pytest
@@ -36,6 +36,7 @@ from src.models.schemas.teams_v2 import (
 )
 from src.repository.crud.team_v2 import TeamCRUDRepository
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
+from src.utilities.exceptions.password import PasswordDoesNotMatch
 
 
 def _make_user(
@@ -902,6 +903,43 @@ async def test_analytics_v2_idor_student_access_rejected():
             await verify_student_access(student_id=200, user=jf_user, session=mock_session)
         assert exc_info.value.status_code == 403
         assert "Access denied" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_verify_password_rejects_empty_hash_without_unknown_hash_error():
+    """Passwordless SSO accounts must raise PasswordDoesNotMatch rather than Passlib UnknownHashError."""
+    from src.repository.crud.user import UserCRUDRepository
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    # User with empty password hash (created via SSO)
+    user_without_pw = User(id=115, email="sso_user@barabari.org", password_hash="")
+    mock_result.scalar.return_value = user_without_pw
+    mock_session.execute.return_value = mock_result
+
+    repo = UserCRUDRepository(async_session=mock_session)
+    with pytest.raises(PasswordDoesNotMatch) as exc_info:
+        await repo.verify_password(email="sso_user@barabari.org", password="SomePassword123!")
+    assert "Central SSO" in str(exc_info.value) or "Password does not match" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_top_roles_rejects_unauthorized_college():
+    """get_dashboard_top_roles rejects college outside facilitator's allowed colleges."""
+    from src.api.routes.analytics_v2 import get_dashboard_top_roles
+
+    jf_user = _make_user(116, is_admin=False, is_super_admin=False)
+    mock_session = AsyncMock()
+
+    with patch("src.api.routes.analytics_v2.get_user_allowed_colleges", return_value={"Allowed College"}):
+        with pytest.raises(fastapi.HTTPException) as exc_info:
+            await get_dashboard_top_roles(
+                college="Unauthorized College",
+                current_user=jf_user,
+                session=mock_session,
+            )
+        assert exc_info.value.status_code == 403
+        assert "Unauthorized College" in exc_info.value.detail
 
 
 

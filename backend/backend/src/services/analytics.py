@@ -403,6 +403,7 @@ class AnalyticsService:
         difficulty: str | None = None,
         college: str | None = None,
         category: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
         # Change made: Added category parameter to get_role_segment_analytics and forwarded to _list_interviews_all.
         # Why it was made: Allows callers (like /roles/performance) to filter role segments by domain category.
@@ -413,6 +414,7 @@ class AnalyticsService:
             difficulty=difficulty,
             college=college,
             category=category,
+            allowed_colleges=allowed_colleges,
         )
         if not interviews:
             return []
@@ -737,8 +739,16 @@ class AnalyticsService:
         role: str | None = None,
         difficulty: str | None = None,
         college: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> dict[str, Any]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date, role=role, difficulty=difficulty, college=college)
+        interviews = await self._list_interviews_all(
+            start_date=start_date,
+            end_date=end_date,
+            role=role,
+            difficulty=difficulty,
+            college=college,
+            allowed_colleges=allowed_colleges,
+        )
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
 

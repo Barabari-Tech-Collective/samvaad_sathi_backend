@@ -500,8 +500,13 @@ async def get_dashboard_top_roles(
     college: str | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
-    ) -> DashboardTopListResponse:
-    del current_user
+) -> DashboardTopListResponse:
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if college:
+        await verify_college_access(current_user, college, session)
+    elif allowed_colleges is not None and len(allowed_colleges) == 1:
+        college = next(iter(allowed_colleges))
+
     service = AnalyticsService(session)
     items = await service.get_role_segment_analytics(
         start_date=start_date,
@@ -509,6 +514,7 @@ async def get_dashboard_top_roles(
         role=role,
         difficulty=difficulty.value if difficulty else None,
         college=college,
+        allowed_colleges=allowed_colleges,
     )
     
     normalized_items = _zero_fill_metric_nulls(items[:limit])
@@ -656,7 +662,12 @@ async def get_dashboard_score_distribution(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    del current_user
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    if college:
+        await verify_college_access(current_user, college, session)
+    elif allowed_colleges is not None and len(allowed_colleges) == 1:
+        college = next(iter(allowed_colleges))
+
     service = AnalyticsService(session)
     scoring = await service.get_scoring_analytics(
         start_date=start_date,
@@ -664,6 +675,7 @@ async def get_dashboard_score_distribution(
         role=role,
         difficulty=difficulty.value if difficulty else None,
         college=college,
+        allowed_colleges=allowed_colleges,
     )
     
     metric_map = {

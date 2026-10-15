@@ -45,6 +45,8 @@ class UserCRUDRepository(BaseCRUDRepository):
 
     async def verify_password(self, *, email: str, password: str) -> User:
         user = await self.get_user_by_email(email=email)
+        if not user.password_hash:
+            raise PasswordDoesNotMatch("This account is configured for Central SSO login.")
         if not pwd_generator.is_password_authenticated(hash_salt="", password=password, hashed_password=user.password_hash):
             raise PasswordDoesNotMatch("Password does not match!")
         return user
