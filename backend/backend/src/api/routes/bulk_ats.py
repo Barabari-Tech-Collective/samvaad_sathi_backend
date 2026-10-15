@@ -110,6 +110,24 @@ def _parse_skills(value: str) -> list[str]:
     return skills
 
 
+def _require_role_rubric(
+    *,
+    job_profile_id: int | None,
+    role_description: str,
+    required_skills: list[str],
+) -> None:
+    """Reject batches that cannot produce an evidence-based role-fit score."""
+    if job_profile_id is None and len(role_description) < 50 and not required_skills:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Add a job description of at least 50 characters or at least "
+                "one required skill so candidates can be evaluated against a "
+                "real role rubric"
+            ),
+        )
+
+
 async def _mark_queue_failure(
     repo: BulkATSCRUDRepository,
     *,
@@ -144,11 +162,21 @@ def _candidate_summary(c: BulkATSCandidate) -> dict:
 
 
 def _candidate_detail(c: BulkATSCandidate) -> dict:
+    parsed_resume = c.parsed_resume_json or {}
+    raw_skills = (
+        parsed_resume.get("skills", []) if isinstance(parsed_resume, dict) else []
+    )
+    extracted_skills = [
+        skill.strip()
+        for skill in raw_skills
+        if isinstance(skill, str) and skill.strip()
+    ]
     return {
         **_candidate_summary(c),
         "originalFilename": c.original_filename,
         "resumeUrl": c.resume_url,
         "errorMessage": c.error_message,
+        "extractedSkills": extracted_skills,
         "deterministicReport": c.deterministic_report,
         "jevReport": c.jev_report,
         "linkReport": c.link_report,
@@ -212,13 +240,19 @@ async def create_batch(
         raise HTTPException(status_code=400, detail="name and role_name are required")
     parsed_required_skills = _parse_skills(required_skills)
     parsed_preferred_skills = _parse_skills(preferred_skills)
+    normalized_role_description = role_description.strip()
+    _require_role_rubric(
+        job_profile_id=job_profile_id,
+        role_description=normalized_role_description,
+        required_skills=parsed_required_skills,
+    )
     if retention_days < 1 or retention_days > settings.BULK_ATS_MAX_RETENTION_DAYS:
         raise HTTPException(
             status_code=400,
             detail=f"retention_days must be between 1 and {settings.BULK_ATS_MAX_RETENTION_DAYS}",
         )
     jd_analysis = analyze_job_description(
-        role_description,
+        normalized_role_description,
         required_skills=parsed_required_skills,
         preferred_skills=parsed_preferred_skills,
     )
@@ -248,7 +282,7 @@ async def create_batch(
     batch = await repo.create_batch(
         name=name.strip(),
         role_name=role_name.strip(),
-        role_description=role_description.strip() or None,
+        role_description=normalized_role_description or None,
         evaluation_intent=normalized_intent or None,
         required_skills=parsed_required_skills or None,
         preferred_skills=parsed_preferred_skills or None,

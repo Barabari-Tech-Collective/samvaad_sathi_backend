@@ -12,6 +12,7 @@ from src.api.routes.bulk_ats import (
     _get_authorized_batch,
     _get_authorized_candidate,
     _parse_skills,
+    _require_role_rubric,
 )
 from src.config.manager import settings
 from src.main import backend_app
@@ -50,6 +51,27 @@ def test_parse_skills_deduplicates_and_accepts_newlines():
         "FastAPI",
         "PostgreSQL",
     ]
+
+
+def test_batch_requires_jd_or_required_skills_as_role_rubric():
+    with pytest.raises(HTTPException) as exc_info:
+        _require_role_rubric(
+            job_profile_id=None,
+            role_description="Data analyst",
+            required_skills=[],
+        )
+    assert exc_info.value.status_code == 400
+
+    _require_role_rubric(
+        job_profile_id=None,
+        role_description="",
+        required_skills=["Python"],
+    )
+    _require_role_rubric(
+        job_profile_id=None,
+        role_description="Analyze business data and build dashboards for stakeholders.",
+        required_skills=[],
+    )
 
 
 def test_jd_quality_flags_missing_context_and_discriminatory_proxies():
@@ -686,6 +708,59 @@ def test_optional_job_description_reports_role_context_quality():
         "evaluation_intent_too_brief",
         "minimal_role_context",
     ]
+
+
+def test_skills_without_job_rubric_are_extracted_but_not_scored():
+    scorer = pipeline._ats_engine.skills_scorer
+    report = scorer.score_skills(
+        resume_skills=["Python", "PyTorch", "Pandas"],
+        jd_skills=[],
+        raw_resume_text="Python PyTorch Pandas OpenCV",
+        raw_jd_text="",
+    )
+
+    assert report["scoreAvailable"] is False
+    assert report["totalScore"] == 0.0
+    assert set(report["skillsAnalysis"]["additionalSkills"]) >= {
+        "Python",
+        "PyTorch",
+        "Pandas",
+        "OpenCV",
+    }
+
+    scorecard = pipeline._ats_engine.calculator.calculate_final_ats_score(
+        link_report={"totalScore": 0},
+        skills_report=report,
+        education_report={"totalScore": 0},
+        experience_report={"totalScore": 0, "totalMonths": 0},
+        project_report={"totalScore": 0},
+    )
+    assert scorecard["scoreBreakdown"]["skillsMatch"] is None
+
+
+def test_data_and_ai_skills_are_normalized_for_role_matching():
+    report = pipeline._ats_engine.skills_scorer.score_skills(
+        resume_skills=[
+            "Python",
+            "MySQL",
+            "PyTorch",
+            "Scikit-learn",
+            "OpenCV",
+            "Pandas",
+        ],
+        jd_skills=["Python", "SQL", "Machine Learning", "Power BI"],
+    )
+
+    analysis = report["skillsAnalysis"]
+    assert analysis["strongSkills"] == ["Python"]
+    assert "MySQL" in analysis["relatedSkills"]
+    assert set(analysis["missingSkills"]) == {"Machine Learning", "Power BI"}
+    assert set(analysis["additionalSkills"]) >= {
+        "OpenCV",
+        "Pandas",
+        "PyTorch",
+        "Scikit-learn",
+    }
 
 
 def test_deepseek_payload_includes_intent_as_context_only():
