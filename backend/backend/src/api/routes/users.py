@@ -131,18 +131,25 @@ async def login_user(
 
     memberships = await get_user_active_memberships(user.id, session)
     first_item = memberships[0] if memberships else None
-    if isinstance(first_item, (tuple, list)):
-        member = first_item[0]
-        primary_team = first_item[1] if len(first_item) > 1 else None
-    else:
-        member = first_item
-        primary_team = getattr(member, "team", None) if member else None
+    member = None
+    primary_team = None
+    if first_item is not None:
+        if isinstance(first_item, (tuple, list)) or hasattr(first_item, "__getitem__"):
+            try:
+                member = first_item[0]
+                primary_team = first_item[1] if len(first_item) > 1 else None
+            except Exception:
+                member = first_item
+                primary_team = getattr(member, "team", None)
+        else:
+            member = first_item
+            primary_team = getattr(member, "team", None)
 
     perms = calculate_user_permissions(user, memberships)
-    access_role = member.access_role if member else None
+    access_role = getattr(member, "access_role", None) if member else None
     colleges = perms["colleges"]
-    domain = member.domain if member else None
-    purposes = member.purposes if member and isinstance(member.purposes, list) else None
+    domain = getattr(member, "domain", None) if member else None
+    purposes = getattr(member, "purposes", None) if member and isinstance(getattr(member, "purposes", None), list) else None
     is_admin_flag = is_admin_user(user)
     can_access_ats = perms["can_access_ats"]
     can_create_roles = perms["can_create_roles"]
@@ -183,7 +190,7 @@ async def login_user(
             can_access_ats=can_access_ats,
             can_edit=can_edit,
             is_view_only=is_view_only,
-            team_name=primary_team.name if primary_team else None,
+            team_name=getattr(primary_team, "name", None) if primary_team else None,
             can_use_bulk_ats=is_bulk_ats_user(user),
             degree=None,
             university=None,
@@ -288,18 +295,25 @@ async def get_me(
 
     memberships = await get_user_active_memberships(current_user.id, session)
     first_item = memberships[0] if memberships else None
-    if isinstance(first_item, (tuple, list)):
-        member = first_item[0]
-        primary_team = first_item[1] if len(first_item) > 1 else None
-    else:
-        member = first_item
-        primary_team = getattr(member, "team", None) if member else None
+    member = None
+    primary_team = None
+    if first_item is not None:
+        if isinstance(first_item, (tuple, list)) or hasattr(first_item, "__getitem__"):
+            try:
+                member = first_item[0]
+                primary_team = first_item[1] if len(first_item) > 1 else None
+            except Exception:
+                member = first_item
+                primary_team = getattr(member, "team", None)
+        else:
+            member = first_item
+            primary_team = getattr(member, "team", None)
 
     perms = calculate_user_permissions(current_user, memberships)
-    access_role = member.access_role if member else None
+    access_role = getattr(member, "access_role", None) if member else None
     colleges = perms["colleges"]
-    domain = member.domain if member else None
-    purposes = member.purposes if member and isinstance(member.purposes, list) else None
+    domain = getattr(member, "domain", None) if member else None
+    purposes = getattr(member, "purposes", None) if member and isinstance(getattr(member, "purposes", None), list) else None
     can_access_ats = perms["can_access_ats"]
     can_create_roles = perms["can_create_roles"]
     can_edit = perms["can_edit"]
@@ -341,7 +355,7 @@ async def get_me(
             can_access_ats=can_access_ats,
             can_edit=can_edit,
             is_view_only=is_view_only,
-            team_name=primary_team.name if primary_team else None,
+            team_name=getattr(primary_team, "name", None) if primary_team else None,
             can_use_bulk_ats=is_bulk_ats_user(current_user),
             degree=current_user.degree,
             university=current_user.university,
