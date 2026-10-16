@@ -46,27 +46,55 @@ def _super_admin_allow_listed_emails() -> set[str]:
 
 def is_super_admin_user(user: User) -> bool:
     """True if user has full system access, including team creation and deletion."""
-    if getattr(user, "is_super_admin", False) or getattr(user, "_token_is_super_admin", False):
-        return True
     email = (getattr(user, "email", "") or "").strip().lower()
+
+    # 1. Explicit super admin allowlist always grants super admin
     if bool(email) and email in _super_admin_allow_listed_emails():
         return True
-    token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().upper()
+
+    # 2. Standard admin allowlist (ADMIN_EMAILS) or designated standard admin email
+    # strictly limits privileges to standard admin, blocking token-claim elevation.
+    if bool(email) and (
+        email in _allow_listed_emails() or email == "admin@barabari.org"
+    ):
+        return False
+
+    # 3. Persistent database flag or token-derived attribute
+    if getattr(user, "is_super_admin", False) or getattr(
+        user, "_token_is_super_admin", False
+    ):
+        return True
+
+    # 4. Token / role claim
+    token_role = (
+        (getattr(user, "_token_role", "") or getattr(user, "role", "") or "")
+        .strip()
+        .upper()
+    )
     return token_role == "SUPER_ADMIN"
 
 
 def is_admin_user(user: User) -> bool:
     """True if user may read cross-student data. Super Admins inherit this privilege."""
-    if is_super_admin_user(user) or getattr(user, "is_admin", False) or getattr(user, "_token_is_admin", False):
+    if (
+        is_super_admin_user(user)
+        or getattr(user, "is_admin", False)
+        or getattr(user, "_token_is_admin", False)
+    ):
         return True
     email = (getattr(user, "email", "") or "").strip().lower()
     if bool(email) and email in _allow_listed_emails():
         return True
-    token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().upper()
+    token_role = (
+        (getattr(user, "_token_role", "") or getattr(user, "role", "") or "")
+        .strip()
+        .upper()
+    )
     return token_role in {"ADMIN", "SUPER_ADMIN"}
 
 
 from src.api.dependencies.session import get_async_session
+
 
 def normalize_role(role: str | None) -> str:
     """Normalize a role string by trimming, lowercasing, and replacing underscores with spaces."""
@@ -97,7 +125,15 @@ STAFF_ROLES = {
 }
 
 
-CREATOR_ROLES = {"lead", "team lead", "creator", "admin", "super admin", "sr facilitator", "senior facilitator"}
+CREATOR_ROLES = {
+    "lead",
+    "team lead",
+    "creator",
+    "admin",
+    "super admin",
+    "sr facilitator",
+    "senior facilitator",
+}
 JUNIOR_ROLES = {"jr facilitator", "junior facilitator"}
 TEAM_MEMBER_ROLES = {"team member", "member", "staff"}
 UNRESTRICTED_COLLEGE_ROLES = CREATOR_ROLES | TEAM_MEMBER_ROLES
@@ -122,7 +158,18 @@ def extract_memberships_from_result(res) -> list:
             a_res = res.all()
             if isinstance(a_res, list):
                 return [
-                    tuple(item) if (isinstance(item, Row) or (not isinstance(item, (tuple, list)) and hasattr(item, "__getitem__") and not hasattr(item, "access_role"))) else item
+                    (
+                        tuple(item)
+                        if (
+                            isinstance(item, Row)
+                            or (
+                                not isinstance(item, (tuple, list))
+                                and hasattr(item, "__getitem__")
+                                and not hasattr(item, "access_role")
+                            )
+                        )
+                        else item
+                    )
                     for item in a_res
                 ]
     except Exception:
@@ -197,13 +244,21 @@ def calculate_user_permissions(
                 is_program_creator_or_sr = True
         elif m_role in JUNIOR_ROLES:
             is_junior_facilitator = True
-            if member and getattr(member, "colleges", None) and isinstance(member.colleges, list):
-                junior_colleges.extend([c for c in member.colleges if isinstance(c, str) and c.strip()])
+            if (
+                member
+                and getattr(member, "colleges", None)
+                and isinstance(member.colleges, list)
+            ):
+                junior_colleges.extend(
+                    [c for c in member.colleges if isinstance(c, str) and c.strip()]
+                )
         elif m_role in TEAM_MEMBER_ROLES:
             is_team_member = True
 
     # Fallback to token claims / user.role
-    token_role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
+    token_role = normalize_role(
+        getattr(user, "_token_role", "") or getattr(user, "role", "")
+    )
     can_access_ats_token = token_role in _BULK_ATS_ROLES
 
     if not memberships:
@@ -235,7 +290,19 @@ def calculate_user_permissions(
         or (is_program_creator_or_sr and token_role in LEAD_ROLES)
         or token_role in LEAD_ROLES
         or any(
-            normalize_role(getattr(item[0] if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__") else item, "access_role", "")) in LEAD_ROLES
+            normalize_role(
+                getattr(
+                    (
+                        item[0]
+                        if isinstance(item, (tuple, list))
+                        or hasattr(item, "__getitem__")
+                        else item
+                    ),
+                    "access_role",
+                    "",
+                )
+            )
+            in LEAD_ROLES
             for item in memberships
         )
     )
@@ -262,6 +329,7 @@ async def get_user_active_memberships(
     from sqlalchemy import select
     from src.models.db.team import Team
     from src.models.db.team_member import TeamMember
+
     try:
         stmt = (
             select(TeamMember, Team)
@@ -281,7 +349,7 @@ async def get_user_active_memberships(
 
 async def get_current_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
-    session = fastapi.Depends(get_async_session),
+    session=fastapi.Depends(get_async_session),
 ) -> User:
     """Require an authenticated user authorised for cross-student data.
     Allows:
@@ -302,7 +370,9 @@ async def get_current_admin_user(
         )
 
     # Fallback only when session is None (e.g. lightweight tests)
-    role_from_token = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    role_from_token = normalize_role(
+        getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")
+    )
     if role_from_token in STAFF_ROLES:
         return current_user
 
@@ -314,7 +384,7 @@ async def get_current_admin_user(
 
 async def get_current_creator_user(
     current_user: User = fastapi.Depends(get_current_user),
-    session = fastapi.Depends(get_async_session),
+    session=fastapi.Depends(get_async_session),
 ) -> User:
     """Require user to have Creator Portal permissions.
     - Super Admins, Global Admins, Leads, Creators, and Sr Facilitators have full access.
@@ -332,7 +402,14 @@ async def get_current_creator_user(
             roles = {
                 normalize_role(
                     getattr(
-                        item[0] if (isinstance(item, (tuple, list)) or hasattr(item, "__getitem__")) else item,
+                        (
+                            item[0]
+                            if (
+                                isinstance(item, (tuple, list))
+                                or hasattr(item, "__getitem__")
+                            )
+                            else item
+                        ),
                         "access_role",
                         "",
                     )
@@ -353,8 +430,13 @@ async def get_current_creator_user(
             # Check if this user had team memberships that are no longer active (revoked / deleted)
             from sqlalchemy import select
             from src.models.db.team_member import TeamMember
+
             try:
-                stmt_any = select(TeamMember.id).where(TeamMember.user_id == current_user.id).limit(1)
+                stmt_any = (
+                    select(TeamMember.id)
+                    .where(TeamMember.user_id == current_user.id)
+                    .limit(1)
+                )
                 res_any = await session.execute(stmt_any)
                 has_records = False
                 if hasattr(res_any, "scalars") and callable(res_any.scalars):
@@ -376,7 +458,9 @@ async def get_current_creator_user(
                 pass
 
     # Fallback to token claims (for SSO users without team records)
-    role_from_token = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    role_from_token = normalize_role(
+        getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")
+    )
     if role_from_token in CREATOR_ROLES:
         return current_user
     if role_from_token in JUNIOR_ROLES:
@@ -414,7 +498,9 @@ async def get_user_allowed_colleges(
 
     memberships = await get_user_active_memberships(user.id, session)
     if not memberships:
-        token_role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
+        token_role = normalize_role(
+            getattr(user, "_token_role", "") or getattr(user, "role", "")
+        )
         if token_role in UNRESTRICTED_COLLEGE_ROLES:
             return None
         return set()
@@ -446,7 +532,14 @@ async def verify_college_access(
         )
 
 
-_BULK_ATS_ROLES = {"recruiter", "placement staff", "placement_staff", "admin", "super admin", "super_admin"}
+_BULK_ATS_ROLES = {
+    "recruiter",
+    "placement staff",
+    "placement_staff",
+    "admin",
+    "super admin",
+    "super_admin",
+}
 
 
 def is_bulk_ats_user(user: User) -> bool:
@@ -465,7 +558,7 @@ def is_bulk_ats_user(user: User) -> bool:
 
 async def get_current_bulk_ats_user(
     current_user: User = fastapi.Depends(get_current_user),
-    session = fastapi.Depends(get_async_session),
+    session=fastapi.Depends(get_async_session),
 ) -> User:
     """Require an authenticated recruiter/placement_staff/admin user or
     a Creator/Lead in the Placement or Partnerships team.
@@ -489,6 +582,8 @@ async def get_current_bulk_ats_user(
         status_code=fastapi.status.HTTP_403_FORBIDDEN,
         detail="Bulk ATS access is restricted to Placement/Partnership team creators, recruiters, and administrators. Regular team members do not have access.",
     )
+
+
 async def get_current_super_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
 ) -> User:
