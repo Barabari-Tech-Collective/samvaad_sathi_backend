@@ -1357,6 +1357,164 @@ async def test_job_profiles_v2_routes_require_creator_permission():
     assert exc_info.value.status_code == 403
 
 
+@pytest.mark.asyncio
+async def test_update_member_route_catches_value_error_as_400():
+    """update_member route must catch ValueError and return clean 400 instead of 500."""
+    from src.api.routes.teams_v2 import update_member
+    mock_repo = AsyncMock()
+    mock_repo.async_session = AsyncMock()
+    admin_user = _make_user(1, email="admin@barabari.org", is_super_admin=True)
+
+    mock_repo.update_team_member.side_effect = ValueError(
+        "Assigned colleges are required when changing role to Junior Facilitator."
+    )
+
+    update_payload = TeamMemberUpdate(access_role="Junior Facilitator")
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await update_member(
+            team_id=1,
+            member_id=20,
+            member_data=update_payload,
+            current_user=admin_user,
+            team_repo=mock_repo,
+        )
+    assert exc_info.value.status_code == 400
+    assert "Assigned colleges are required" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_add_team_member_as_junior_facilitator_without_colleges_fails():
+    """Directly creating a Junior Facilitator without colleges must fail with ValueError."""
+    mock_session = AsyncMock()
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    team = Team(id=1, name="Program Team", status="active")
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = team
+    mock_session.execute.return_value = mock_res
+
+    # 1. colleges=None
+    member_data = TeamMemberCreate(
+        name="New JF",
+        email="new_jf@barabari.org",
+        access_role="Junior Facilitator",
+        colleges=None,
+    )
+    with pytest.raises(ValueError) as exc_info:
+        await repo.add_team_member(team_id=1, member_data=member_data)
+    assert "Assigned colleges are required" in str(exc_info.value)
+
+    # 2. colleges=[] (empty list)
+    member_data_empty = TeamMemberCreate(
+        name="New JF Empty",
+        email="new_jf_empty@barabari.org",
+        access_role="Junior Facilitator",
+        colleges=[],
+    )
+    with pytest.raises(ValueError) as exc_info:
+        await repo.add_team_member(team_id=1, member_data=member_data_empty)
+    assert "Assigned colleges are required" in str(exc_info.value)
+
+    # 3. colleges with only whitespace strings
+    member_data_ws = TeamMemberCreate(
+        name="New JF Whitespace",
+        email="new_jf_ws@barabari.org",
+        access_role="Junior Facilitator",
+        colleges=["   ", ""],
+    )
+    with pytest.raises(ValueError) as exc_info:
+        await repo.add_team_member(team_id=1, member_data=member_data_ws)
+    assert "Assigned colleges are required" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_add_team_member_as_junior_facilitator_with_valid_colleges_succeeds():
+    """Creating a Junior Facilitator with valid colleges succeeds and assigns sanitized colleges."""
+    mock_session = AsyncMock()
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    team = Team(id=1, name="Program Team", status="active")
+
+    def exec_mock(stmt):
+        res = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "from \"user\"" in stmt_str or "user.email" in stmt_str:
+            res.scalar_one_or_none.return_value = None
+        elif "from team_member" in stmt_str:
+            res.scalar_one_or_none.return_value = None
+        else:
+            res.scalar_one_or_none.return_value = team
+        return res
+
+    mock_session.execute.side_effect = exec_mock
+
+    member_data = TeamMemberCreate(
+        name="Valid JF",
+        email="valid_jf@barabari.org",
+        access_role="Junior Facilitator",
+        colleges=["  BITS Pilani  ", "IIT Delhi"],
+    )
+    res = await repo.add_team_member(team_id=1, member_data=member_data)
+    assert res["access_role"] == "Junior Facilitator"
+    assert res["colleges"] == ["BITS Pilani", "IIT Delhi"]
+
+
+@pytest.mark.asyncio
+async def test_update_team_member_to_junior_facilitator_with_empty_colleges_list_fails():
+    """Updating a member to Junior Facilitator with an empty or whitespace-only list fails with ValueError."""
+    mock_session = AsyncMock()
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    existing_member = TeamMember(
+        id=20,
+        team_id=1,
+        user_id=902,
+        access_role="Creator",
+        colleges=None,
+        status="active",
+    )
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = existing_member
+    mock_session.execute.return_value = mock_res
+
+    update_payload = TeamMemberUpdate(
+        access_role="Junior Facilitator",
+        colleges=["  ", ""],
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await repo.update_team_member(team_id=1, member_id=20, member_data=update_payload)
+    assert "Assigned colleges are required" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_update_existing_junior_facilitator_clearing_colleges_fails():
+    """Attempting to clear colleges on an existing Junior Facilitator fails with ValueError."""
+    mock_session = AsyncMock()
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    existing_jf = TeamMember(
+        id=22,
+        team_id=1,
+        user_id=905,
+        access_role="Junior Facilitator",
+        colleges=["BITS Pilani"],
+        status="active",
+    )
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = existing_jf
+    mock_session.execute.return_value = mock_res
+
+    update_payload = TeamMemberUpdate(
+        colleges=[],
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await repo.update_team_member(team_id=1, member_id=22, member_data=update_payload)
+    assert "Assigned colleges are required" in str(exc_info.value)
+
+
+
 
 
 

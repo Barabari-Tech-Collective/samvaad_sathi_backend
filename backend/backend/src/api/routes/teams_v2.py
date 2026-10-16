@@ -250,6 +250,8 @@ async def update_member(
         if not updated_member:
             raise fastapi.HTTPException(status_code=404, detail="Member not found")
         return TeamMemberResponse(**updated_member)
+    except ValueError as e:
+        raise fastapi.HTTPException(status_code=400, detail=str(e))
     except IntegrityError as e:
         error_msg = str(e.orig) if hasattr(e, "orig") else str(e)
         if "unique constraint" in error_msg.lower() or "duplicate key" in error_msg.lower():
