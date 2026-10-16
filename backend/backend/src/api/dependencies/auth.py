@@ -95,8 +95,11 @@ async def get_current_user(
         setattr(user, "_token_role", raw_role)
 
         if norm_role == "SUPER ADMIN":
-            user_email = (getattr(user, "email", "") or "").strip().lower()
-            if user_email != "admin@barabari.org":
+            # Only set _token_is_super_admin if the user is not an explicit standard admin in DB
+            if not (
+                getattr(user, "is_admin", False)
+                and not getattr(user, "is_super_admin", False)
+            ):
                 setattr(user, "_token_is_super_admin", True)
             setattr(user, "_token_is_admin", True)
         elif norm_role == "ADMIN":

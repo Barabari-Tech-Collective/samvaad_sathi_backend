@@ -109,6 +109,31 @@ async def test_get_current_super_admin_user_allows_super_admin():
     assert await get_current_super_admin_user(current_user=admin) is admin
 
 
+def test_super_admin_in_db_not_locked_out_if_in_admin_emails(monkeypatch):
+    """A DB super admin who is also in ADMIN_EMAILS must NOT be demoted."""
+    monkeypatch.setattr(settings, "SUPER_ADMIN_EMAILS", "")
+    monkeypatch.setattr(
+        settings, "ADMIN_EMAILS", "lead@barabari.org, admin@barabari.org"
+    )
+    super_user = _make_user(
+        1, email="lead@barabari.org", is_super_admin=True, is_admin=True
+    )
+    assert is_super_admin_user(super_user) is True
+
+
+def test_standard_admin_in_db_denied_super_admin_even_with_token_role(monkeypatch):
+    """Any standard admin (is_admin=True, is_super_admin=False) cannot be elevated by token claims."""
+    monkeypatch.setattr(settings, "SUPER_ADMIN_EMAILS", "")
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", "")
+    standard_admin = _make_user(
+        2, email="coord@barabari.org", is_admin=True, is_super_admin=False
+    )
+    setattr(standard_admin, "_token_role", "SUPER_ADMIN")
+    setattr(standard_admin, "_token_is_super_admin", True)
+    assert is_admin_user(standard_admin) is True
+    assert is_super_admin_user(standard_admin) is False
+
+
 def test_admin_barabari_is_standard_admin_and_denied_super_admin(monkeypatch):
     """admin@barabari.org must strictly have Admin access and be denied Super Admin even with token claims."""
     monkeypatch.setattr(settings, "SUPER_ADMIN_EMAILS", "Superadmin@barabari.org")

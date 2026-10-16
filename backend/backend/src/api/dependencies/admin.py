@@ -44,34 +44,51 @@ def _super_admin_allow_listed_emails() -> set[str]:
     return {entry.strip().lower() for entry in raw.split(",") if entry.strip()}
 
 
+def normalize_role(role: str | None) -> str:
+    """Normalize a role string by trimming, lowercasing, and replacing underscores with spaces."""
+    if not role:
+        return ""
+    return str(role).strip().replace("_", " ").lower()
+
+
 def is_super_admin_user(user: User) -> bool:
-    """True if user has full system access, including team creation and deletion."""
+    """True if user has full system access, including team creation and deletion.
+
+    Authority hierarchy:
+      1. Explicit SUPER_ADMIN_EMAILS env allowlist (fail-safe / break-glass).
+      2. Persistent database flag: user.is_super_admin == True.
+      3. Negative guard: If the user is explicitly a standard admin (user.is_admin is True
+         or listed in ADMIN_EMAILS), they MUST NOT be elevated to Super Admin via token claims.
+      4. Fallback for non-persisted / SSO mock identities: only allow token claim if not
+         already designated as a standard admin.
+    """
     email = (getattr(user, "email", "") or "").strip().lower()
 
-    # 1. Explicit super admin allowlist always grants super admin
+    # 1. Explicit super admin allowlist (break-glass / env override)
     if bool(email) and email in _super_admin_allow_listed_emails():
         return True
 
-    # 2. Standard admin allowlist (ADMIN_EMAILS) or designated standard admin email
-    # strictly limits privileges to standard admin, blocking token-claim elevation.
-    if bool(email) and (
-        email in _allow_listed_emails() or email == "admin@barabari.org"
-    ):
-        return False
-
-    # 3. Persistent database flag or token-derived attribute
-    if getattr(user, "is_super_admin", False) or getattr(
-        user, "_token_is_super_admin", False
-    ):
+    # 2. Database persistent flag is authoritative for Super Admins
+    if getattr(user, "is_super_admin", False):
         return True
 
-    # 4. Token / role claim
-    token_role = (
-        (getattr(user, "_token_role", "") or getattr(user, "role", "") or "")
-        .strip()
-        .upper()
+    # 3. Block token elevation for confirmed standard admins:
+    # If the user is explicitly a regular admin in DB or in ADMIN_EMAILS,
+    # incoming token claims must NEVER elevate them to Super Admin.
+    is_standard_admin = getattr(user, "is_admin", False) or (
+        bool(email) and email in _allow_listed_emails()
     )
-    return token_role == "SUPER_ADMIN"
+    if is_standard_admin:
+        return False
+
+    # 4. Token-derived attribute or claim (only for identities without DB records / test mocks)
+    if getattr(user, "_token_is_super_admin", False):
+        return True
+
+    token_role = normalize_role(
+        getattr(user, "_token_role", "") or getattr(user, "role", "")
+    )
+    return token_role in {"super admin", "super_admin"}
 
 
 def is_admin_user(user: User) -> bool:
@@ -85,23 +102,13 @@ def is_admin_user(user: User) -> bool:
     email = (getattr(user, "email", "") or "").strip().lower()
     if bool(email) and email in _allow_listed_emails():
         return True
-    token_role = (
-        (getattr(user, "_token_role", "") or getattr(user, "role", "") or "")
-        .strip()
-        .upper()
+    token_role = normalize_role(
+        getattr(user, "_token_role", "") or getattr(user, "role", "")
     )
-    return token_role in {"ADMIN", "SUPER_ADMIN"}
+    return token_role in {"admin", "super admin", "super_admin"}
 
 
 from src.api.dependencies.session import get_async_session
-
-
-def normalize_role(role: str | None) -> str:
-    """Normalize a role string by trimming, lowercasing, and replacing underscores with spaces."""
-    if not role:
-        return ""
-    return str(role).strip().replace("_", " ").lower()
-
 
 STAFF_ROLES = {
     "admin",
