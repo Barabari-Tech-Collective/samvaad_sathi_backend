@@ -10,6 +10,7 @@ from src.models.db.user import User
 from src.models.schemas.teams_v2 import TeamCreate, TeamMemberCreate, TeamMemberUpdate
 from src.securities.hashing.password import pwd_generator
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
+from src.api.dependencies.admin import is_admin_user, is_super_admin_user
 
 
 class TeamDeleteStatus(str, enum.Enum):
@@ -171,9 +172,18 @@ class TeamCRUDRepository(BaseCRUDRepository):
         stmt = select(User).where(func.lower(User.email) == email_clean)
         result = await self.async_session.execute(stmt)
         user = result.scalar_one_or_none()
-        
+
+        # 3. Check existing membership BEFORE any mutations (prevent duplicate rows / session pollution)
+        existing_member = None
+        if user:
+            mem_stmt = select(TeamMember).where(TeamMember.team_id == team_id, TeamMember.user_id == user.id)
+            existing_member = (await self.async_session.execute(mem_stmt)).scalar_one_or_none()
+            if existing_member and existing_member.status == "active":
+                raise EntityAlreadyExists("User is already an active member of this team.")
+
+        # 4. Handle user creation or credential initialization (never overwrite established credentials)
         if not user:
-            if member_data.password:
+            if member_data.password and member_data.password.strip():
                 hashed_pw = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
             else:
                 # Password optional: accounts utilizing Central SSO authentication do not require a local password
@@ -191,23 +201,18 @@ class TeamCRUDRepository(BaseCRUDRepository):
             self.async_session.add(user)
             await self.async_session.flush()
         else:
-            # Security Note: Do not mutate global user.role with team-scoped access_role!
-            # Role authorization is evaluated dynamically from active TeamMember records.
-
+            # Security Note: Never overwrite established passwords of existing users when adding them to a team!
+            # Only initialize credentials if the user has an empty/uninitialized password (e.g., from SSO)
+            # and is not an administrative account.
             if member_data.password and member_data.password.strip():
-                # Allow Admin/Team Lead to set/reset credentials for team members so the credentials
-                # they configured in the dashboard actually work for login (protect super_admin accounts).
-                if not getattr(user, "is_super_admin", False):
+                is_uninitialized = not user.password_hash or user.password_hash.strip() == ""
+                if is_uninitialized and not (is_admin_user(user) or is_super_admin_user(user)):
                     user.password_hash = pwd_generator.generate_hashed_password(
                         hash_salt="", new_password=member_data.password.strip()
                     )
 
-        # 3. Check existing membership (prevent duplicate rows / reactivate soft-deleted)
-        mem_stmt = select(TeamMember).where(TeamMember.team_id == team_id, TeamMember.user_id == user.id)
-        existing_member = (await self.async_session.execute(mem_stmt)).scalar_one_or_none()
+        # 5. Create or reactivate TeamMember record
         if existing_member:
-            if existing_member.status == "active":
-                raise EntityAlreadyExists("User is already an active member of this team.")
             # Reactivate soft-deleted member
             existing_member.status = "active"
             existing_member.removed_date = None
@@ -281,7 +286,13 @@ class TeamCRUDRepository(BaseCRUDRepository):
         await self.async_session.commit()
         return True
 
-    async def update_team_member(self, team_id: int, member_id: int, member_data: TeamMemberUpdate) -> dict | None:
+    async def update_team_member(
+        self,
+        team_id: int,
+        member_id: int,
+        member_data: TeamMemberUpdate,
+        caller_user: User | None = None,
+    ) -> dict | None:
         stmt = select(TeamMember).where(TeamMember.id == member_id, TeamMember.team_id == team_id)
         result = await self.async_session.execute(stmt)
         member = result.scalar_one_or_none()
@@ -330,10 +341,17 @@ class TeamCRUDRepository(BaseCRUDRepository):
             if member_data.name:
                 user.name = member_data.name
             if member_data.password and member_data.password.strip():
-                if not getattr(user, "is_super_admin", False):
-                    user.password_hash = pwd_generator.generate_hashed_password(
-                        hash_salt="", new_password=member_data.password.strip()
-                    )
+                # Permission check: resetting credentials via team endpoints requires administrator privileges
+                if caller_user is not None and not is_admin_user(caller_user):
+                    raise ValueError("Administrator access required to reset member credentials.")
+
+                # Account protection: administrative accounts can never be reset via team member settings
+                if is_admin_user(user) or is_super_admin_user(user):
+                    raise ValueError("Cannot reset credentials for administrative accounts via team member settings.")
+
+                user.password_hash = pwd_generator.generate_hashed_password(
+                    hash_salt="", new_password=member_data.password.strip()
+                )
             
         await self.async_session.commit()
         await self.async_session.refresh(member)

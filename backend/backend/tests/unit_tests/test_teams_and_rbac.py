@@ -37,6 +37,7 @@ from src.models.schemas.teams_v2 import (
 from src.repository.crud.team_v2 import TeamCRUDRepository
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
 from src.utilities.exceptions.password import PasswordDoesNotMatch
+from src.securities.hashing.password import pwd_generator
 
 
 def _make_user(
@@ -220,6 +221,38 @@ def test_team_member_update_allows_partial_fields():
     assert update.password is None
 
 
+def test_team_member_password_length_validation():
+    """CWE-521: TeamMemberCreate and TeamMemberUpdate must enforce min 8 and max 128 chars."""
+    # Under min length (< 8)
+    with pytest.raises(pydantic.ValidationError):
+        TeamMemberCreate(name="Test", email="test@test.com", access_role="member", password="short")
+
+    with pytest.raises(pydantic.ValidationError):
+        TeamMemberUpdate(password="1234567")
+
+    # Over max length (> 128)
+    long_pw = "a" * 129
+    with pytest.raises(pydantic.ValidationError):
+        TeamMemberCreate(name="Test", email="test@test.com", access_role="member", password=long_pw)
+
+    with pytest.raises(pydantic.ValidationError):
+        TeamMemberUpdate(password=long_pw)
+
+    # Valid lengths (8 and 128)
+    valid_create = TeamMemberCreate(name="Test", email="test@test.com", access_role="member", password="a" * 8)
+    assert valid_create.password == "a" * 8
+
+    valid_update = TeamMemberUpdate(password="a" * 128)
+    assert valid_update.password == "a" * 128
+
+    # None is allowed
+    none_create = TeamMemberCreate(name="Test", email="test@test.com", access_role="member", password=None)
+    assert none_create.password is None
+
+    none_update = TeamMemberUpdate(password=None)
+    assert none_update.password is None
+
+
 # --- Router Security & Permission Wiring -------------------------------------
 
 
@@ -269,12 +302,16 @@ async def test_add_team_member_rejects_missing_team():
 
 @pytest.mark.asyncio
 async def test_add_team_member_does_not_overwrite_existing_user_password():
-    """Security: Never silently change credentials of an existing super admin account."""
+    """Security: Never silently change credentials of an existing account (standard admin or regular user)."""
     mock_session = AsyncMock()
     # Team exists
     team = Team(id=1, name="Core", status="active")
-    # Existing super admin user with an established password
-    existing_user = User(id=10, email="admin@barabari.org", password_hash="original_secret_hash", is_super_admin=True)
+    # Existing standard admin user (is_super_admin=False, is_admin=True) with an established password
+    existing_admin = User(id=10, email="admin@barabari.org", password_hash="original_secret_hash", is_super_admin=False, is_admin=True)
+    # Existing regular user with an established password
+    existing_student = User(id=11, email="student@barabari.org", password_hash="student_secret_hash", is_super_admin=False, is_admin=False)
+
+    current_lookup_user = existing_admin
 
     def execute_mock(stmt):
         result = MagicMock()
@@ -284,27 +321,33 @@ async def test_add_team_member_does_not_overwrite_existing_user_password():
         elif "from team" in stmt_str or "team.id ==" in stmt_str:
             result.scalar_one_or_none.return_value = team
         elif "from \"user\"" in stmt_str or "user.email" in stmt_str:
-            result.scalar_one_or_none.return_value = existing_user
+            result.scalar_one_or_none.return_value = current_lookup_user
         else:
             result.scalar_one_or_none.return_value = None
         return result
 
     mock_session.execute.side_effect = execute_mock
-
     repo = TeamCRUDRepository(async_session=mock_session)
-    member_data = TeamMemberCreate(name="Admin", email="admin@barabari.org", password="hacker_password", access_role="lead")
-    await repo.add_team_member(team_id=1, member_data=member_data)
 
-    # Assert super admin's password hash was NOT mutated
-    assert existing_user.password_hash == "original_secret_hash"
+    # 1. Attempt to overwrite admin credentials by adding admin to team
+    member_data_admin = TeamMemberCreate(name="Admin", email="admin@barabari.org", password="hacker_password_123", access_role="lead")
+    await repo.add_team_member(team_id=1, member_data=member_data_admin)
+    assert existing_admin.password_hash == "original_secret_hash"
+
+    # 2. Attempt to overwrite regular user credentials by adding user to team
+    current_lookup_user = existing_student
+    member_data_student = TeamMemberCreate(name="Student", email="student@barabari.org", password="hacker_password_456", access_role="member")
+    await repo.add_team_member(team_id=1, member_data=member_data_student)
+    assert existing_student.password_hash == "student_secret_hash"
 
 
 @pytest.mark.asyncio
-async def test_add_team_member_updates_password_for_regular_member():
-    """Allow Admin/Team Lead to set/reset credentials for team members so login works with configured credentials."""
+async def test_add_team_member_initializes_password_for_uninitialized_user():
+    """Allow initializing credentials only if an existing user has an empty/uninitialized password (e.g. from SSO)."""
     mock_session = AsyncMock()
     team = Team(id=1, name="Core", status="active")
-    existing_member_user = User(id=20, email="staff@barabari.org", password_hash="old_pw_hash", is_super_admin=False)
+    # Existing user with uninitialized (empty) password
+    existing_sso_user = User(id=20, email="staff@barabari.org", password_hash="", is_super_admin=False, is_admin=False)
 
     def execute_mock(stmt):
         result = MagicMock()
@@ -314,7 +357,7 @@ async def test_add_team_member_updates_password_for_regular_member():
         elif "from team" in stmt_str or "team.id ==" in stmt_str:
             result.scalar_one_or_none.return_value = team
         elif "from \"user\"" in stmt_str or "user.email" in stmt_str:
-            result.scalar_one_or_none.return_value = existing_member_user
+            result.scalar_one_or_none.return_value = existing_sso_user
         else:
             result.scalar_one_or_none.return_value = None
         return result
@@ -325,17 +368,17 @@ async def test_add_team_member_updates_password_for_regular_member():
     member_data = TeamMemberCreate(name="Staff", email="staff@barabari.org", password="new_assigned_pw", access_role="lead")
     await repo.add_team_member(team_id=1, member_data=member_data)
 
-    # Assert regular user's password hash was updated
-    assert existing_member_user.password_hash != "old_pw_hash"
-    assert existing_member_user.password_hash != ""
+    # Assert uninitialized user's password hash was properly initialized
+    assert existing_sso_user.password_hash != ""
+    assert pwd_generator.is_password_authenticated(hash_salt="", password="new_assigned_pw", hashed_password=existing_sso_user.password_hash)
 
 
 @pytest.mark.asyncio
-async def test_add_team_member_rejects_duplicate_active_membership():
-    """Integrity: Prevent duplicate active membership in the same team."""
+async def test_add_team_member_rejects_duplicate_active_membership_before_mutation():
+    """Integrity: Prevent duplicate active membership in the same team and ensure no state mutation occurs."""
     mock_session = AsyncMock()
     team = Team(id=1, name="Core", status="active")
-    user = User(id=10, email="member@barabari.org", password_hash="hash")
+    user = User(id=10, email="member@barabari.org", password_hash="original_hash")
     existing_active_member = TeamMember(id=5, team_id=1, user_id=10, status="active", access_role="member")
 
     def execute_mock(stmt):
@@ -354,9 +397,12 @@ async def test_add_team_member_rejects_duplicate_active_membership():
     mock_session.execute.side_effect = execute_mock
 
     repo = TeamCRUDRepository(async_session=mock_session)
-    member_data = TeamMemberCreate(name="Member", email="member@barabari.org", access_role="member")
+    member_data = TeamMemberCreate(name="Member", email="member@barabari.org", password="some_new_password", access_role="member")
     with pytest.raises(EntityAlreadyExists):
         await repo.add_team_member(team_id=1, member_data=member_data)
+
+    # Verify user's password hash was NOT mutated before validation raised
+    assert user.password_hash == "original_hash"
 
 
 @pytest.mark.asyncio
@@ -395,6 +441,94 @@ async def test_update_team_member_updates_metadata_safely():
 
 
 @pytest.mark.asyncio
+async def test_update_team_member_allows_admin_to_reset_regular_member_password():
+    """Administrator caller can reset password for regular team members."""
+    mock_session = AsyncMock()
+    member = TeamMember(id=5, team_id=1, user_id=10, status="active", access_role="member")
+    target_user = User(id=10, email="target@barabari.org", password_hash="old_pw_hash", name="Target User", is_admin=False, is_super_admin=False)
+    admin_caller = _make_user(1, email="admin@barabari.org", is_admin=True, is_super_admin=False)
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = member
+        elif "from \"user\"" in stmt_str or "user.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = target_user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    update_data = TeamMemberUpdate(password="new_secure_password_123")
+    res = await repo.update_team_member(team_id=1, member_id=5, member_data=update_data, caller_user=admin_caller)
+
+    assert res is not None
+    assert target_user.password_hash != "old_pw_hash"
+    assert pwd_generator.is_password_authenticated(hash_salt="", password="new_secure_password_123", hashed_password=target_user.password_hash)
+
+
+@pytest.mark.asyncio
+async def test_update_team_member_rejects_non_admin_caller_password_reset():
+    """Team Lead or non-admin caller cannot reset passwords via team update."""
+    mock_session = AsyncMock()
+    member = TeamMember(id=5, team_id=1, user_id=10, status="active", access_role="member")
+    target_user = User(id=10, email="target@barabari.org", password_hash="old_pw_hash", is_admin=False, is_super_admin=False)
+    lead_caller = _make_user(2, email="lead@barabari.org", is_admin=False, is_super_admin=False)
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = member
+        elif "from \"user\"" in stmt_str or "user.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = target_user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    update_data = TeamMemberUpdate(password="attacker_password_123")
+    with pytest.raises(ValueError, match="Administrator access required to reset member credentials"):
+        await repo.update_team_member(team_id=1, member_id=5, member_data=update_data, caller_user=lead_caller)
+
+    assert target_user.password_hash == "old_pw_hash"
+
+
+@pytest.mark.asyncio
+async def test_update_team_member_rejects_admin_target_password_reset():
+    """Cannot reset credentials for administrative accounts (is_admin=True or is_super_admin=True) via team endpoints."""
+    mock_session = AsyncMock()
+    member = TeamMember(id=5, team_id=1, user_id=10, status="active", access_role="lead")
+    target_admin = User(id=10, email="admin@barabari.org", password_hash="admin_original_hash", is_admin=True, is_super_admin=False)
+    admin_caller = _make_user(1, email="superadmin@barabari.org", is_admin=True, is_super_admin=True)
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = member
+        elif "from \"user\"" in stmt_str or "user.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = target_admin
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    update_data = TeamMemberUpdate(password="new_admin_password_123")
+    with pytest.raises(ValueError, match="Cannot reset credentials for administrative accounts"):
+        await repo.update_team_member(team_id=1, member_id=5, member_data=update_data, caller_user=admin_caller)
+
+    assert target_admin.password_hash == "admin_original_hash"
+
+
+@pytest.mark.asyncio
 async def test_get_all_teams_forces_active_status_for_regular_users():
     """Query param status bypass guard: regular users querying status=deleted are forced to active."""
     from src.api.routes.teams_v2 import get_all_teams
@@ -412,7 +546,7 @@ async def test_get_all_teams_allows_deleted_status_for_super_admin():
     from src.api.routes.teams_v2 import get_all_teams
     mock_repo = AsyncMock()
     mock_repo.get_all_teams.return_value = []
-    super_admin = _make_user(1, email="admin@barabari.org", is_super_admin=True)
+    super_admin = _make_user(1, email="superadmin@barabari.org", is_super_admin=True)
 
     await get_all_teams(status="deleted", current_user=super_admin, team_repo=mock_repo)
     mock_repo.get_all_teams.assert_called_once_with(status="deleted")
@@ -1394,7 +1528,7 @@ async def test_update_member_route_catches_value_error_as_400():
     from src.api.routes.teams_v2 import update_member
     mock_repo = AsyncMock()
     mock_repo.async_session = AsyncMock()
-    admin_user = _make_user(1, email="admin@barabari.org", is_super_admin=True)
+    admin_user = _make_user(1, email="admin@barabari.org", is_super_admin=False, is_admin=True)
 
     mock_repo.update_team_member.side_effect = ValueError(
         "Assigned colleges are required when changing role to Junior Facilitator."

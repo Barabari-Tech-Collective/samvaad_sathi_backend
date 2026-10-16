@@ -17,10 +17,10 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # Ensure admin@barabari.org is regular admin (is_super_admin=False),
+    # Ensure admin@barabari.org is regular admin (is_super_admin=False, is_admin=True),
     # preserving super admin privileges exclusively for Superadmin@barabari.org.
-    op.execute("UPDATE \"user\" SET is_super_admin = FALSE WHERE LOWER(email) = 'admin@barabari.org'")
+    op.execute("UPDATE \"user\" SET is_super_admin = FALSE, is_admin = TRUE WHERE LOWER(email) = 'admin@barabari.org'")
 
 
 def downgrade() -> None:
-    pass
+    op.execute("UPDATE \"user\" SET is_super_admin = TRUE WHERE LOWER(email) = 'admin@barabari.org'")
