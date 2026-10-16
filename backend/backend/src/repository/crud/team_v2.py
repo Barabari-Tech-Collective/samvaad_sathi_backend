@@ -341,8 +341,8 @@ class TeamCRUDRepository(BaseCRUDRepository):
             if member_data.name:
                 user.name = member_data.name
             if member_data.password and member_data.password.strip():
-                # Permission check: resetting credentials via team endpoints requires administrator privileges
-                if caller_user is not None and not is_admin_user(caller_user):
+                # Permission check: resetting credentials via team endpoints requires administrator privileges (fail-closed)
+                if caller_user is None or not is_admin_user(caller_user):
                     raise ValueError("Administrator access required to reset member credentials.")
 
                 # Account protection: administrative accounts can never be reset via team member settings

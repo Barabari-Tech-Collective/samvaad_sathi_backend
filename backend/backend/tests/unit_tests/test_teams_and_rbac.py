@@ -252,6 +252,19 @@ def test_team_member_password_length_validation():
     none_update = TeamMemberUpdate(password=None)
     assert none_update.password is None
 
+    # Empty string or whitespace normalizes to None (handles frontend blank inputs gracefully)
+    empty_str_create = TeamMemberCreate(name="Test", email="test@test.com", access_role="member", password="")
+    assert empty_str_create.password is None
+
+    whitespace_create = TeamMemberCreate(name="Test", email="test@test.com", access_role="member", password="   ")
+    assert whitespace_create.password is None
+
+    empty_str_update = TeamMemberUpdate(password="")
+    assert empty_str_update.password is None
+
+    whitespace_update = TeamMemberUpdate(password="   ")
+    assert whitespace_update.password is None
+
 
 # --- Router Security & Permission Wiring -------------------------------------
 
@@ -526,6 +539,34 @@ async def test_update_team_member_rejects_admin_target_password_reset():
         await repo.update_team_member(team_id=1, member_id=5, member_data=update_data, caller_user=admin_caller)
 
     assert target_admin.password_hash == "admin_original_hash"
+
+
+@pytest.mark.asyncio
+async def test_update_team_member_rejects_missing_caller_password_reset():
+    """Fail-closed: update_team_member with password must reject when caller_user is None."""
+    mock_session = AsyncMock()
+    member = TeamMember(id=5, team_id=1, user_id=10, status="active", access_role="member")
+    target_user = User(id=10, email="target@barabari.org", password_hash="old_pw_hash", is_admin=False, is_super_admin=False)
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = member
+        elif "from \"user\"" in stmt_str or "user.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = target_user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    update_data = TeamMemberUpdate(password="some_password_123")
+    with pytest.raises(ValueError, match="Administrator access required to reset member credentials"):
+        await repo.update_team_member(team_id=1, member_id=5, member_data=update_data, caller_user=None)
+
+    assert target_user.password_hash == "old_pw_hash"
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 import datetime
 import enum
 from typing import List, Optional
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from src.models.schemas.base import BaseSchemaModel
 
@@ -52,6 +52,13 @@ class TeamMemberCreate(TeamMemberBase):
         description="Password for user credentials (minimum 8 characters)",
     )
 
+    @field_validator("password", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v: str | None) -> str | None:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
 
 class TeamMemberUpdate(BaseSchemaModel):
     name: Optional[str] = Field(None, description="Name of the user")
@@ -65,6 +72,13 @@ class TeamMemberUpdate(BaseSchemaModel):
         max_length=128,
         description="Password to update user credentials (minimum 8 characters)",
     )
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v: str | None) -> str | None:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
 
 
