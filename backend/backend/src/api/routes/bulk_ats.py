@@ -10,6 +10,7 @@ reviewer (needs_review).
 import hashlib
 import logging
 import datetime
+import re
 import secrets
 from typing import Literal, Optional
 from urllib.parse import quote, urlparse
@@ -416,6 +417,8 @@ async def _queue_candidate_feedback(
 @router.post("/batches", status_code=201)
 async def create_batch(
     name: str = Form(..., max_length=160),
+    creator_name: str = Form("", max_length=160),
+    creator_email: str = Form("", max_length=320),
     role_name: str = Form(..., max_length=160),
     role_description: str = Form("", max_length=12000),
     evaluation_intent: str = Form("", max_length=2000),
@@ -433,6 +436,15 @@ async def create_batch(
         )
     if not name.strip() or not role_name.strip():
         raise HTTPException(status_code=400, detail="name and role_name are required")
+    normalized_creator_email = creator_email.strip().lower()
+    if normalized_creator_email and not re.fullmatch(
+        r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_creator_email
+    ):
+        raise HTTPException(status_code=400, detail="creator_email must be a valid email")
+    normalized_creator_name = (
+        creator_name.strip() or current_user.name.strip() or current_user.email
+    )
+    normalized_creator_email = normalized_creator_email or current_user.email.lower()
     parsed_required_skills = _parse_skills(required_skills)
     parsed_preferred_skills = _parse_skills(preferred_skills)
     normalized_role_description = role_description.strip()
@@ -487,6 +499,8 @@ async def create_batch(
         jd_analysis=jd_analysis,
         retention_until=retention_until,
         created_by=current_user.id,
+        creator_name=normalized_creator_name,
+        creator_email=normalized_creator_email,
         rubric_snapshot={
             "roleName": role_name.strip(),
             "roleDescription": normalized_role_description or None,
@@ -548,8 +562,8 @@ async def list_batches(
             "createdAt": b.created_at,
             "createdBy": {
                 "id": b.created_by,
-                "name": b.creator.name if b.creator else None,
-                "email": b.creator.email if b.creator else None,
+                "name": b.creator_name or (b.creator.name if b.creator else None),
+                "email": b.creator_email or (b.creator.email if b.creator else None),
             },
         }
         for b in batches
@@ -590,8 +604,10 @@ async def get_batch(
         "createdAt": batch.created_at,
         "createdBy": {
             "id": batch.created_by,
-            "name": batch.creator.name if batch.creator else None,
-            "email": batch.creator.email if batch.creator else None,
+            "name": batch.creator_name
+            or (batch.creator.name if batch.creator else None),
+            "email": batch.creator_email
+            or (batch.creator.email if batch.creator else None),
         },
         "counts": {
             "total": total,
@@ -1543,7 +1559,9 @@ async def get_bulk_ats_self(current_user: User = Depends(get_current_bulk_ats_us
 
     return {
         "email": current_user.email,
+        "name": current_user.name,
         "isAdmin": is_admin_user(current_user),
+        "supportsRecruiterTools": True,
         "jevConfigured": bool(settings.JEV_API_KEY),
         "deepseekConfigured": bool(settings.DEEPSEEK_API_KEY),
         "ocrEnabled": settings.BULK_ATS_OCR_ENABLED,

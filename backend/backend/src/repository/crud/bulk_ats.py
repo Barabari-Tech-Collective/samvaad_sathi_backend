@@ -57,6 +57,8 @@ class BulkATSCRUDRepository:
         retention_until: datetime.datetime | None,
         created_by: int | None,
         rubric_snapshot: dict | None = None,
+        creator_name: str | None = None,
+        creator_email: str | None = None,
     ) -> BulkATSBatch:
         batch = BulkATSBatch(
             name=name,
@@ -72,6 +74,8 @@ class BulkATSCRUDRepository:
             retention_until=retention_until,
             rubric_snapshot=rubric_snapshot,
             created_by=created_by,
+            creator_name=creator_name,
+            creator_email=creator_email,
         )
         self.session.add(batch)
         await self.session.commit()

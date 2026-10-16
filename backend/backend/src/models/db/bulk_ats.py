@@ -111,6 +111,12 @@ class BulkATSBatch(Base):  # type: ignore
     created_by: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
         sqlalchemy.ForeignKey("user.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    creator_name: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=160), nullable=True
+    )
+    creator_email: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=320), nullable=True
+    )
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True),
         nullable=False,

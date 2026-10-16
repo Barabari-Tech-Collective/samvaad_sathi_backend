@@ -11,7 +11,8 @@ gate: do not deploy if any required check is red.
 - Evidence metadata with source, section, page, and line ranges when available.
 - Rubric snapshots and version creation.
 - Canonical candidate merge with the duplicate retained in audit history.
-- Three forward-only migrations chained from the existing Bulk ATS head.
+- Explicit run creator display name/email, while retaining the authenticated actor for audit and access control.
+- Four forward-only migrations chained from the existing Bulk ATS head.
 
 ## CI gates
 
@@ -35,10 +36,11 @@ e1f2a3b4c5d6
   -> c3d4e5f6a7b8  review workflow
   -> d4e5f6a7b8c9  rubric snapshots
   -> e5f6a7b8c9d0  candidate merge
+  -> f6a7b8c9d0e1  creator display details
 ```
 
 Verify the applied head with `alembic current` and confirm it is
-`e5f6a7b8c9d0` (or a later release head if another migration was added).
+`f6a7b8c9d0e1` (or a later release head if another migration was added).
 
 ## Staging acceptance
 
