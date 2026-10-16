@@ -109,6 +109,7 @@ class BackendBaseSettings(BaseSettings):
         "https://dev-backend-samvaadsathi.barabaricollective.org",  # Dev backend (for local frontend testing)
         "https://samvaad-saathi-dashboard.onrender.com",  # Dashboard frontend on Render
         "https://samvaad-dashboard.barabaricollective.org",
+        "https://admin.barabaricollective.org",  # Sampark integrated staff dashboard
         "https://samvaad-saathi.barabaricollective.org",  # new domain for production
         "https://master.d30wpikvvj1kc2.amplifyapp.com",
         "https://main.d36hlrn367i0rr.amplifyapp.com",  # new aws production
@@ -307,13 +308,17 @@ class BackendBaseSettings(BaseSettings):
     # Bulk ATS ingestion limits.
     BULK_ATS_MAX_FILES_PER_BATCH: int = decouple.config("BULK_ATS_MAX_FILES_PER_BATCH", cast=int, default=100)  # type: ignore
     BULK_ATS_MAX_FILE_SIZE_MB: int = decouple.config("BULK_ATS_MAX_FILE_SIZE_MB", cast=int, default=10)  # type: ignore
-    RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR: int = decouple.config("RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR", cast=int, default=20)  # type: ignore
+    # One browser upload is split into bounded requests so 100 resumes never
+    # exceed the dashboard hosting/proxy body limit. Keep enough headroom for
+    # worst-case 10 MB files (one file per request) plus genuine retries.
+    RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR: int = decouple.config("RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR", cast=int, default=120)  # type: ignore
+    RATE_LIMIT_BULK_ATS_FEEDBACK_PER_HOUR: int = decouple.config("RATE_LIMIT_BULK_ATS_FEEDBACK_PER_HOUR", cast=int, default=30)  # type: ignore
     DEEPSEEK_BASE_URL: str = decouple.config("DEEPSEEK_BASE_URL", cast=str, default="https://api.deepseek.com")  # type: ignore
     DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-v4-flash")  # type: ignore
     # DeepSeek only turns the already-computed compact scorecard into a brief;
     # it never receives the full resume and never changes a score.
     BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED: bool = decouple.config("BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED", cast=bool, default=True)  # type: ignore
-    BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS: int = decouple.config("BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS", cast=int, default=350)  # type: ignore
+    BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS: int = decouple.config("BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS", cast=int, default=600)  # type: ignore
     BULK_ATS_DEEPSEEK_TIMEOUT_SECONDS: float = decouple.config("BULK_ATS_DEEPSEEK_TIMEOUT_SECONDS", cast=float, default=45.0)  # type: ignore
     BULK_ATS_DEEPSEEK_PROMPT_VERSION: str = decouple.config("BULK_ATS_DEEPSEEK_PROMPT_VERSION", cast=str, default="v1")  # type: ignore
     BULK_ATS_DEFAULT_RETENTION_DAYS: int = decouple.config("BULK_ATS_DEFAULT_RETENTION_DAYS", cast=int, default=90)  # type: ignore

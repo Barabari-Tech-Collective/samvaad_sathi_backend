@@ -7,13 +7,16 @@ See deploy/samvaad-worker.service for a systemd unit that runs this.
 """
 
 from arq import cron
+from arq.worker import func
 
 from src.worker.settings import redis_settings
 from src.worker.tasks import (
+    generate_bulk_ats_feedback_task,
     generate_questions_task,
-    submit_resume_score_task,
+    process_answer_transcription_task,
     process_bulk_ats_candidate_task,
     purge_expired_bulk_ats_batches_task,
+    submit_resume_score_task,
 )
 
 
@@ -21,7 +24,9 @@ class WorkerSettings:
     functions = [
         submit_resume_score_task,
         generate_questions_task,
+        func(process_answer_transcription_task, max_tries=3, timeout=300),
         process_bulk_ats_candidate_task,
+        generate_bulk_ats_feedback_task,
         purge_expired_bulk_ats_batches_task,
     ]
     cron_jobs = [

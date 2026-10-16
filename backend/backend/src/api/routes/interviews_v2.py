@@ -636,7 +636,10 @@ async def generate_questions_v2(
             ensure_generate=True,
             track=interview.track,
         )
-        _validate_supplements_response(items=supplements_map, source="generate-questions")
+        supplements_map = _filter_valid_supplements(
+            items=supplements_map,
+            source="generate-questions",
+        )
         qs = {
             "questions": [q.text for q in persisted],
             "llm_error": llm_error,
@@ -659,7 +662,10 @@ async def generate_questions_v2(
             ensure_generate=True,
             track=interview.track,
         )
-        _validate_supplements_response(items=supplements_map, source="generate-questions-cached")
+        supplements_map = _filter_valid_supplements(
+            items=supplements_map,
+            source="generate-questions-cached",
+        )
         qs = {
             "questions": [q.text for q in existing],
             "llm_error": None,
@@ -863,7 +869,10 @@ async def generate_non_tech_questions_v2(
             ensure_generate=True,
             track=interview.track,
         )
-        _validate_supplements_response(items=supplements_map, source="generate-non-tech-questions")
+        supplements_map = _filter_valid_supplements(
+            items=supplements_map,
+            source="generate-non-tech-questions",
+        )
         qs = {
             "questions": [q.text for q in persisted],
             "llm_error": None,
@@ -885,7 +894,10 @@ async def generate_non_tech_questions_v2(
             ensure_generate=True,
             track=interview.track,
         )
-        _validate_supplements_response(items=supplements_map, source="generate-non-tech-questions-cached")
+        supplements_map = _filter_valid_supplements(
+            items=supplements_map,
+            source="generate-non-tech-questions-cached",
+        )
         qs = {
             "questions": [q.text for q in existing],
             "llm_error": None,
@@ -1108,38 +1120,82 @@ async def _get_supplement_map(
     return {supp.interview_question_id: serialize_question_supplement(supp) for supp in supplements}
 
 
-def _validate_supplements_response(*, items: dict[int, QuestionSupplementOut], source: str) -> None:
-    """Validate supplements returned from LLM before sending to clients."""
+def _filter_valid_supplements(
+    *,
+    items: dict[int, QuestionSupplementOut],
+    source: str,
+) -> dict[int, QuestionSupplementOut]:
+    """Return renderable supplements without blocking the interview.
+
+    Supplements are optional presentation aids. An LLM can occasionally return
+    malformed diagram content, and older malformed rows can remain cached in the
+    database. Neither case should turn otherwise valid interview questions into
+    a 500 response.
+    """
     if not items:
-        return
+        return {}
     allowed_types = {"code", "diagram"}
-    mermaid_starters = ("flowchart", "graph", "sequenceDiagram", "stateDiagram", "classDiagram")
+    mermaid_starters = (
+        "flowchart",
+        "graph",
+        "sequenceDiagram",
+        "stateDiagram",
+        "classDiagram",
+        "erDiagram",
+        "journey",
+        "gantt",
+        "pie",
+        "mindmap",
+        "timeline",
+        "quadrantChart",
+        "requirementDiagram",
+        "gitGraph",
+        "C4Context",
+        "architecture-beta",
+        "block-beta",
+        "kanban",
+        "packet-beta",
+        "radar-beta",
+        "sankey-beta",
+        "treemap-beta",
+        "xychart",
+    )
+    valid: dict[int, QuestionSupplementOut] = {}
 
     for qid, supp in items.items():
         stype = (supp.supplement_type or "").lower()
         fmt = (supp.format or "").lower() if supp.format else ""
         content = supp.content or ""
         if stype not in allowed_types:
-            logger.warning("Invalid supplement type (%s) for question %s from %s", stype, qid, source)
-            raise fastapi.HTTPException(
-                status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Invalid supplement type generated",
+            logger.warning(
+                "Dropping invalid supplement type (%s) for question %s from %s",
+                stype,
+                qid,
+                source,
             )
+            continue
         if stype == "diagram":
             if fmt != "mermaid":
-                logger.warning("Diagram supplement missing mermaid format for question %s from %s", qid, source)
-                raise fastapi.HTTPException(
-                    status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Invalid diagram supplement format",
+                logger.warning(
+                    "Dropping diagram supplement with format (%s) for question %s from %s",
+                    fmt,
+                    qid,
+                    source,
                 )
+                continue
             stripped = content.strip()
             if not stripped.startswith("```mermaid"):
                 if not any(stripped.startswith(prefix) for prefix in mermaid_starters):
-                    logger.warning("Mermaid supplement failed syntax precheck for question %s from %s", qid, source)
-                    raise fastapi.HTTPException(
-                        status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Mermaid supplement failed syntax precheck",
+                    logger.warning(
+                        "Dropping Mermaid supplement that failed syntax precheck "
+                        "for question %s from %s",
+                        qid,
+                        source,
                     )
+                    continue
+        valid[qid] = supp
+
+    return valid
 
 
 async def _backfill_follow_up_parents(

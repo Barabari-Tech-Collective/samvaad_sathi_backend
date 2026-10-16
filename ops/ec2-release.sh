@@ -60,6 +60,7 @@ rollback() {
     echo 'Database downgrade is intentionally NOT automatic. Expand-only migrations'
     echo 'must remain compatible with the previous application commit.'
   fi
+  cd "$APP_ROOT"
   git checkout --quiet --force "$previous_sha" || echo 'URGENT: could not restore the previous commit'
   "$VENV/bin/pip" install --quiet -r backend/backend/requirements.txt || echo 'URGENT: rollback dependency install failed'
   sudo systemctl restart "$API_SERVICE" "$WORKER_SERVICE" || echo 'URGENT: rollback restart failed'

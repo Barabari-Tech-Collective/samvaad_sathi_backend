@@ -1,10 +1,12 @@
-"""arq task functions - run in the separate `arq` worker process, not inline
-in a request. Add new background-safe operations here as this grows (e.g.
-non-real-time report regeneration); real-time transcription (Whisper) stays
-synchronous since the interview flow can't proceed without it.
+"""arq task functions run outside the FastAPI request process.
+
+Durable answer storage is interactive; transcription, follow-up generation and
+other AI work are not.  Keeping those jobs here prevents a provider slowdown
+from holding the student's save acknowledgement or an API database connection.
 """
 
 import asyncio
+import datetime
 import logging
 from dataclasses import dataclass
 
@@ -15,6 +17,7 @@ from src.services.barabari_integration import submit_resume_score_to_barabari
 logger = logging.getLogger(__name__)
 
 _RESUME_FETCH_MAX_BYTES = 10 * 1024 * 1024
+_TRANSCRIPTION_MAX_TRIES = 3
 
 
 @dataclass(frozen=True)
@@ -288,6 +291,198 @@ async def generate_questions_task(
         await session.close()
 
 
+async def process_answer_transcription_task(
+    ctx: dict,
+    *,
+    question_attempt_id: int,
+    checksum: str,
+    language: str,
+    filename: str,
+) -> dict:
+    """Transcribe one already-durable answer and publish its follow-up safely.
+
+    The checksum is the answer-version guard.  If a student records a newer
+    answer while this job is queued, every write becomes a no-op rather than
+    attaching stale text or feedback to the replacement recording.
+    """
+    from src.repository.crud.question import QuestionAttemptCRUDRepository
+    from src.services.follow_up import FollowUpService
+    from src.services.s3_service import fetch_answer_audio_from_s3
+    from src.services.whisper import transcribe_audio_with_whisper
+    from src.worker.database import get_session
+
+    job_try = max(1, int(ctx.get("job_try", 1)))
+
+    async def fail_or_retry(*, internal_reason: str, student_message: str) -> dict:
+        if job_try < _TRANSCRIPTION_MAX_TRIES:
+            session = get_session()
+            try:
+                repo = QuestionAttemptCRUDRepository(async_session=session)
+                await repo.mark_transcription_pending(
+                    question_attempt_id=question_attempt_id,
+                    checksum=checksum,
+                )
+            finally:
+                await session.close()
+            logger.warning(
+                "Answer transcription retry | Attempt=%s | Try=%s | %s",
+                question_attempt_id,
+                job_try,
+                internal_reason,
+            )
+            raise Retry(defer=min(30, 2**job_try))
+
+        session = get_session()
+        try:
+            repo = QuestionAttemptCRUDRepository(async_session=session)
+            await repo.mark_transcription_failed(
+                question_attempt_id=question_attempt_id,
+                checksum=checksum,
+                error=student_message,
+            )
+        finally:
+            await session.close()
+        logger.error(
+            "Answer transcription exhausted retries | Attempt=%s | %s",
+            question_attempt_id,
+            internal_reason,
+        )
+        return {"status": "failed", "question_attempt_id": question_attempt_id}
+
+    session = get_session()
+    try:
+        repo = QuestionAttemptCRUDRepository(async_session=session)
+        attempt = await repo.get_by_id(question_attempt_id=question_attempt_id)
+        if (
+            attempt is None
+            or attempt.answer_checksum != checksum
+            or attempt.answer_kind != "audio"
+            or not attempt.audio_url
+        ):
+            return {"status": "superseded", "question_attempt_id": question_attempt_id}
+        if attempt.transcription_status == "transcribed":
+            return {
+                "status": "already_transcribed",
+                "question_attempt_id": question_attempt_id,
+            }
+        object_key = attempt.audio_url
+        existing_transcription = attempt.transcription
+        # A retry may inherit `processing` when the previous worker was killed
+        # after claiming the row. First attempts still require the atomic
+        # pending -> processing transition, which prevents duplicate browser
+        # uploads from making duplicate provider calls.
+        claimed = (
+            attempt
+            if attempt.transcription_status == "processing" and job_try > 1
+            else await repo.mark_transcription_processing(
+                question_attempt_id=question_attempt_id,
+                checksum=checksum,
+            )
+        )
+        if claimed is None:
+            return {"status": "superseded", "question_attempt_id": question_attempt_id}
+    finally:
+        await session.close()
+
+    transcription = existing_transcription
+    if not transcription:
+        try:
+            audio_bytes = await fetch_answer_audio_from_s3(object_key)
+        except Exception as error:  # noqa: BLE001
+            return await fail_or_retry(
+                internal_reason=f"stored-audio exception: {type(error).__name__}",
+                student_message=(
+                    "Your answer is saved, but speech feedback could not be prepared. "
+                    "Select Retry speech feedback."
+                ),
+            )
+        if not audio_bytes:
+            return await fail_or_retry(
+                internal_reason="stored audio could not be read",
+                student_message=(
+                    "Your answer is saved, but speech feedback could not be prepared. "
+                    "Select Retry speech feedback."
+                ),
+            )
+        try:
+            transcription, whisper_error, _latency_ms, _model = (
+                await transcribe_audio_with_whisper(
+                    audio_bytes=audio_bytes,
+                    filename=filename,
+                    language=language,
+                )
+            )
+        except Exception as error:  # noqa: BLE001
+            return await fail_or_retry(
+                internal_reason=f"provider exception: {type(error).__name__}",
+                student_message=(
+                    "Your answer is saved, but speech feedback is delayed. "
+                    "Select Retry speech feedback."
+                ),
+            )
+        if whisper_error or not transcription:
+            return await fail_or_retry(
+                internal_reason="provider returned no usable transcript",
+                student_message=(
+                    "Your answer is saved, but we could not prepare speech feedback. "
+                    "You can continue or try recording again."
+                ),
+            )
+
+        session = get_session()
+        try:
+            repo = QuestionAttemptCRUDRepository(async_session=session)
+            saved = await repo.update_audio_transcription(
+                question_attempt_id=question_attempt_id,
+                audio_url=object_key,
+                transcription=transcription,
+                checksum=checksum,
+                finalize=False,
+            )
+            if saved is None:
+                return {
+                    "status": "superseded",
+                    "question_attempt_id": question_attempt_id,
+                }
+        finally:
+            await session.close()
+
+    # Follow-up generation may use another model, but its failure cannot make a
+    # durably transcribed answer non-terminal or prevent the student continuing.
+    follow_up_generated = False
+    session = get_session()
+    try:
+        repo = QuestionAttemptCRUDRepository(async_session=session)
+        current = await repo.get_by_id(question_attempt_id=question_attempt_id)
+        if current is None or current.answer_checksum != checksum:
+            return {"status": "superseded", "question_attempt_id": question_attempt_id}
+        try:
+            follow_up_generated = bool(
+                await FollowUpService(async_session=session).handle_transcription_saved(
+                    question_attempt_id
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Follow-up generation failed after durable transcription | Attempt=%s",
+                question_attempt_id,
+            )
+        completed = await repo.mark_transcription_complete(
+            question_attempt_id=question_attempt_id,
+            checksum=checksum,
+        )
+        if completed is None:
+            return {"status": "superseded", "question_attempt_id": question_attempt_id}
+    finally:
+        await session.close()
+
+    return {
+        "status": "transcribed",
+        "question_attempt_id": question_attempt_id,
+        "follow_up_generated": follow_up_generated,
+    }
+
+
 async def submit_resume_score_task(
     ctx: dict,
     *,
@@ -325,10 +520,10 @@ async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> di
     """
     from src.repository.crud.bulk_ats import BulkATSCRUDRepository
     from src.repository.database import async_db
-    from src.services.ai_resume.bulk.pipeline import run_candidate_pipeline
+    from src.services.ai_resume.bulk.deepseek_feedback import enrich_candidate_brief
     from src.services.ai_resume.bulk.jev_client import get_jev_provider
     from src.services.ai_resume.bulk.malware_scan import scan_document
-    from src.services.ai_resume.bulk.deepseek_feedback import enrich_candidate_brief
+    from src.services.ai_resume.bulk.pipeline import run_candidate_pipeline
     from src.services.s3_service import fetch_bulk_ats_resume_from_s3
 
     session = async_db.get_session()
@@ -535,6 +730,136 @@ async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> di
             result.final_score,
         )
         return {"status": result.status, "final_score": result.final_score}
+    finally:
+        await session.close()
+
+
+async def generate_bulk_ats_feedback_task(
+    ctx: dict,
+    *,
+    candidate_id: int,
+    audience: str,
+    request_id: str,
+    requested_by: int | None = None,
+) -> dict:
+    """Generate one explicitly requested DeepSeek feedback artifact.
+
+    The request token makes duplicate clicks and concurrent recruiters safe:
+    only the latest persisted request for a candidate/audience may spend a
+    provider call or write a result.
+    """
+
+    from src.repository.crud.bulk_ats import BulkATSCRUDRepository
+    from src.repository.database import async_db
+    from src.services.ai_resume.bulk.deepseek_feedback import (
+        ShareableFeedbackError,
+        generate_shareable_feedback,
+    )
+
+    if audience not in {"student", "team"}:
+        return {"status": "failed", "error": "invalid audience"}
+
+    session = async_db.get_session()
+    try:
+        repo = BulkATSCRUDRepository(session)
+        candidate = await repo.get_candidate(candidate_id)
+        if candidate is None or candidate.batch is None:
+            return {"status": "failed", "error": "candidate not found"}
+        batch = candidate.batch
+
+        report = candidate.deterministic_report or {}
+        shareable = report.get("shareableFeedback") or {}
+        current = shareable.get(audience) or {}
+        if current.get("requestId") != request_id:
+            return {"status": "superseded"}
+
+        generating_state = {
+            **current,
+            "status": "generating",
+            "startedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        candidate, updated = await repo.update_feedback_state(
+            candidate_id,
+            audience=audience,
+            state=generating_state,
+            expected_request_id=request_id,
+        )
+        if not updated or candidate is None:
+            return {"status": "superseded"}
+
+        latest_report = candidate.deterministic_report or {}
+        scorecard = latest_report.get("bulkAtsScorecard") or {}
+        scorecard_for_feedback = {
+            **scorecard,
+            "overallScore": candidate.final_score,
+        }
+        try:
+            content, meta = await generate_shareable_feedback(
+                audience=audience,  # type: ignore[arg-type]
+                role_name=batch.role_name,
+                evaluation_intent=batch.evaluation_intent or "",
+                scorecard=scorecard_for_feedback,
+                evidence=scorecard.get("evidence") or {},
+                warnings=candidate.warnings or [],
+            )
+        except ShareableFeedbackError as exc:
+            failed_state = {
+                **generating_state,
+                "status": "failed",
+                "error": str(exc),
+                "errorCode": exc.code,
+                "retryable": exc.retryable,
+                "completedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+            await repo.update_feedback_state(
+                candidate_id,
+                audience=audience,
+                state=failed_state,
+                expected_request_id=request_id,
+            )
+            await repo.record_audit(
+                action="candidate_feedback_failed",
+                actor_id=requested_by,
+                batch_id=candidate.batch_id,
+                candidate_id=candidate_id,
+                metadata={
+                    "audience": audience,
+                    "requestId": request_id,
+                    "errorCode": exc.code,
+                    "retryable": exc.retryable,
+                },
+            )
+            return {"status": "failed", "error": str(exc)}
+
+        completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        ready_state = {
+            **generating_state,
+            "status": "ready",
+            "completedAt": completed_at,
+            "content": content,
+            "meta": {**meta, "generatedAt": completed_at},
+        }
+        _, updated = await repo.update_feedback_state(
+            candidate_id,
+            audience=audience,
+            state=ready_state,
+            expected_request_id=request_id,
+        )
+        if not updated:
+            return {"status": "superseded"}
+        await repo.record_audit(
+            action="candidate_feedback_generated",
+            actor_id=requested_by,
+            batch_id=candidate.batch_id,
+            candidate_id=candidate_id,
+            metadata={
+                "audience": audience,
+                "requestId": request_id,
+                "source": meta.get("source"),
+                "model": meta.get("model"),
+            },
+        )
+        return {"status": "ready", "audience": audience}
     finally:
         await session.close()
 

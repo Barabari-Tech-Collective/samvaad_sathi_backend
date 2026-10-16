@@ -17,14 +17,19 @@ class ATSCalculator:
         education_report: Dict[str, Any],
         experience_report: Dict[str, Any],
         project_report: Dict[str, Any],
-        raw_resume_text: str = ""
+        raw_resume_text: str = "",
     ) -> Dict[str, Any]:
         links_score = float(link_report.get("totalScore", 0.0))
         skills_score = float(skills_report.get("totalScore", 0.0))
-        education_score = round((float(education_report.get("totalScore", 0.0)) / 10.0) * 5.0, 1)
+        skills_score_available = skills_report.get("scoreAvailable", True) is not False
+        education_score = round(
+            (float(education_report.get("totalScore", 0.0)) / 10.0) * 5.0, 1
+        )
         experience_combined_score = float(experience_report.get("totalScore", 0.0))
 
-        raw_grand_total = links_score + skills_score + education_score + experience_combined_score
+        raw_grand_total = (
+            links_score + skills_score + education_score + experience_combined_score
+        )
         final_ats_score = int(round((raw_grand_total / 70.0) * 100.0))
         final_ats_score = min(max(final_ats_score, 0), 100)
 
@@ -35,42 +40,48 @@ class ATSCalculator:
 
         # Extract total months to detect if candidate is a fresher
         total_months = int(experience_report.get("totalMonths", 0))
-        is_fresher = total_months == 0 or experience_report.get("detectedLevel") == "Fresher"
+        is_fresher = (
+            total_months == 0 or experience_report.get("detectedLevel") == "Fresher"
+        )
         enriched_projects = self._enrich_project_nodes(project_report, link_report)
 
         project_report_enriched = {
             **project_report,
-            "projectEvaluation": enriched_projects
+            "projectEvaluation": enriched_projects,
         }
 
-        hygiene_snapshot = self._generate_hygiene_snapshot(link_report, education_report, raw_resume_text)
+        hygiene_snapshot = self._generate_hygiene_snapshot(
+            link_report, education_report, raw_resume_text
+        )
 
         return {
             "atsScore": final_ats_score,
             "maxScore": 100,
             "scoreBreakdown": {
-                "skillsMatch": int(round((skills_score / 25.0) * 100)),
+                "skillsMatch": (
+                    int(round((skills_score / 25.0) * 100))
+                    if skills_score_available
+                    else None
+                ),
                 "experienceMatch": int(round((experience_combined_score / 35.0) * 100)),
                 "projectMatch": project_match_percentage,
                 "linkIntegrity": int(round((links_score / 5.0) * 100)),
                 "educationScore": int(round((education_score / 5.0) * 100)),
-                "totalMonths": total_months,                 
-                "isFresher": is_fresher
+                "totalMonths": total_months,
+                "isFresher": is_fresher,
             },
             "deterministicMetrics": {
                 "linksModule": link_report,
                 "skillsModule": skills_report,
                 "educationModule": education_report,
                 "experienceModule": experience_report,
-                "projectModule": project_report_enriched
+                "projectModule": project_report_enriched,
             },
-            "hygieneCheck": hygiene_snapshot
+            "hygieneCheck": hygiene_snapshot,
         }
 
     def _enrich_project_nodes(
-        self,
-        project_report: Dict[str, Any],
-        link_report: Dict[str, Any]
+        self, project_report: Dict[str, Any], link_report: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
         Lookup-based project node enrichment using validated link metadata.
@@ -91,18 +102,18 @@ class ATSCalculator:
 
             repo_status = {
                 "present": cat == "repository",
-                "working": cat == "repository" and is_valid
+                "working": cat == "repository" and is_valid,
             }
 
             deployment_status = {
                 "present": cat == "deployment",
-                "working": cat == "deployment" and is_valid
+                "working": cat == "deployment" and is_valid,
             }
 
             enriched_proj = {
                 **proj,
                 "repository": repo_status,
-                "deployment": deployment_status
+                "deployment": deployment_status,
             }
             enriched_list.append(enriched_proj)
 
@@ -112,7 +123,7 @@ class ATSCalculator:
         self,
         link_report: Dict[str, Any],
         education_report: Dict[str, Any],
-        raw_resume_text: str = ""
+        raw_resume_text: str = "",
     ) -> Dict[str, bool]:
         categories = link_report.get("categoryBreakdown", {})
         edu_analysis = education_report.get("educationAnalysis", {})
@@ -136,5 +147,5 @@ class ATSCalculator:
             "hasDuration": edu_analysis.get("duration", {}).get("present", False),
             "hasScore": edu_analysis.get("grade", {}).get("present", False),
             "hasPhone": has_phone,
-            "hasEmail": has_email
+            "hasEmail": has_email,
         }
