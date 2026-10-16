@@ -17,7 +17,9 @@ optional_security = HTTPBearer(auto_error=False)
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = fastapi.Depends(security),
-    user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
+    user_repo: UserCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=UserCRUDRepository)
+    ),
 ) -> User:
     token = credentials.credentials
 
@@ -47,7 +49,12 @@ async def get_current_user(
     except SsoTokenError:
         try:
             from jose import jwt as jose_jwt
-            payload = jose_jwt.decode(token=token, key=settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+
+            payload = jose_jwt.decode(
+                token=token,
+                key=settings.JWT_SECRET_KEY,
+                algorithms=[settings.JWT_ALGORITHM],
+            )
             email = payload.get("email") or payload.get("username")
             if not email:
                 raise ValueError("Missing email in token payload")
@@ -88,7 +95,12 @@ async def get_current_user(
         setattr(user, "_token_role", raw_role)
 
         if norm_role == "SUPER ADMIN":
-            setattr(user, "_token_is_super_admin", True)
+            # Only set _token_is_super_admin if the user is not an explicit standard admin in DB
+            if not (
+                getattr(user, "is_admin", False)
+                and not getattr(user, "is_super_admin", False)
+            ):
+                setattr(user, "_token_is_super_admin", True)
             setattr(user, "_token_is_admin", True)
         elif norm_role == "ADMIN":
             setattr(user, "_token_is_admin", True)
@@ -97,8 +109,12 @@ async def get_current_user(
 
 
 async def get_optional_current_user(
-    credentials: HTTPAuthorizationCredentials | None = fastapi.Depends(optional_security),
-    user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
+    credentials: HTTPAuthorizationCredentials | None = fastapi.Depends(
+        optional_security
+    ),
+    user_repo: UserCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=UserCRUDRepository)
+    ),
 ) -> User | None:
     """Like get_current_user but returns None instead of 401 when no token is provided."""
     if not credentials:
