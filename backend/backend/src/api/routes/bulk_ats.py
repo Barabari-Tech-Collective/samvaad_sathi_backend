@@ -60,6 +60,17 @@ _ALLOWED_EXCEL_CONTENT_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
+FeedbackAudience = Literal["student", "team"]
+
+
+class GenerateFeedbackBody(pydantic.BaseModel):
+    audience: FeedbackAudience
+    regenerate: bool = False
+
+
+class GenerateBatchFeedbackBody(GenerateFeedbackBody):
+    candidate_ids: list[int] | None = pydantic.Field(default=None, max_length=100)
+
 
 def _drive_oauth_redirect(*, status: str, detail: str | None = None):
     base = settings.GOOGLE_DRIVE_OAUTH_FRONTEND_RETURN_URL or "/bulk-ats"
@@ -152,6 +163,54 @@ async def _mark_queue_failure(
     await repo.refresh_batch_status(batch_id)
 
 
+def _feedback_states(report: dict | None) -> dict:
+    shareable = (report or {}).get("shareableFeedback") or {}
+    if not isinstance(shareable, dict):
+        shareable = {}
+    return {
+        audience: (
+            (shareable.get(audience) or {}).get("status")
+            if isinstance(shareable.get(audience), dict)
+            else None
+        )
+        for audience in ("student", "team")
+    }
+
+
+def _format_feedback_copy(
+    *,
+    candidate: BulkATSCandidate,
+    audience: FeedbackAudience,
+    role_name: str,
+    content: dict,
+) -> str:
+    """Create a paste-ready artifact without asking the model for PII."""
+
+    name = candidate.candidate_name or "Candidate"
+    lines = [name, f"Resume feedback for: {role_name}"]
+    if audience == "team" and candidate.final_score is not None:
+        lines.append(f"ATS score: {candidate.final_score:.2f}/100")
+    lines.extend(["", str(content.get("summary") or "").strip()])
+    sections = (
+        ("Strengths", content.get("strengths") or []),
+        (
+            "Improvements" if audience == "student" else "Gaps to validate",
+            content.get("improvements") or [],
+        ),
+        ("Next steps", content.get("nextSteps") or []),
+        ("Interview focus", content.get("interviewFocus") or []),
+    )
+    for heading, items in sections:
+        if not isinstance(items, list):
+            continue
+        clean_items = [str(item).strip() for item in items if str(item).strip()]
+        if not clean_items:
+            continue
+        lines.extend(["", f"{heading}:"])
+        lines.extend(f"- {item}" for item in clean_items)
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
 def _candidate_summary(c: BulkATSCandidate) -> dict:
     """Compact row for the bulk table - no long-form feedback, per spec."""
     return {
@@ -168,6 +227,7 @@ def _candidate_summary(c: BulkATSCandidate) -> dict:
         "scoreUpperBound": c.score_upper_bound,
         "reviewerDecision": c.reviewer_decision,
         "interviewOutcome": c.interview_outcome,
+        "feedbackStatus": _feedback_states(c.deterministic_report),
     }
 
 
@@ -185,6 +245,7 @@ def _candidate_detail(c: BulkATSCandidate) -> dict:
         **_candidate_summary(c),
         "originalFilename": c.original_filename,
         "resumeUrl": c.resume_url,
+        "roleName": c.batch.role_name if c.batch is not None else None,
         "errorMessage": c.error_message,
         "extractedSkills": extracted_skills,
         "deterministicReport": c.deterministic_report,
@@ -226,6 +287,103 @@ async def _get_authorized_candidate(
     ):
         raise HTTPException(status_code=404, detail="Candidate not found")
     return candidate
+
+
+def _require_deepseek_feedback() -> None:
+    if not settings.BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail="Shareable feedback is currently disabled",
+        )
+    if not settings.DEEPSEEK_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="DeepSeek is not configured for shareable feedback",
+        )
+
+
+async def _queue_candidate_feedback(
+    *,
+    repo: BulkATSCRUDRepository,
+    candidate: BulkATSCandidate,
+    audience: FeedbackAudience,
+    regenerate: bool,
+    requested_by: int,
+) -> dict:
+    if candidate.status not in {"completed", "needs_review"}:
+        return {"candidateId": candidate.id, "status": "not_eligible"}
+
+    report = candidate.deterministic_report or {}
+    if not report.get("bulkAtsScorecard"):
+        return {"candidateId": candidate.id, "status": "not_eligible"}
+
+    request_id = secrets.token_urlsafe(18)
+    requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    queued_state = {
+        "status": "queued",
+        "audience": audience,
+        "requestId": request_id,
+        "requestedAt": requested_at,
+        "requestedBy": requested_by,
+    }
+    reserved_candidate, reservation_status = await repo.begin_feedback_request(
+        candidate.id,
+        audience=audience,
+        state=queued_state,
+        regenerate=regenerate,
+    )
+    if reservation_status != "reserved":
+        return {
+            "candidateId": candidate.id,
+            "status": (
+                reservation_status
+                if reservation_status in {"already_in_progress", "already_ready"}
+                else "not_eligible"
+            ),
+        }
+    candidate = reserved_candidate or candidate
+
+    job_id = await enqueue_job(
+        "generate_bulk_ats_feedback_task",
+        candidate_id=candidate.id,
+        audience=audience,
+        request_id=request_id,
+        requested_by=requested_by,
+    )
+    if not job_id:
+        failed_state = {
+            **queued_state,
+            "status": "failed",
+            "error": "Feedback queue is temporarily unavailable. Please try again.",
+            "completedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        await repo.update_feedback_state(
+            candidate.id,
+            audience=audience,
+            state=failed_state,
+            expected_request_id=request_id,
+        )
+        status = "queue_unavailable"
+    else:
+        status = "queued"
+
+    await repo.record_audit(
+        action="candidate_feedback_requested",
+        actor_id=requested_by,
+        batch_id=candidate.batch_id,
+        candidate_id=candidate.id,
+        metadata={
+            "audience": audience,
+            "requestId": request_id,
+            "regenerate": regenerate,
+            "queued": bool(job_id),
+        },
+    )
+    return {
+        "candidateId": candidate.id,
+        "status": status,
+        "jobId": job_id,
+    }
 
 
 @router.post("/batches", status_code=201)
@@ -755,6 +913,159 @@ async def get_candidate(
         repo, candidate_id=candidate_id, current_user=current_user
     )
     return _candidate_detail(candidate)
+
+
+@router.post("/candidates/{candidate_id}/feedback", status_code=202)
+async def generate_candidate_feedback(
+    candidate_id: int,
+    payload: GenerateFeedbackBody,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+    _rate_limit=Depends(
+        hybrid_rate_limiter(
+            key_prefix="bulk_ats_feedback",
+            limit=settings.RATE_LIMIT_BULK_ATS_FEEDBACK_PER_HOUR,
+            window_seconds=3600,
+        )
+    ),
+):
+    """Queue one explicit, auditable DeepSeek feedback artifact."""
+
+    _require_deepseek_feedback()
+    repo = BulkATSCRUDRepository(session)
+    candidate = await _get_authorized_candidate(
+        repo, candidate_id=candidate_id, current_user=current_user
+    )
+    result = await _queue_candidate_feedback(
+        repo=repo,
+        candidate=candidate,
+        audience=payload.audience,
+        regenerate=payload.regenerate,
+        requested_by=current_user.id,
+    )
+    if result["status"] == "not_eligible":
+        raise HTTPException(
+            status_code=409,
+            detail="Complete candidate screening before generating feedback",
+        )
+    if result["status"] == "queue_unavailable":
+        raise HTTPException(
+            status_code=503,
+            detail="Feedback queue is temporarily unavailable. Please try again.",
+        )
+    return result
+
+
+@router.post("/batches/{batch_id}/feedback", status_code=202)
+async def generate_batch_feedback(
+    batch_id: int,
+    payload: GenerateBatchFeedbackBody,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+    _rate_limit=Depends(
+        hybrid_rate_limiter(
+            key_prefix="bulk_ats_feedback",
+            limit=settings.RATE_LIMIT_BULK_ATS_FEEDBACK_PER_HOUR,
+            window_seconds=3600,
+        )
+    ),
+):
+    """Queue feedback for a recruiter-selected set or every eligible candidate."""
+
+    _require_deepseek_feedback()
+    repo = BulkATSCRUDRepository(session)
+    await _get_authorized_batch(repo, batch_id=batch_id, current_user=current_user)
+    candidates = await repo.list_candidates(
+        batch_id=batch_id, limit=settings.BULK_ATS_MAX_FILES_PER_BATCH, sort="created"
+    )
+
+    requested_ids = set(payload.candidate_ids or [])
+    if payload.candidate_ids is not None and not requested_ids:
+        raise HTTPException(status_code=400, detail="Select at least one candidate")
+    if requested_ids:
+        found_ids = {candidate.id for candidate in candidates}
+        if requested_ids - found_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="One or more selected candidates are not in this batch",
+            )
+        candidates = [
+            candidate for candidate in candidates if candidate.id in requested_ids
+        ]
+
+    results = []
+    for candidate in candidates:
+        results.append(
+            await _queue_candidate_feedback(
+                repo=repo,
+                candidate=candidate,
+                audience=payload.audience,
+                regenerate=payload.regenerate,
+                requested_by=current_user.id,
+            )
+        )
+
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result["status"]] = counts.get(result["status"], 0) + 1
+    await repo.record_audit(
+        action="batch_feedback_requested",
+        actor_id=current_user.id,
+        batch_id=batch_id,
+        metadata={
+            "audience": payload.audience,
+            "regenerate": payload.regenerate,
+            "counts": counts,
+        },
+    )
+    return {
+        "audience": payload.audience,
+        "counts": counts,
+        "results": results,
+    }
+
+
+@router.get("/batches/{batch_id}/feedback")
+async def list_batch_feedback(
+    batch_id: int,
+    audience: FeedbackAudience,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Return only completed artifacts for explicit copy/export actions."""
+
+    repo = BulkATSCRUDRepository(session)
+    batch = await _get_authorized_batch(
+        repo, batch_id=batch_id, current_user=current_user
+    )
+    candidates = await repo.list_candidates(
+        batch_id=batch_id, limit=settings.BULK_ATS_MAX_FILES_PER_BATCH, sort="created"
+    )
+    items = []
+    for candidate in candidates:
+        state = (
+            (candidate.deterministic_report or {}).get("shareableFeedback") or {}
+        ).get(audience) or {}
+        content = state.get("content")
+        if state.get("status") != "ready" or not isinstance(content, dict):
+            continue
+        items.append(
+            {
+                "candidateId": candidate.id,
+                "candidateName": candidate.candidate_name,
+                "emailOrCandidateId": candidate.email_or_candidate_id,
+                "audience": audience,
+                "generatedAt": (state.get("meta") or {}).get("generatedAt"),
+                "content": content,
+                "copyText": _format_feedback_copy(
+                    candidate=candidate,
+                    audience=audience,
+                    role_name=batch.role_name,
+                    content=content,
+                ),
+            }
+        )
+    return {"audience": audience, "total": len(items), "items": items}
 
 
 @router.post("/candidates/{candidate_id}/rerun", status_code=202)

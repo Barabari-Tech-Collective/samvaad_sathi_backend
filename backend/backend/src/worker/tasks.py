@@ -5,6 +5,7 @@ synchronous since the interview flow can't proceed without it.
 """
 
 import asyncio
+import datetime
 import logging
 from dataclasses import dataclass
 
@@ -535,6 +536,129 @@ async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> di
             result.final_score,
         )
         return {"status": result.status, "final_score": result.final_score}
+    finally:
+        await session.close()
+
+
+async def generate_bulk_ats_feedback_task(
+    ctx: dict,
+    *,
+    candidate_id: int,
+    audience: str,
+    request_id: str,
+    requested_by: int | None = None,
+) -> dict:
+    """Generate one explicitly requested DeepSeek feedback artifact.
+
+    The request token makes duplicate clicks and concurrent recruiters safe:
+    only the latest persisted request for a candidate/audience may spend a
+    provider call or write a result.
+    """
+
+    from src.repository.crud.bulk_ats import BulkATSCRUDRepository
+    from src.repository.database import async_db
+    from src.services.ai_resume.bulk.deepseek_feedback import (
+        ShareableFeedbackError,
+        generate_shareable_feedback,
+    )
+
+    if audience not in {"student", "team"}:
+        return {"status": "failed", "error": "invalid audience"}
+
+    session = async_db.get_session()
+    try:
+        repo = BulkATSCRUDRepository(session)
+        candidate = await repo.get_candidate(candidate_id)
+        if candidate is None or candidate.batch is None:
+            return {"status": "failed", "error": "candidate not found"}
+        batch = candidate.batch
+
+        report = candidate.deterministic_report or {}
+        shareable = report.get("shareableFeedback") or {}
+        current = shareable.get(audience) or {}
+        if current.get("requestId") != request_id:
+            return {"status": "superseded"}
+
+        generating_state = {
+            **current,
+            "status": "generating",
+            "startedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        candidate, updated = await repo.update_feedback_state(
+            candidate_id,
+            audience=audience,
+            state=generating_state,
+            expected_request_id=request_id,
+        )
+        if not updated or candidate is None:
+            return {"status": "superseded"}
+
+        latest_report = candidate.deterministic_report or {}
+        scorecard = latest_report.get("bulkAtsScorecard") or {}
+        scorecard_for_feedback = {
+            **scorecard,
+            "overallScore": candidate.final_score,
+        }
+        try:
+            content, meta = await generate_shareable_feedback(
+                audience=audience,  # type: ignore[arg-type]
+                role_name=batch.role_name,
+                evaluation_intent=batch.evaluation_intent or "",
+                scorecard=scorecard_for_feedback,
+                evidence=scorecard.get("evidence") or {},
+                warnings=candidate.warnings or [],
+            )
+        except ShareableFeedbackError as exc:
+            failed_state = {
+                **generating_state,
+                "status": "failed",
+                "error": str(exc),
+                "completedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+            await repo.update_feedback_state(
+                candidate_id,
+                audience=audience,
+                state=failed_state,
+                expected_request_id=request_id,
+            )
+            await repo.record_audit(
+                action="candidate_feedback_failed",
+                actor_id=requested_by,
+                batch_id=candidate.batch_id,
+                candidate_id=candidate_id,
+                metadata={"audience": audience, "requestId": request_id},
+            )
+            return {"status": "failed", "error": str(exc)}
+
+        completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        ready_state = {
+            **generating_state,
+            "status": "ready",
+            "completedAt": completed_at,
+            "content": content,
+            "meta": {**meta, "generatedAt": completed_at},
+        }
+        _, updated = await repo.update_feedback_state(
+            candidate_id,
+            audience=audience,
+            state=ready_state,
+            expected_request_id=request_id,
+        )
+        if not updated:
+            return {"status": "superseded"}
+        await repo.record_audit(
+            action="candidate_feedback_generated",
+            actor_id=requested_by,
+            batch_id=candidate.batch_id,
+            candidate_id=candidate_id,
+            metadata={
+                "audience": audience,
+                "requestId": request_id,
+                "source": meta.get("source"),
+                "model": meta.get("model"),
+            },
+        )
+        return {"status": "ready", "audience": audience}
     finally:
         await session.close()
 
