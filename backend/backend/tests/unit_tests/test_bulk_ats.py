@@ -409,6 +409,44 @@ def test_bulk_ats_endpoints_are_exposed_in_openapi():
 
 
 @pytest.mark.asyncio
+async def test_list_candidates_supports_assigned_reviewer_filter(monkeypatch):
+    candidate = SimpleNamespace(id=12)
+    repo = SimpleNamespace(
+        list_candidates=AsyncMock(return_value=[candidate]),
+        count_candidates=AsyncMock(return_value=1),
+    )
+    monkeypatch.setattr(bulk_ats_routes, "BulkATSCRUDRepository", lambda _session: repo)
+    monkeypatch.setattr(
+        bulk_ats_routes,
+        "_get_authorized_batch",
+        AsyncMock(return_value=SimpleNamespace(id=4)),
+    )
+    monkeypatch.setattr(
+        bulk_ats_routes, "_candidate_summary", lambda item: {"id": item.id}
+    )
+
+    response = await bulk_ats_routes.list_candidates(
+        batch_id=4,
+        current_user=SimpleNamespace(id=7),
+        session=SimpleNamespace(),
+        assigned_reviewer_id=23,
+    )
+
+    assert response == {"total": 1, "candidates": [{"id": 12}]}
+    repo.list_candidates.assert_awaited_once_with(
+        batch_id=4,
+        status=None,
+        sort="score",
+        limit=50,
+        offset=0,
+        assigned_reviewer_id=23,
+    )
+    repo.count_candidates.assert_awaited_once_with(
+        batch_id=4, status=None, assigned_reviewer_id=23
+    )
+
+
+@pytest.mark.asyncio
 async def test_rerun_returns_503_when_background_job_cannot_be_queued(monkeypatch):
     candidate = SimpleNamespace(id=28, batch_id=4)
     repo = SimpleNamespace(

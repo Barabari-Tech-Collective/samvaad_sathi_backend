@@ -958,6 +958,7 @@ async def list_candidates(
     sort: Literal["score", "confidence", "review_priority", "created"] = "score",
     limit: int = 50,
     offset: int = 0,
+    assigned_reviewer_id: int | None = None,
 ):
     repo = BulkATSCRUDRepository(session)
     batch = await _get_authorized_batch(
