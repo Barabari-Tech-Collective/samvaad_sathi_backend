@@ -30,7 +30,10 @@ from src.api.dependencies.session import get_async_session
 from src.config.manager import settings
 from src.models.db.bulk_ats import BulkATSCandidate
 from src.models.db.user import User
-from src.repository.crud.bulk_ats import BulkATSCRUDRepository
+from src.repository.crud.bulk_ats import (
+    BulkATSCRUDRepository,
+    _feedback_request_is_active,
+)
 from src.repository.crud.user import UserCRUDRepository
 from src.services.ai_resume.parser_service import ALLOWED_FILE_TYPES
 from src.services.ai_resume.bulk.jd_quality import analyze_job_description
@@ -167,14 +170,23 @@ def _feedback_states(report: dict | None) -> dict:
     shareable = (report or {}).get("shareableFeedback") or {}
     if not isinstance(shareable, dict):
         shareable = {}
-    return {
-        audience: (
-            (shareable.get(audience) or {}).get("status")
-            if isinstance(shareable.get(audience), dict)
-            else None
-        )
-        for audience in ("student", "team")
-    }
+    states: dict[str, str | None] = {}
+    for audience in ("student", "team"):
+        state = shareable.get(audience)
+        if not isinstance(state, dict):
+            states[audience] = None
+            continue
+        status = state.get("status")
+        if status in {"queued", "generating"} and not _feedback_request_is_active(
+            state
+        ):
+            # Do not make clients poll forever when a worker stopped without
+            # writing a terminal state. A new request can safely reserve this
+            # stale artifact because begin_feedback_request uses the same rule.
+            states[audience] = "failed"
+        else:
+            states[audience] = status
+    return states
 
 
 def _format_feedback_copy(
@@ -495,6 +507,11 @@ async def list_batches(
         limit=min(limit, 200),
         offset=offset,
     )
+    # Self-heal stale processing states left by an interrupted worker after all
+    # candidate rows had already reached a terminal state.
+    for batch in batches:
+        if batch.status == "processing":
+            await repo.refresh_batch_status(batch.id)
     return [
         {
             "id": b.id,
@@ -517,6 +534,7 @@ async def get_batch(
     batch = await _get_authorized_batch(
         repo, batch_id=batch_id, current_user=current_user
     )
+    await repo.refresh_batch_status(batch_id)
 
     total = await repo.count_candidates(batch_id=batch_id)
     completed = await repo.count_candidates(batch_id=batch_id, status="completed")

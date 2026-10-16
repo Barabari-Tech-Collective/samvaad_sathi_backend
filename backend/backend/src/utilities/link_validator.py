@@ -1,6 +1,6 @@
 import re
 from typing import Dict, List, Tuple, Any, Optional
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, urlunparse, unquote
 import httpx
 
 
@@ -95,6 +95,55 @@ class SmartLinkValidator:
         clean = unquote(clean).strip()
         return clean
 
+    def _normalize_candidate_url(self, raw_url: str) -> str:
+        """Return a safe, canonical recruiter-facing URL or an empty string.
+
+        Resume parsers occasionally emit contact links as ``https://mailto:``
+        or include punctuation next to a URL. Those values must never be sent
+        over the network or presented as verified work evidence.
+        """
+        clean = self._unwrap_url(raw_url).strip(" \t\r\n<>[](){}\"',.;")
+        lowered = clean.casefold()
+        if not clean or lowered.startswith("mailto:") or re.match(
+            r"^https?://mailto:", lowered
+        ):
+            return ""
+        if re.fullmatch(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", clean):
+            return ""
+        if not lowered.startswith(("http://", "https://")):
+            clean = f"https://{clean}"
+
+        try:
+            parsed = urlparse(clean)
+        except ValueError:
+            return ""
+        hostname = (parsed.hostname or "").casefold().rstrip(".")
+        if (
+            parsed.scheme.casefold() not in {"http", "https"}
+            or not hostname
+            or "." not in hostname
+            or any(character.isspace() for character in clean)
+        ):
+            return ""
+
+        try:
+            port = f":{parsed.port}" if parsed.port else ""
+        except ValueError:
+            return ""
+        normalized_path = parsed.path or ""
+        if normalized_path != "/":
+            normalized_path = normalized_path.rstrip("/")
+        return urlunparse(
+            (
+                parsed.scheme.casefold(),
+                f"{hostname}{port}",
+                normalized_path,
+                "",
+                parsed.query,
+                "",
+            )
+        )
+
     def classify_url(self, url: str) -> Dict[str, str]:
         """
         Classifies unwrapped URLs into standard platform and category maps.
@@ -104,6 +153,11 @@ class SmartLinkValidator:
 
         if not clean_url.startswith(("http://", "https://", "mailto:")):
             clean_url = "https://" + clean_url
+
+        if clean_url.startswith("mailto:") or re.match(
+            r"^https?://mailto:", clean_url
+        ):
+            return {"platform": "email", "category": "contact"}
 
         try:
             parsed = urlparse(clean_url)
@@ -262,18 +316,18 @@ class SmartLinkValidator:
                 else:
                     continue
 
-                # Unwrap proxy/search query before indexing
-                unwrapped_url = self._unwrap_url(raw_url)
+                normalized_url = self._normalize_candidate_url(raw_url)
+                classification = self.classify_url(normalized_url)
 
-                # STRICT URL FILTER: Must contain a dot or valid URL scheme
-                # Prevents single character noise ('A', 'B') from reaching the network validator
+                # Contact details and parser/system links are not professional
+                # evidence. Keep them out of both network checks and the UI.
                 if (
-                    unwrapped_url
-                    and len(unwrapped_url) > 3
-                    and ("." in unwrapped_url or ":" in unwrapped_url)
-                    and unwrapped_url not in url_metadata_map
+                    normalized_url
+                    and classification["category"] != "contact"
+                    and classification["platform"] != "system_link"
+                    and normalized_url not in url_metadata_map
                 ):
-                    url_metadata_map[unwrapped_url] = meta
+                    url_metadata_map[normalized_url] = meta
 
         results = {
             "total_links_found": len(url_metadata_map),
