@@ -21,7 +21,7 @@ Both holes close the same way, so both live here: acquire the lock through
 """
 
 import logging
-from typing import Any
+from typing import Any, Sequence
 
 import sqlalchemy
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,7 +58,7 @@ async def lock_question_generation(session: AsyncSession, *, interview_id: int) 
 
 
 def question_items_from_persisted(
-    questions: list[InterviewQuestion],
+    questions: Sequence[Any],
     *,
     difficulty: str | None = None,
     supplements: dict[int, Any] | None = None,

@@ -403,6 +403,7 @@ class AnalyticsService:
         difficulty: str | None = None,
         college: str | None = None,
         category: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
         # Change made: Added category parameter to get_role_segment_analytics and forwarded to _list_interviews_all.
         # Why it was made: Allows callers (like /roles/performance) to filter role segments by domain category.
@@ -413,6 +414,7 @@ class AnalyticsService:
             difficulty=difficulty,
             college=college,
             category=category,
+            allowed_colleges=allowed_colleges,
         )
         if not interviews:
             return []
@@ -471,8 +473,16 @@ class AnalyticsService:
         role: str | None = None,
         difficulty: str | None = None,
         college: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date, role=role, difficulty=difficulty, college=college)
+        interviews = await self._list_interviews_all(
+            start_date=start_date,
+            end_date=end_date,
+            role=role,
+            difficulty=difficulty,
+            college=college,
+            allowed_colleges=allowed_colleges,
+        )
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
         grouped: dict[str, list[Interview]] = defaultdict(list)
@@ -504,12 +514,26 @@ class AnalyticsService:
         role: str | None = None,
         difficulty: str | None = None,
         college: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date, role=role, difficulty=difficulty, college=college)
+        if allowed_colleges is not None and not allowed_colleges and not college:
+            return []
+        interviews = await self._list_interviews_all(
+            start_date=start_date,
+            end_date=end_date,
+            role=role,
+            difficulty=difficulty,
+            college=college,
+            allowed_colleges=allowed_colleges,
+        )
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
 
         users_stmt = sqlalchemy.select(User)
+        if college:
+            users_stmt = users_stmt.where(User.university == college)
+        elif allowed_colleges is not None:
+            users_stmt = users_stmt.where(User.university.in_(list(allowed_colleges)))
         users = list((await self._db.execute(users_stmt)).scalars().all())
         user_map = {u.id: u for u in users}
 
@@ -562,13 +586,60 @@ class AnalyticsService:
         role: str | None = None,
         difficulty: str | None = None,
         college: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> dict[str, Any]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date, role=role, difficulty=difficulty, college=college)
+        if allowed_colleges is not None and not allowed_colleges and not college:
+            return {
+                "active_users_30d": 0,
+                "total_students": 0,
+                "avg_score": 0.0,
+                "median_score": 0.0,
+                "funnel": {
+                    "sign_up": 0,
+                    "select_role": 0,
+                    "start_interview": 0,
+                    "complete_interview": 0,
+                    "view_report": 0,
+                    "do_practice": 0,
+                },
+                "funnel_drop_off": {
+                    "signup_to_role_selection_dropoff": 0.0,
+                    "role_selection_to_start_interview_dropoff": 0.0,
+                    "start_to_complete_dropoff": 0.0,
+                    "complete_to_report_dropoff": 0.0,
+                    "report_to_practice_dropoff": 0.0,
+                },
+                "practice_effectiveness": {},
+                "retry_behavior": {},
+                "question_effectiveness": {},
+                "report_engagement": {
+                    "avg_time_spent_seconds": 0.0,
+                    "avg_clicks": 0.0,
+                    "download_rate": 0.0,
+                    "share_rate": 0.0,
+                },
+                "track_distribution": {},
+                "difficulty_distribution": {},
+                "skill_performance": {},
+            }
+
+        interviews = await self._list_interviews_all(
+            start_date=start_date,
+            end_date=end_date,
+            role=role,
+            difficulty=difficulty,
+            college=college,
+            allowed_colleges=allowed_colleges,
+        )
         interview_ids = [i.id for i in interviews]
         scoped_user_ids = {i.user_id for i in interviews}
         reports = await self._reports_by_interview(interview_ids)
         summaries = await self._summary_reports_by_interview(interview_ids)
         users_stmt = sqlalchemy.select(User)
+        if college:
+            users_stmt = users_stmt.where(User.university == college)
+        elif allowed_colleges is not None:
+            users_stmt = users_stmt.where(User.university.in_(list(allowed_colleges)))
         if start_date is not None:
             users_stmt = users_stmt.where(User.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
         if end_date is not None:
@@ -581,6 +652,7 @@ class AnalyticsService:
             role=role,
             difficulty=difficulty,
             college=college,
+            allowed_colleges=allowed_colleges,
         )
 
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -675,8 +747,16 @@ class AnalyticsService:
         role: str | None = None,
         difficulty: str | None = None,
         college: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> dict[str, Any]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date, role=role, difficulty=difficulty, college=college)
+        interviews = await self._list_interviews_all(
+            start_date=start_date,
+            end_date=end_date,
+            role=role,
+            difficulty=difficulty,
+            college=college,
+            allowed_colleges=allowed_colleges,
+        )
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
 
@@ -721,7 +801,10 @@ class AnalyticsService:
         self,
         start_date: datetime.date | None = None,
         end_date: datetime.date | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
+        if allowed_colleges is not None and not allowed_colleges:
+            return []
         # Using load_only prevents loading heavy fields (e.g. transcriptions) into RAM.
         # We process aggregation in python because the JSON-based scores have highly complex fallbacks 
         # (Report vs SummaryReport, different json keys) which make a pure GROUP BY in SQL too fragile.
@@ -736,6 +819,8 @@ class AnalyticsService:
                 Load(SummaryReport).load_only(SummaryReport.report_json)
             )
         )
+        if allowed_colleges is not None:
+            stmt = stmt.join(User, User.id == Interview.user_id).where(User.university.in_(list(allowed_colleges)))
         if start_date:
             stmt = stmt.where(Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
         if end_date:
@@ -793,10 +878,17 @@ class AnalyticsService:
         user_id: int | None = None,
         start_date: datetime.date | None = None,
         end_date: datetime.date | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> dict[str, Any]:
+        if allowed_colleges is not None and not allowed_colleges:
+            return {
+                "student_alerts": [],
+                "system_alerts": [],
+            }
+
         system_alerts: list[dict[str, Any]] = []
 
-        users = await self._candidate_users(user_id=user_id)
+        users = await self._candidate_users(user_id=user_id, allowed_colleges=allowed_colleges)
         candidate_user_ids = [u.id for u in users]
         student_alerts = await self._student_alerts_batched(
             user_ids=candidate_user_ids,
@@ -810,8 +902,8 @@ class AnalyticsService:
         prev_window_start = (now - datetime.timedelta(days=14)).date()
         prev_window_end = (now - datetime.timedelta(days=8)).date()
 
-        current_scores = await self._overall_scores_between(current_window_start, now.date())
-        previous_scores = await self._overall_scores_between(prev_window_start, prev_window_end)
+        current_scores = await self._overall_scores_between(current_window_start, now.date(), allowed_colleges=allowed_colleges)
+        previous_scores = await self._overall_scores_between(prev_window_start, prev_window_end, allowed_colleges=allowed_colleges)
 
         current_avg = _avg_non_null(current_scores)
         prev_avg = _avg_non_null(previous_scores)
@@ -831,10 +923,11 @@ class AnalyticsService:
                 start_date=start_date,
                 end_date=end_date,
                 now=now,
+                allowed_colleges=allowed_colleges,
             )
         )
 
-        interviews_all = await self._list_interviews_all()
+        interviews_all = await self._list_interviews_all(allowed_colleges=allowed_colleges)
         reports_all = await self._reports_by_interview([i.id for i in interviews_all])
         summaries_all = await self._summary_reports_by_interview([i.id for i in interviews_all])
         user_university_map = await self._user_university_map()
@@ -865,7 +958,10 @@ class AnalyticsService:
             if score is not None:
                 college_score_groups[college_name].append(score)
 
+        allowed_colleges_set = set(allowed_colleges) if allowed_colleges is not None else None
         for college_name, total in college_interview_counts.items():
+            if allowed_colleges_set is not None and college_name not in allowed_colleges_set:
+                continue
             avg_score = _avg_non_null(college_score_groups.get(college_name, []))
             if total >= 10 and avg_score is not None and avg_score < 40:
                 system_alerts.append(
@@ -889,12 +985,15 @@ class AnalyticsService:
         start_date: datetime.date | None,
         end_date: datetime.date | None,
         now: datetime.datetime,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Surface durable answers whose AI processing needs attention.
 
         Only aggregate operational metadata is returned. Student answer text,
         audio URLs, and provider error details must not leak into analytics.
         """
+        if allowed_colleges is not None and not allowed_colleges:
+            return []
         stalled_before = now - datetime.timedelta(minutes=10)
         last_update = sqlalchemy.func.coalesce(
             QuestionAttempt.transcription_updated_at,
@@ -921,6 +1020,8 @@ class AnalyticsService:
             )
             .group_by(QuestionAttempt.transcription_status)
         )
+        if allowed_colleges is not None:
+            stmt = stmt.join(User, User.id == Interview.user_id).where(User.university.in_(list(allowed_colleges)))
         if user_id is not None:
             stmt = stmt.where(Interview.user_id == user_id)
         if start_date is not None:
@@ -997,10 +1098,15 @@ class AnalyticsService:
         difficulty: str | None = None,
         college: str | None = None,
         category: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[Interview]:
         stmt = sqlalchemy.select(Interview)
         if college:
             stmt = stmt.join(User, User.id == Interview.user_id).where(User.university == college)
+        elif allowed_colleges is not None:
+            if not allowed_colleges:
+                return []
+            stmt = stmt.join(User, User.id == Interview.user_id).where(User.university.in_(list(allowed_colleges)))
         if role:
             clean_role = re.sub(r'[^a-z0-9]', '', role.lower())
             stmt = stmt.where(
@@ -1603,15 +1709,19 @@ class AnalyticsService:
         avg = _avg_non_null(improvements)
         return avg if avg is not None else 0.0
 
-    async def _candidate_users(self, *, user_id: int | None) -> list[User]:
+    async def _candidate_users(self, *, user_id: int | None, allowed_colleges: Sequence[str] | set[str] | None = None) -> list[User]:
+        if allowed_colleges is not None and not allowed_colleges:
+            return []
         stmt = sqlalchemy.select(User)
         if user_id is not None:
             stmt = stmt.where(User.id == user_id)
+        if allowed_colleges is not None:
+            stmt = stmt.where(User.university.in_(list(allowed_colleges)))
         users = list((await self._db.execute(stmt)).scalars().all())
         return users
 
-    async def _overall_scores_between(self, start_date: datetime.date, end_date: datetime.date) -> list[float]:
-        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date)
+    async def _overall_scores_between(self, start_date: datetime.date, end_date: datetime.date, allowed_colleges: Sequence[str] | set[str] | None = None) -> list[float]:
+        interviews = await self._list_interviews_all(start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges)
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
         scores = [_extract_overall_score(reports.get(i.id), summaries.get(i.id)) for i in interviews]
@@ -1625,6 +1735,7 @@ class AnalyticsService:
         role: str | None = None,
         difficulty: str | None = None,
         college: str | None = None,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[AnalyticsEvent]:
         stmt = sqlalchemy.select(AnalyticsEvent)
         if start_date is not None:
@@ -1632,7 +1743,7 @@ class AnalyticsService:
         if end_date is not None:
             stmt = stmt.where(AnalyticsEvent.created_at <= datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc))
 
-        if role or difficulty or college:
+        if role or difficulty or college or allowed_colleges is not None:
             stmt = stmt.join(Interview, Interview.id == AnalyticsEvent.interview_id, isouter=True)
             if role:
                 stmt = stmt.where(Interview.track == role)
@@ -1640,6 +1751,10 @@ class AnalyticsService:
                 stmt = stmt.where(Interview.difficulty == difficulty)
             if college:
                 stmt = stmt.join(User, User.id == AnalyticsEvent.user_id, isouter=True).where(User.university == college)
+            elif allowed_colleges is not None:
+                if not allowed_colleges:
+                    return []
+                stmt = stmt.join(User, User.id == AnalyticsEvent.user_id, isouter=True).where(User.university.in_(list(allowed_colleges)))
 
         stmt = stmt.order_by(AnalyticsEvent.created_at.asc())
         return list((await self._db.execute(stmt)).scalars().all())

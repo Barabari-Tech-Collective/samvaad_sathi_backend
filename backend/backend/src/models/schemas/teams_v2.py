@@ -56,6 +56,8 @@ class TeamMemberUpdate(BaseSchemaModel):
     colleges: Optional[List[str]] = Field(None, description="Assigned colleges")
 
 
+
+
 class TeamMemberResponse(TeamMemberBase):
     id: int
     user_id: int

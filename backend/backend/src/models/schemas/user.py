@@ -73,6 +73,19 @@ class UserWithToken(BaseSchemaModel):
     ats_resume_filename: str | None = None
     ats_resume_id: int | None = None
     skills: list[str] | None = None
+    access_role: str | None = None
+    role: str | None = None
+    is_team_lead: bool = False
+    lead_team_id: int | None = None
+    lead_team_ids: list[int] | None = None
+    colleges: list[str] | None = None
+    domain: str | None = None
+    purposes: list[str] | None = None
+    can_create_roles: bool = False
+    can_access_ats: bool = False
+    team_name: str | None = None
+    can_edit: bool = False
+    is_view_only: bool = False
     # company removed from response
 
 

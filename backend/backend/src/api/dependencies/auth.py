@@ -25,6 +25,7 @@ async def get_current_user(
     # Cognito/local-password flow. Tried first since that's the path all new logins take;
     # falls back to the legacy verifier below so sessions minted before this migration (and
     # not yet re-authenticated through Sampark Saathi) keep working until they expire.
+    claims = None
     try:
         claims = decode_sso_access_token(token)
         email = claims.get("sub")
@@ -45,7 +46,12 @@ async def get_current_user(
             )
     except SsoTokenError:
         try:
-            _, email = jwt_generator.retrieve_details_from_token(token=token, secret_key=settings.JWT_SECRET_KEY)
+            from jose import jwt as jose_jwt
+            payload = jose_jwt.decode(token=token, key=settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+            email = payload.get("email") or payload.get("username")
+            if not email:
+                raise ValueError("Missing email in token payload")
+            claims = payload
         except Exception:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
@@ -73,6 +79,19 @@ async def get_current_user(
             detail="User not found in database",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Attach token claims and synchronize role metadata on non-persistent attributes
+    if claims:
+        raw_role = str(claims.get("role") or "").strip().upper()
+        norm_role = raw_role.replace("_", " ")
+        setattr(user, "_token_claims", claims)
+        setattr(user, "_token_role", raw_role)
+
+        if norm_role == "SUPER ADMIN":
+            setattr(user, "_token_is_super_admin", True)
+            setattr(user, "_token_is_admin", True)
+        elif norm_role == "ADMIN":
+            setattr(user, "_token_is_admin", True)
 
     return user
 

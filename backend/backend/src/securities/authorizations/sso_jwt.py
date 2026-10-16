@@ -14,11 +14,16 @@ class SsoTokenError(Exception):
     """Raised when a Sampark Saathi auth-service access token fails to verify."""
 
 
-# Students are the product's own users; ADMIN/SUPER_ADMIN operate the /v2/analytics
-# dashboard embedded in the Sampark Saathi admin console. Other staff roles
-# (FACILITATOR, PROGRAM_MANAGER, PLACEMENT_COM) have no Samvaad surface today and can
-# be added through SSO_ALLOWED_ROLES without a code change if that stops being true.
-DEFAULT_SSO_ALLOWED_ROLES = "STUDENT,ADMIN,SUPER_ADMIN"
+# Students are the product's primary users; ADMIN/SUPER_ADMIN operate the
+# console; CREATOR, FACILITATOR, LEAD, and staff roles operate the interview role
+# management, analytics, and team workflows.
+DEFAULT_SSO_ALLOWED_ROLES = (
+    "STUDENT,ADMIN,SUPER_ADMIN,SUPER ADMIN,CREATOR,FACILITATOR,"
+    "SR FACILITATOR,SR_FACILITATOR,SENIOR FACILITATOR,SENIOR_FACILITATOR,"
+    "JR FACILITATOR,JR_FACILITATOR,JUNIOR FACILITATOR,JUNIOR_FACILITATOR,"
+    "LEAD,STAFF,PROGRAM_MANAGER,PROGRAM MANAGER,PLACEMENT_COM,PLACEMENT COM,"
+    "RECRUITER,PLACEMENT_STAFF,PLACEMENT STAFF,TEAM_MEMBER,TEAM MEMBER,MEMBER"
+)
 
 
 def _allowed_roles() -> set[str]:
@@ -38,8 +43,21 @@ def _allowed_roles() -> set[str]:
         raw = (getattr(settings, "SSO_REQUIRED_ROLE", "") or "").strip()
     if not raw:
         raw = DEFAULT_SSO_ALLOWED_ROLES
-    roles = {role.strip().upper() for role in raw.split(",") if role.strip()}
-    return roles or {role.strip().upper() for role in DEFAULT_SSO_ALLOWED_ROLES.split(",")}
+    roles: set[str] = set()
+    for role in raw.split(","):
+        r = role.strip().upper()
+        if r:
+            roles.add(r)
+            roles.add(r.replace(" ", "_"))
+            roles.add(r.replace("_", " "))
+    if not roles:
+        for role in DEFAULT_SSO_ALLOWED_ROLES.split(","):
+            r = role.strip().upper()
+            if r:
+                roles.add(r)
+                roles.add(r.replace(" ", "_"))
+                roles.add(r.replace("_", " "))
+    return roles
 
 
 def decode_sso_access_token(token: str) -> dict:

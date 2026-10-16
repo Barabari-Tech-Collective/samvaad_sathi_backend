@@ -152,27 +152,59 @@ class TeamCRUDRepository(BaseCRUDRepository):
         if not team or team.status != "active":
             raise EntityDoesNotExist("Team not found or is inactive")
 
+        clean_role = (member_data.access_role or "").strip().replace("_", " ").lower()
+        if clean_role in {"jr facilitator", "junior facilitator"}:
+            sanitized_colleges = (
+                [c.strip() for c in member_data.colleges if isinstance(c, str) and c.strip()]
+                if member_data.colleges is not None
+                else []
+            )
+            if not sanitized_colleges:
+                raise ValueError("Assigned colleges are required when adding a Junior Facilitator.")
+            assigned_colleges = sanitized_colleges
+        else:
+            # Team Members and Creators are not assigned specific colleges (they view all colleges)
+            assigned_colleges = None
+
         # 2. Check if user exists by email
         email_clean = member_data.email.strip().lower()
-        stmt = select(User).where(User.email == email_clean)
+        stmt = select(User).where(func.lower(User.email) == email_clean)
         result = await self.async_session.execute(stmt)
         user = result.scalar_one_or_none()
         
         if not user:
-            if not member_data.password:
-                raise ValueError("Password is required when creating a new team member account.")
-            hashed_pw = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password)
+            if member_data.password:
+                hashed_pw = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
+            else:
+                # Password optional: accounts utilizing Central SSO authentication do not require a local password
+                hashed_pw = ""
+
             user = User(
                 email=email_clean,
                 name=member_data.name.strip(),
-                password_hash=hashed_pw, 
+                password_hash=hashed_pw,
+                role=None,
                 is_onboarded=False,
                 is_admin=False,
                 is_super_admin=False,
             )
             self.async_session.add(user)
             await self.async_session.flush()
-        # Security Note: If user already exists, NEVER overwrite their global password or email.
+        else:
+            # Security Note: Do not mutate global user.role with team-scoped access_role!
+            # Role authorization is evaluated dynamically from active TeamMember records.
+
+            if member_data.password:
+                is_uninitialized_pw = not user.password_hash
+                if not is_uninitialized_pw:
+                    try:
+                        is_uninitialized_pw = pwd_generator.is_password_authenticated(hash_salt="", password="", hashed_password=user.password_hash)
+                    except Exception:
+                        is_uninitialized_pw = False
+                if is_uninitialized_pw:
+                    # If user existed without a real password (e.g. from student SSO), initialize their password so they can log in
+                    user.password_hash = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
+        # Security Note: If user already exists with an established password, NEVER overwrite their global password.
 
         # 3. Check existing membership (prevent duplicate rows / reactivate soft-deleted)
         mem_stmt = select(TeamMember).where(TeamMember.team_id == team_id, TeamMember.user_id == user.id)
@@ -186,7 +218,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
             existing_member.access_role = member_data.access_role
             existing_member.purposes = member_data.purposes
             existing_member.domain = member_data.domain
-            existing_member.colleges = member_data.colleges
+            existing_member.colleges = assigned_colleges
             new_member = existing_member
         else:
             new_member = TeamMember(
@@ -195,7 +227,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
                 access_role=member_data.access_role,
                 purposes=member_data.purposes,
                 domain=member_data.domain,
-                colleges=member_data.colleges,
+                colleges=assigned_colleges,
                 status='active'
             )
             self.async_session.add(new_member)
@@ -260,14 +292,39 @@ class TeamCRUDRepository(BaseCRUDRepository):
         if not member:
             return None
         
+        raw_role = member_data.access_role if member_data.access_role is not None else member.access_role
+        effective_role = (raw_role or "").strip().replace("_", " ").lower()
+        is_updating_to_jf = (
+            member_data.access_role is not None
+            and effective_role in {"jr facilitator", "junior facilitator"}
+        )
+
+        if effective_role in {"team member", "member", "staff"}:
+            member.colleges = None
+        elif effective_role in {"jr facilitator", "junior facilitator"}:
+            if member_data.colleges is not None:
+                clean_colleges = [c.strip() for c in member_data.colleges if isinstance(c, str) and c.strip()]
+                if not clean_colleges:
+                    if is_updating_to_jf:
+                        raise ValueError("Assigned colleges are required when changing role to Junior Facilitator.")
+                    else:
+                        raise ValueError("Assigned colleges are required for Junior Facilitators.")
+                member.colleges = clean_colleges
+            elif is_updating_to_jf and (
+                not member.colleges
+                or not isinstance(member.colleges, list)
+                or not any(isinstance(c, str) and c.strip() for c in member.colleges)
+            ):
+                raise ValueError("Assigned colleges are required when changing role to Junior Facilitator.")
+        elif member_data.colleges is not None:
+            member.colleges = [c.strip() for c in member_data.colleges if isinstance(c, str) and c.strip()]
+
         if member_data.access_role is not None:
             member.access_role = member_data.access_role
         if member_data.purposes is not None:
             member.purposes = member_data.purposes
         if member_data.domain is not None:
             member.domain = member_data.domain
-        if member_data.colleges is not None:
-            member.colleges = member_data.colleges
             
         # Security Note: Never mutate user's email or password in team-scoped endpoint!
         stmt = select(User).where(User.id == member.user_id)

@@ -62,11 +62,17 @@ def test_owner_token_is_rejected():
         decode_sso_access_token(_mint("OWNER"))
 
 
+def test_creator_and_facilitator_tokens_are_accepted():
+    """Staff roles with a Samvaad surface (CREATOR, FACILITATOR, LEAD) must be accepted."""
+    assert decode_sso_access_token(_mint("CREATOR", "creator@example.com"))["sub"] == "creator@example.com"
+    assert decode_sso_access_token(_mint("FACILITATOR", "fac@example.com"))["sub"] == "fac@example.com"
+    assert decode_sso_access_token(_mint("LEAD", "lead@example.com"))["sub"] == "lead@example.com"
+
+
 def test_unlisted_staff_role_is_rejected():
-    """Widening to admins must not widen to every staff role. FACILITATOR has no
-    Samvaad surface, so it stays out until someone adds it to SSO_ALLOWED_ROLES."""
+    """Unlisted roles without a Samvaad entitlement must be rejected."""
     with pytest.raises(SsoTokenError):
-        decode_sso_access_token(_mint("FACILITATOR"))
+        decode_sso_access_token(_mint("UNKNOWN_ROLE"))
 
 
 def test_token_with_no_role_claim_is_rejected():
@@ -123,4 +129,4 @@ def test_blank_configuration_falls_back_rather_than_admitting_everything(monkeyp
     monkeypatch.setattr(sso_jwt.settings, "SSO_REQUIRED_ROLE", "")
     assert decode_sso_access_token(_mint("STUDENT"))["sub"] == "student@example.com"
     with pytest.raises(SsoTokenError):
-        decode_sso_access_token(_mint("FACILITATOR"))
+        decode_sso_access_token(_mint("UNKNOWN_ROLE"))

@@ -13,10 +13,7 @@
     "**/.pytest_cache",
     "**/.venv/**"
   ],
-  "venvPath": "/home/parshav-potato/projects/samvaad_sathi_backend",
-  "venv": "venv",
-  "pythonVersion": "3.13",
-  "pythonPlatform": "Linux",
+
   "executionEnvironments": [
     {
       "root": "backend/backend",
