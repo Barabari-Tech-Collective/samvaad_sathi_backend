@@ -528,7 +528,7 @@ async def check_team_permission(
         return False
 
     if require_lead:
-        role = (member.access_role or "").strip().lower()
+        role = normalize_role(member.access_role)
         return role in LEAD_ROLES
 
     return True
