@@ -1,19 +1,22 @@
-import sqlalchemy
-import logging
-import time
 import datetime
 import hashlib
+import logging
+import time
 from typing import Any
+
+import sqlalchemy
 from sqlalchemy.exc import IntegrityError
 
-from src.models.db.question_attempt import QuestionAttempt
 from src.models.db.interview_question import InterviewQuestion
+from src.models.db.question_attempt import QuestionAttempt
 from src.repository.crud.base import BaseCRUDRepository
+
 logger = logging.getLogger(__name__)
 
 
 class AttemptIdempotencyConflict(ValueError):
     """A client key was reused for a different question in one interview."""
+
 
 class QuestionAttemptCRUDRepository(BaseCRUDRepository):
     async def create_attempt(
@@ -54,9 +57,9 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
                 return existing, False
 
         logger.info(
-          "Creating question attempt | Interview=%s | Question=%s",
-          interview_id,
-          question_id,
+            "Creating question attempt | Interview=%s | Question=%s",
+            interview_id,
+            question_id,
         )
         """Create a new question attempt linked to a specific question"""
         attempt = QuestionAttempt(
@@ -84,11 +87,11 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
             return existing, False
         await self.async_session.refresh(attempt)
         logger.info(
-          "Question attempt created | Attempt=%s | Interview=%s | Question=%s | DBTime=%.2fs",
-          attempt.id,
-          interview_id,
-          question_id,
-          time.perf_counter() - db_start,
+            "Question attempt created | Attempt=%s | Interview=%s | Question=%s | DBTime=%.2fs",
+            attempt.id,
+            interview_id,
+            question_id,
+            time.perf_counter() - db_start,
         )
         return attempt, True
 
@@ -119,13 +122,100 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         attempt.answer_kind = "audio"
         attempt.answer_saved_at = datetime.datetime.now(datetime.timezone.utc)
         attempt.transcription = None
-        attempt.transcription_status = "processing"
+        # The HTTP request owns durable storage only.  Transcription is queued
+        # after this commit, so the row must stay pending until a worker
+        # actually claims it.  Calling it processing here made a Redis outage
+        # indistinguishable from an active Whisper job and left the UI polling
+        # forever.
+        attempt.transcription_status = "pending"
         attempt.transcription_error = None
         attempt.transcription_updated_at = datetime.datetime.now(datetime.timezone.utc)
         attempt.analysis_json = None
         attempt.feedback = None
         await self.async_session.commit()
         await self.async_session.refresh(attempt)
+        return attempt
+
+    async def mark_transcription_pending(
+        self, *, question_attempt_id: int, checksum: str
+    ) -> QuestionAttempt | None:
+        """Reset one still-current audio answer so it can be queued again."""
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(
+                QuestionAttempt.id == question_attempt_id,
+                QuestionAttempt.answer_checksum == checksum,
+                QuestionAttempt.answer_kind == "audio",
+                sqlalchemy.or_(
+                    QuestionAttempt.transcription_status.is_(None),
+                    QuestionAttempt.transcription_status.in_(
+                        ("pending", "processing", "failed")
+                    ),
+                ),
+            )
+            .values(
+                transcription_status="pending",
+                transcription_error=None,
+                transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            .returning(QuestionAttempt)
+        )
+        attempt = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if attempt is not None:
+            await self.async_session.refresh(attempt)
+        return attempt
+
+    async def mark_transcription_processing(
+        self, *, question_attempt_id: int, checksum: str
+    ) -> QuestionAttempt | None:
+        """Mark the exact answer version a worker is about to process."""
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(
+                QuestionAttempt.id == question_attempt_id,
+                QuestionAttempt.answer_checksum == checksum,
+                QuestionAttempt.answer_kind == "audio",
+                sqlalchemy.or_(
+                    QuestionAttempt.transcription_status.is_(None),
+                    QuestionAttempt.transcription_status == "pending",
+                ),
+            )
+            .values(
+                transcription_status="processing",
+                transcription_error=None,
+                transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            .returning(QuestionAttempt)
+        )
+        attempt = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if attempt is not None:
+            await self.async_session.refresh(attempt)
+        return attempt
+
+    async def mark_transcription_complete(
+        self, *, question_attempt_id: int, checksum: str
+    ) -> QuestionAttempt | None:
+        """Publish a transcript only after follow-up processing has finished."""
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(
+                QuestionAttempt.id == question_attempt_id,
+                QuestionAttempt.answer_checksum == checksum,
+                QuestionAttempt.transcription.is_not(None),
+            )
+            .values(
+                transcription_status="transcribed",
+                transcription_error=None,
+                transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            .returning(QuestionAttempt)
+        )
+        attempt = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if attempt is not None:
+            await self.async_session.refresh(attempt)
         return attempt
 
     async def save_text_answer(
@@ -172,7 +262,13 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
             await self.async_session.refresh(attempt)
         return attempt
 
-    async def create_batch(self, *, interview_id: int, questions: list[str], metadata: dict[str, Any] | None = None) -> list[QuestionAttempt]:
+    async def create_batch(
+        self,
+        *,
+        interview_id: int,
+        questions: list[str],
+        metadata: dict[str, Any] | None = None,
+    ) -> list[QuestionAttempt]:
         created: list[QuestionAttempt] = []
         for q in questions:
             qa = QuestionAttempt(interview_id=interview_id, question_text=str(q))
@@ -187,7 +283,7 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
 
     async def list_by_interview(self, *, interview_id: int) -> list[QuestionAttempt]:
         """Get the latest attempt for each question in an interview, ordered by question order.
-        
+
         When a question has multiple attempts (reattempts), only the latest attempt
         (highest attempt id) is returned. This ensures:
         1. Questions appear in their original order (by InterviewQuestion.order)
@@ -197,33 +293,39 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         latest_attempt_subq = (
             sqlalchemy.select(
                 QuestionAttempt.question_id,
-                sqlalchemy.func.max(QuestionAttempt.id).label("max_id")
+                sqlalchemy.func.max(QuestionAttempt.id).label("max_id"),
             )
             .where(QuestionAttempt.interview_id == interview_id)
             .group_by(QuestionAttempt.question_id)
             .subquery()
         )
-        
+
         # Main query: join with subquery to get only the latest attempt per question
         stmt = (
             sqlalchemy.select(QuestionAttempt)
-            .join(latest_attempt_subq, QuestionAttempt.id == latest_attempt_subq.c.max_id)
-            .join(InterviewQuestion, QuestionAttempt.question_id == InterviewQuestion.id)
+            .join(
+                latest_attempt_subq, QuestionAttempt.id == latest_attempt_subq.c.max_id
+            )
+            .join(
+                InterviewQuestion, QuestionAttempt.question_id == InterviewQuestion.id
+            )
             .where(QuestionAttempt.interview_id == interview_id)
             .order_by(InterviewQuestion.order.asc())
         )
         query = await self.async_session.execute(statement=stmt)
         rows = query.scalars().all()
         logger.debug(
-           "Loaded interview attempts | Interview=%s | Count=%d",
-           interview_id,
-           len(rows),
+            "Loaded interview attempts | Interview=%s | Count=%d",
+            interview_id,
+            len(rows),
         )
         return list(rows)
 
-    async def list_by_interview_cursor(self, *, interview_id: int, limit: int, cursor_id: int | None) -> tuple[list[QuestionAttempt], int | None]:
+    async def list_by_interview_cursor(
+        self, *, interview_id: int, limit: int, cursor_id: int | None
+    ) -> tuple[list[QuestionAttempt], int | None]:
         """Get the latest attempt for each question with cursor pagination, ordered by question order.
-        
+
         When a question has multiple attempts (reattempts), only the latest attempt
         (highest attempt id) is returned. Cursor is based on InterviewQuestion.order for stable pagination.
         """
@@ -231,25 +333,31 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         latest_attempt_subq = (
             sqlalchemy.select(
                 QuestionAttempt.question_id,
-                sqlalchemy.func.max(QuestionAttempt.id).label("max_id")
+                sqlalchemy.func.max(QuestionAttempt.id).label("max_id"),
             )
             .where(QuestionAttempt.interview_id == interview_id)
             .group_by(QuestionAttempt.question_id)
             .subquery()
         )
-        
+
         # Main query: join with subquery to get only the latest attempt per question
         stmt = (
             sqlalchemy.select(QuestionAttempt)
-            .join(latest_attempt_subq, QuestionAttempt.id == latest_attempt_subq.c.max_id)
-            .join(InterviewQuestion, QuestionAttempt.question_id == InterviewQuestion.id)
+            .join(
+                latest_attempt_subq, QuestionAttempt.id == latest_attempt_subq.c.max_id
+            )
+            .join(
+                InterviewQuestion, QuestionAttempt.question_id == InterviewQuestion.id
+            )
             .where(QuestionAttempt.interview_id == interview_id)
         )
         if cursor_id is not None:
             # Use question order for cursor, not attempt id (more stable for pagination)
             cursor_order_subq = (
                 sqlalchemy.select(InterviewQuestion.order)
-                .join(QuestionAttempt, QuestionAttempt.question_id == InterviewQuestion.id)
+                .join(
+                    QuestionAttempt, QuestionAttempt.question_id == InterviewQuestion.id
+                )
                 .where(QuestionAttempt.id == cursor_id)
                 .scalar_subquery()
             )
@@ -266,19 +374,23 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
     async def get_by_id(self, *, question_attempt_id: int) -> QuestionAttempt | None:
         db_start = time.perf_counter()
         """Get a question attempt by ID"""
-        stmt = sqlalchemy.select(QuestionAttempt).where(QuestionAttempt.id == question_attempt_id)
+        stmt = sqlalchemy.select(QuestionAttempt).where(
+            QuestionAttempt.id == question_attempt_id
+        )
         query = await self.async_session.execute(statement=stmt)
         result = query.scalar_one_or_none()
         logger.info(
-          "Fetched question attempt | Attempt=%s | Found=%s | DBTime=%.2fs",
-          question_attempt_id,
-          result is not None,
-          time.perf_counter() - db_start,
-        ) 
+            "Fetched question attempt | Attempt=%s | Found=%s | DBTime=%.2fs",
+            question_attempt_id,
+            result is not None,
+            time.perf_counter() - db_start,
+        )
 
         return result
 
-    async def get_by_id_and_user(self, *, question_attempt_id: int, user_id: int) -> QuestionAttempt | None:
+    async def get_by_id_and_user(
+        self, *, question_attempt_id: int, user_id: int
+    ) -> QuestionAttempt | None:
         db_start = time.perf_counter()
         """Get a question attempt by ID, ensuring it belongs to the specified user"""
         stmt = (
@@ -286,18 +398,18 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
             .join(QuestionAttempt.interview)
             .where(
                 QuestionAttempt.id == question_attempt_id,
-                QuestionAttempt.interview.has(user_id=user_id)
+                QuestionAttempt.interview.has(user_id=user_id),
             )
         )
         query = await self.async_session.execute(statement=stmt)
         result = query.scalar_one_or_none()
 
         logger.info(
-        "Verified question attempt ownership | Attempt=%s | User=%s | Found=%s | DBTime=%.2fs",
-        question_attempt_id,
-        user_id,
-        result is not None,
-        time.perf_counter() - db_start,
+            "Verified question attempt ownership | Attempt=%s | User=%s | Found=%s | DBTime=%.2fs",
+            question_attempt_id,
+            user_id,
+            result is not None,
+            time.perf_counter() - db_start,
         )
 
         return result
@@ -309,12 +421,13 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         audio_url: str,
         transcription: dict,
         checksum: str | None = None,
+        finalize: bool = True,
     ) -> QuestionAttempt | None:
         db_start = time.perf_counter()
 
         logger.info(
-          "Updating transcription | Attempt=%s",
-          question_attempt_id,
+            "Updating transcription | Attempt=%s",
+            question_attempt_id,
         )
         """Update a question attempt with audio URL and transcription data"""
         conditions = [QuestionAttempt.id == question_attempt_id]
@@ -326,7 +439,7 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
             .values(
                 audio_url=audio_url,
                 transcription=transcription,
-                transcription_status="transcribed",
+                transcription_status="transcribed" if finalize else "processing",
                 transcription_error=None,
                 transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
             )
@@ -338,53 +451,96 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         if question_attempt:
             await self.async_session.refresh(question_attempt)
             logger.info(
-            "Transcription saved | Attempt=%s | Audio=%s | TranscriptChars=%d | DBTime=%.2fs",
-            question_attempt_id,
-            bool(audio_url),
-            len(transcription.get("text", "")),
-            time.perf_counter() - db_start,
+                "Transcription saved | Attempt=%s | Audio=%s | TranscriptChars=%d | DBTime=%.2fs",
+                question_attempt_id,
+                bool(audio_url),
+                len(transcription.get("text", "")),
+                time.perf_counter() - db_start,
             )
         else:
             logger.warning(
                 "Question attempt missing or superseded while saving transcription | Attempt=%s",
                 question_attempt_id,
             )
-        
+
         return question_attempt
 
+    async def get_follow_up_payload_for_attempt(
+        self, *, question_attempt_id: int
+    ) -> dict[str, Any] | None:
+        """Return the generated child prompt for a completed parent answer.
+
+        Follow-up creation is idempotent in ``FollowUpService``.  Looking it up
+        from authoritative rows lets a browser reconnect to background work
+        without keeping transient worker metadata in Redis or in process.
+        """
+        parent = await self.get_by_id(question_attempt_id=question_attempt_id)
+        if parent is None or parent.question_id is None:
+            return None
+        question_stmt = (
+            sqlalchemy.select(InterviewQuestion)
+            .where(InterviewQuestion.parent_question_id == parent.question_id)
+            .order_by(InterviewQuestion.id.asc())
+            .limit(1)
+        )
+        question = (
+            await self.async_session.execute(question_stmt)
+        ).scalar_one_or_none()
+        if question is None:
+            return None
+        attempt_stmt = (
+            sqlalchemy.select(QuestionAttempt)
+            .where(QuestionAttempt.question_id == question.id)
+            .order_by(QuestionAttempt.id.asc())
+            .limit(1)
+        )
+        follow_up_attempt = (
+            await self.async_session.execute(attempt_stmt)
+        ).scalar_one_or_none()
+        if follow_up_attempt is None:
+            return None
+        return {
+            "interview_question_id": question.id,
+            "question_attempt_id": follow_up_attempt.id,
+            "parent_question_id": parent.question_id,
+            "text": question.text,
+            "strategy": question.follow_up_strategy,
+        }
+
     async def update_analysis_json(
-        self,
-        *,
-        question_attempt_id: int,
-        analysis_json: dict
+        self, *, question_attempt_id: int, analysis_json: dict
     ) -> QuestionAttempt | None:
         db_start = time.perf_counter()
         logger.info(
-         "Saving analysis JSON | Attempt=%s",
-         question_attempt_id,
+            "Saving analysis JSON | Attempt=%s",
+            question_attempt_id,
         )
         """Update a question attempt with analysis results"""
-        stmt = sqlalchemy.select(QuestionAttempt).where(QuestionAttempt.id == question_attempt_id)
+        stmt = sqlalchemy.select(QuestionAttempt).where(
+            QuestionAttempt.id == question_attempt_id
+        )
         query = await self.async_session.execute(statement=stmt)
         question_attempt = query.scalar_one_or_none()
-        
+
         if question_attempt:
             question_attempt.analysis_json = analysis_json
             await self.async_session.commit()
             await self.async_session.refresh(question_attempt)
             logger.info(
-              "Analysis JSON saved | Attempt=%s | DBTime=%.2fs",
-              question_attempt_id,
-              time.perf_counter() - db_start,
+                "Analysis JSON saved | Attempt=%s | DBTime=%.2fs",
+                question_attempt_id,
+                time.perf_counter() - db_start,
             )
         else:
             logger.warning(
-            "Question attempt not found while saving analysis JSON | Attempt=%s",
-            question_attempt_id,
+                "Question attempt not found while saving analysis JSON | Attempt=%s",
+                question_attempt_id,
             )
         return question_attempt
 
-    async def get_first_by_question_id(self, *, question_id: int) -> QuestionAttempt | None:
+    async def get_first_by_question_id(
+        self, *, question_id: int
+    ) -> QuestionAttempt | None:
         """Fetch the earliest attempt for a given question (useful for metadata lookups)."""
         stmt = (
             sqlalchemy.select(QuestionAttempt)

@@ -8,7 +8,6 @@ from src.models.schemas.audio import TextAnswerRequest
 from src.models.schemas.interview import CreateAttemptRequest
 from src.repository.crud.question import AttemptIdempotencyConflict
 
-
 USER = SimpleNamespace(id=17)
 
 
@@ -86,7 +85,7 @@ async def test_start_attempt_rejects_client_key_reused_for_another_question():
 
 
 @pytest.mark.asyncio
-async def test_audio_is_acknowledged_when_transcription_fails(monkeypatch):
+async def test_audio_is_acknowledged_when_background_queue_is_unavailable(monkeypatch):
     attempt = SimpleNamespace(
         id=42,
         interview_id=9,
@@ -125,12 +124,12 @@ async def test_audio_is_acknowledged_when_transcription_fails(monkeypatch):
     async def store(**_kwargs):
         return "private/answer.wav"
 
-    async def transcribe(**_kwargs):
-        return None, "provider unavailable", 25, "whisper"
+    async def queue(*_args, **_kwargs):
+        return None
 
     monkeypatch.setattr(audio, "validate_audio_file", validate)
     monkeypatch.setattr(audio, "upload_answer_audio_to_s3", store)
-    monkeypatch.setattr(audio, "transcribe_audio_with_whisper", transcribe)
+    monkeypatch.setattr(audio, "enqueue_job", queue)
     monkeypatch.setattr(audio, "get_audio_duration_estimate", lambda *_args: 1.2)
 
     result = await audio.transcribe_audio_answer(
@@ -140,9 +139,7 @@ async def test_audio_is_acknowledged_when_transcription_fails(monkeypatch):
         current_user=USER,
         question_repo=Repo(),
         interview_repo=SimpleNamespace(
-            get_by_id=AsyncMock(
-                return_value=SimpleNamespace(status="active")
-            )
+            get_by_id=AsyncMock(return_value=SimpleNamespace(status="active"))
         ),
     )
 
