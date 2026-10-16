@@ -114,10 +114,17 @@ def extract_memberships_from_result(res) -> list:
     if res is None:
         return []
     try:
+        from sqlalchemy.engine.row import Row
+    except ImportError:
+        Row = ()
+    try:
         if hasattr(res, "all") and callable(res.all):
             a_res = res.all()
             if isinstance(a_res, list):
-                return a_res
+                return [
+                    tuple(item) if (isinstance(item, Row) or (not isinstance(item, (tuple, list)) and hasattr(item, "__getitem__") and not hasattr(item, "access_role"))) else item
+                    for item in a_res
+                ]
     except Exception:
         pass
     try:
@@ -325,7 +332,7 @@ async def get_current_creator_user(
             roles = {
                 normalize_role(
                     getattr(
-                        item[0] if isinstance(item, (tuple, list)) else item,
+                        item[0] if (isinstance(item, (tuple, list)) or hasattr(item, "__getitem__")) else item,
                         "access_role",
                         "",
                     )
@@ -521,7 +528,7 @@ async def check_team_permission(
         return False
 
     if require_lead:
-        role = (member.access_role or "").strip().lower()
+        role = normalize_role(member.access_role)
         return role in LEAD_ROLES
 
     return True

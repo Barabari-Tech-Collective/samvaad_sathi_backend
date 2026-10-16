@@ -1514,6 +1514,89 @@ async def test_update_existing_junior_facilitator_clearing_colleges_fails():
     assert "Assigned colleges are required" in str(exc_info.value)
 
 
+def test_extract_memberships_from_result_converts_sqlalchemy_row_to_tuple():
+    """Ensure extract_memberships_from_result converts SQLAlchemy Row objects into standard tuples."""
+    import sqlalchemy
+    from sqlalchemy import select, literal
+    from src.api.dependencies.admin import extract_memberships_from_result
+
+    engine = sqlalchemy.create_engine("sqlite:///:memory:")
+    with engine.connect() as conn:
+        row = conn.execute(select(literal("member_obj").label("TeamMember"), literal("team_obj").label("Team"))).first()
+
+    mock_res = MagicMock()
+    mock_res.all.return_value = [row]
+
+    result = extract_memberships_from_result(mock_res)
+    assert len(result) == 1
+    assert isinstance(result[0], tuple)
+    assert result[0] == ("member_obj", "team_obj")
+
+
+@pytest.mark.asyncio
+async def test_login_user_handles_senior_facilitator_with_row_memberships():
+    """Regression test: login_user safely unpacks SQLAlchemy Row memberships and does not crash with 500 on access_role."""
+    from src.api.routes.users import login_user
+    from src.models.schemas.user import UserLogin
+
+    mock_user = User(
+        id=701,
+        email="rukmini@gmail.com",
+        name="Rukmini Staff",
+        is_admin=False,
+        is_super_admin=False,
+        role=None,
+        password_hash="somehash",
+        created_at=datetime.datetime.now(datetime.timezone.utc),
+        is_onboarded=True,
+    )
+    mock_session = AsyncMock()
+    mock_session_repo = AsyncMock()
+    mock_session_repo.create_session.return_value = MagicMock(token="ref-tok-rukmini")
+
+    mock_user_repo = AsyncMock()
+    mock_user_repo.verify_password.return_value = mock_user
+
+    mock_member = MagicMock()
+    mock_member.access_role = "Senior Facilitator"
+    mock_member.domain = "Engineering"
+    mock_member.purposes = ["Placement Prep"]
+    mock_member.colleges = []
+    mock_member.status = "active"
+
+    mock_team = MagicMock()
+    mock_team.name = "Program Team"
+    mock_team.status = "active"
+
+    class StrictRow:
+        def __init__(self, items):
+            self._items = items
+        def __getitem__(self, idx):
+            return self._items[idx]
+        def __len__(self):
+            return len(self._items)
+        def __getattr__(self, name):
+            raise AttributeError(f"Could not locate column in row for column '{name}'")
+
+    strict_row = StrictRow([mock_member, mock_team])
+
+    with patch("src.api.routes.users.get_user_active_memberships", return_value=[strict_row]), \
+         patch("src.api.routes.users.jwt_generator.generate_access_token_for_user") as mock_jwt:
+        mock_jwt.return_value = "jwt-sr-fac-token"
+        resp = await login_user(
+            payload=UserLogin(email="rukmini@gmail.com", password="ValidPassword123!"),
+            user_repo=mock_user_repo,
+            session_repo=mock_session_repo,
+            session=mock_session,
+        )
+
+        call_claims = mock_jwt.call_args[1].get("extra_claims", {})
+        assert call_claims.get("role") == "SENIOR FACILITATOR"
+        assert resp.authorized_user.access_role == "Senior Facilitator"
+        assert resp.authorized_user.team_name == "Program Team"
+
+
+
 
 
 

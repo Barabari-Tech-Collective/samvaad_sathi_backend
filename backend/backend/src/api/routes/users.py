@@ -16,6 +16,7 @@ from src.api.dependencies.admin import (
 from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
+from src.models.db.user import User
 from src.models.db.user_resume import UserResume
 from src.models.schemas.user import (
     UserCreate,
@@ -99,6 +100,80 @@ async def register_user(
     )
 
 
+def _extract_primary_membership_and_claims(user: User, memberships: list) -> dict:
+    """Extract primary team membership details, calculate permissions, and build JWT claims.
+
+    Handles multi-team setups deterministically by extracting the primary membership
+    from memberships[0], while aggregating cross-team permissions via calculate_user_permissions.
+    Safely unpacks SQLAlchemy Row objects, tuples, or scalar TeamMember records.
+    """
+    first_item = memberships[0] if memberships else None
+    member = None
+    primary_team = None
+    if first_item is not None:
+        if isinstance(first_item, (tuple, list)) or hasattr(first_item, "__getitem__"):
+            try:
+                member = first_item[0]
+                primary_team = first_item[1] if len(first_item) > 1 else None
+            except Exception:
+                member = first_item
+                primary_team = getattr(member, "team", None)
+        else:
+            member = first_item
+            primary_team = getattr(member, "team", None)
+
+    perms = calculate_user_permissions(user, memberships)
+    access_role = getattr(member, "access_role", None) if member else None
+    colleges = perms["colleges"]
+    domain = getattr(member, "domain", None) if member else None
+    purposes = getattr(member, "purposes", None) if member and isinstance(getattr(member, "purposes", None), list) else None
+    is_admin_flag = is_admin_user(user)
+    is_super_admin_flag = is_super_admin_user(user)
+    can_access_ats = perms["can_access_ats"]
+    can_create_roles = perms["can_create_roles"]
+    can_edit = perms["can_edit"]
+    is_view_only = perms["is_view_only"]
+    is_team_lead = perms["is_team_lead"]
+    effective_role = access_role or getattr(user, "_token_role", None) or getattr(user, "role", None)
+
+    role_claim = (
+        "SUPER_ADMIN" if is_super_admin_flag
+        else ("ADMIN" if is_admin_flag
+        else (str(effective_role).upper() if effective_role else "STUDENT"))
+    )
+
+    extra_claims = {
+        "role": role_claim,
+        "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else ""),
+    }
+
+    team_name = getattr(primary_team, "name", None) if primary_team else None
+    display_role = access_role or getattr(user, "role", None) or (str(effective_role).lower() if effective_role else "student")
+    display_access_role = access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None)
+
+    return {
+        "member": member,
+        "primary_team": primary_team,
+        "perms": perms,
+        "access_role": display_access_role,
+        "role": display_role,
+        "colleges": colleges,
+        "domain": domain,
+        "purposes": purposes,
+        "is_admin": is_admin_flag,
+        "is_super_admin": is_super_admin_flag,
+        "can_access_ats": can_access_ats,
+        "can_create_roles": can_create_roles,
+        "can_edit": can_edit,
+        "is_view_only": is_view_only,
+        "is_team_lead": is_team_lead,
+        "effective_role": effective_role,
+        "role_claim": role_claim,
+        "extra_claims": extra_claims,
+        "team_name": team_name,
+    }
+
+
 @router.post(
     path="/login",
     name="users:login",
@@ -130,35 +205,11 @@ async def login_user(
     user_is_onboarded = user.is_onboarded if hasattr(user, "is_onboarded") else False
 
     memberships = await get_user_active_memberships(user.id, session)
-    first_item = memberships[0] if memberships else None
-    if isinstance(first_item, (tuple, list)):
-        member = first_item[0]
-        primary_team = first_item[1] if len(first_item) > 1 else None
-    else:
-        member = first_item
-        primary_team = getattr(member, "team", None) if member else None
+    claims_data = _extract_primary_membership_and_claims(user, memberships)
 
-    perms = calculate_user_permissions(user, memberships)
-    access_role = member.access_role if member else None
-    colleges = perms["colleges"]
-    domain = member.domain if member else None
-    purposes = member.purposes if member and isinstance(member.purposes, list) else None
-    is_admin_flag = is_admin_user(user)
-    can_access_ats = perms["can_access_ats"]
-    can_create_roles = perms["can_create_roles"]
-    can_edit = perms["can_edit"]
-    is_view_only = perms["is_view_only"]
-    is_team_lead = perms["is_team_lead"]
-    effective_role = access_role or getattr(user, "_token_role", None) or getattr(user, "role", None)
-
-    role_claim = (
-        "SUPER_ADMIN" if is_super_admin_user(user)
-        else ("ADMIN" if is_admin_flag
-        else (str(effective_role).upper() if effective_role else "STUDENT"))
-    )
     token = jwt_generator.generate_access_token_for_user(
         user=user,
-        extra_claims={"role": role_claim, "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else "")}
+        extra_claims=claims_data["extra_claims"],
     )
     refresh = await session_repo.create_session(user_id=user_id, expiry_minutes=settings.REFRESH_TOKEN_EXPIRY_MINUTES)
 
@@ -171,19 +222,19 @@ async def login_user(
             name=user_name,
             created_at=user_created_at,
             is_onboarded=user_is_onboarded,
-            is_admin=is_admin_flag,
-            is_super_admin=is_super_admin_user(user),
-            access_role=access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None),
-            role=access_role or getattr(user, "role", None) or (str(effective_role).lower() if effective_role else "student"),
-            is_team_lead=is_team_lead,
-            colleges=colleges,
-            domain=domain,
-            purposes=purposes,
-            can_create_roles=can_create_roles,
-            can_access_ats=can_access_ats,
-            can_edit=can_edit,
-            is_view_only=is_view_only,
-            team_name=primary_team.name if primary_team else None,
+            is_admin=claims_data["is_admin"],
+            is_super_admin=claims_data["is_super_admin"],
+            access_role=claims_data["access_role"],
+            role=claims_data["role"],
+            is_team_lead=claims_data["is_team_lead"],
+            colleges=claims_data["colleges"],
+            domain=claims_data["domain"],
+            purposes=claims_data["purposes"],
+            can_create_roles=claims_data["can_create_roles"],
+            can_access_ats=claims_data["can_access_ats"],
+            can_edit=claims_data["can_edit"],
+            is_view_only=claims_data["is_view_only"],
+            team_name=claims_data["team_name"],
             can_use_bulk_ats=is_bulk_ats_user(user),
             degree=None,
             university=None,
@@ -284,40 +335,12 @@ async def get_me(
         if onboarding_resume_filename and ats_resume_filename:
             break
 
-    is_admin_flag = is_admin_user(current_user)
-
     memberships = await get_user_active_memberships(current_user.id, session)
-    first_item = memberships[0] if memberships else None
-    if isinstance(first_item, (tuple, list)):
-        member = first_item[0]
-        primary_team = first_item[1] if len(first_item) > 1 else None
-    else:
-        member = first_item
-        primary_team = getattr(member, "team", None) if member else None
+    claims_data = _extract_primary_membership_and_claims(current_user, memberships)
 
-    perms = calculate_user_permissions(current_user, memberships)
-    access_role = member.access_role if member else None
-    colleges = perms["colleges"]
-    domain = member.domain if member else None
-    purposes = member.purposes if member and isinstance(member.purposes, list) else None
-    can_access_ats = perms["can_access_ats"]
-    can_create_roles = perms["can_create_roles"]
-    can_edit = perms["can_edit"]
-    is_view_only = perms["is_view_only"]
-    is_team_lead = perms["is_team_lead"]
-    effective_role = access_role or getattr(current_user, "_token_role", None) or getattr(current_user, "role", None)
-
-    role_claim = (
-        "SUPER_ADMIN" if is_super_admin_user(current_user)
-        else ("ADMIN" if is_admin_flag
-        else (str(effective_role).upper() if effective_role else "STUDENT"))
-    )
     token = jwt_generator.generate_access_token_for_user(
         user=current_user,
-        extra_claims={
-            "role": role_claim,
-            "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else ""),
-        },
+        extra_claims=claims_data["extra_claims"],
     )
 
     return UserInResponse(
@@ -329,19 +352,19 @@ async def get_me(
             name=current_user.name,
             created_at=current_user.created_at,
             is_onboarded=getattr(current_user, 'is_onboarded', False),
-            is_admin=is_admin_flag,
-            is_super_admin=is_super_admin_user(current_user),
-            access_role=access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None),
-            role=access_role or getattr(current_user, "role", None) or (str(effective_role).lower() if effective_role else "student"),
-            is_team_lead=is_team_lead,
-            colleges=colleges,
-            domain=domain,
-            purposes=purposes,
-            can_create_roles=can_create_roles,
-            can_access_ats=can_access_ats,
-            can_edit=can_edit,
-            is_view_only=is_view_only,
-            team_name=primary_team.name if primary_team else None,
+            is_admin=claims_data["is_admin"],
+            is_super_admin=claims_data["is_super_admin"],
+            access_role=claims_data["access_role"],
+            role=claims_data["role"],
+            is_team_lead=claims_data["is_team_lead"],
+            colleges=claims_data["colleges"],
+            domain=claims_data["domain"],
+            purposes=claims_data["purposes"],
+            can_create_roles=claims_data["can_create_roles"],
+            can_access_ats=claims_data["can_access_ats"],
+            can_edit=claims_data["can_edit"],
+            is_view_only=claims_data["is_view_only"],
+            team_name=claims_data["team_name"],
             can_use_bulk_ats=is_bulk_ats_user(current_user),
             degree=current_user.degree,
             university=current_user.university,
