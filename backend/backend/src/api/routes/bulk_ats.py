@@ -1087,16 +1087,26 @@ async def rerun_candidate(
         await _mark_queue_failure(
             repo, candidate_id=candidate_id, batch_id=candidate.batch_id
         )
-    else:
-        await repo.refresh_batch_status(candidate.batch_id)
+        await repo.record_audit(
+            action="candidate_rerun_requested",
+            actor_id=current_user.id,
+            batch_id=candidate.batch_id,
+            candidate_id=candidate.id,
+            metadata={"queued": False},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Background processing is unavailable. Please try again shortly.",
+        )
+    await repo.refresh_batch_status(candidate.batch_id)
     await repo.record_audit(
         action="candidate_rerun_requested",
         actor_id=current_user.id,
         batch_id=candidate.batch_id,
         candidate_id=candidate.id,
-        metadata={"queued": bool(queued)},
+        metadata={"queued": True},
     )
-    return {"candidateId": candidate_id, "queued": bool(queued)}
+    return {"candidateId": candidate_id, "queued": True, "jobId": queued}
 
 
 @router.patch("/candidates/{candidate_id}/review")

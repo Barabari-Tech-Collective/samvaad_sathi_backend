@@ -807,6 +807,8 @@ async def generate_bulk_ats_feedback_task(
                 **generating_state,
                 "status": "failed",
                 "error": str(exc),
+                "errorCode": exc.code,
+                "retryable": exc.retryable,
                 "completedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             }
             await repo.update_feedback_state(
@@ -820,7 +822,12 @@ async def generate_bulk_ats_feedback_task(
                 actor_id=requested_by,
                 batch_id=candidate.batch_id,
                 candidate_id=candidate_id,
-                metadata={"audience": audience, "requestId": request_id},
+                metadata={
+                    "audience": audience,
+                    "requestId": request_id,
+                    "errorCode": exc.code,
+                    "retryable": exc.retryable,
+                },
             )
             return {"status": "failed", "error": str(exc)}
 

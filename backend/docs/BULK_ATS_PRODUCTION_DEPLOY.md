@@ -17,6 +17,7 @@ Date: 2026-10-15
 - [ ] Configure `BULK_ATS_OCR_ENABLED=True`, `BULK_ATS_OCR_LANGUAGE=eng+hin`, `BULK_ATS_CLAMAV_HOST`, `BULK_ATS_CLAMAV_PORT=3310`, and `BULK_ATS_CLAMAV_FAIL_CLOSED=True`.
 - [ ] Back up the database and record the current application/worker image IDs.
 - [ ] Confirm frontend and backend origins are HTTPS and allowed by CORS.
+- [ ] Configure `BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS=600` (or higher). Lower limits can truncate the required JSON feedback object.
 
 Google recommends the server-side authorization-code flow for offline access, exact redirect-URI matching, non-guessable state, secure refresh-token storage, and handling revocation. This implementation follows those properties and keeps access tokens ephemeral:
 
