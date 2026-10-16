@@ -20,6 +20,7 @@ from src.api.routes.bulk_ats import (
     _queue_candidate_feedback,
     _require_role_rubric,
 )
+from src.api.routes import bulk_ats as bulk_ats_routes
 from src.config.manager import settings
 from src.main import backend_app
 from src.repository.crud.bulk_ats import BulkATSCRUDRepository
@@ -396,6 +397,73 @@ def test_bulk_ats_endpoints_are_exposed_in_openapi():
     assert "/api/bulk-ats/google-drive/status" in paths
     assert "/api/bulk-ats/google-drive/connect" in paths
     assert "/api/bulk-ats/google-drive/connection" in paths
+
+
+@pytest.mark.asyncio
+async def test_rerun_returns_503_when_background_job_cannot_be_queued(monkeypatch):
+    candidate = SimpleNamespace(id=28, batch_id=4)
+    repo = SimpleNamespace(
+        update_candidate_status=AsyncMock(),
+        refresh_batch_status=AsyncMock(),
+        record_audit=AsyncMock(),
+    )
+    monkeypatch.setattr(bulk_ats_routes, "BulkATSCRUDRepository", lambda _session: repo)
+    monkeypatch.setattr(
+        bulk_ats_routes,
+        "_get_authorized_candidate",
+        AsyncMock(return_value=candidate),
+    )
+    monkeypatch.setattr(bulk_ats_routes, "enqueue_job", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        bulk_ats_routes,
+        "_mark_queue_failure",
+        AsyncMock(),
+    )
+
+    with pytest.raises(HTTPException) as captured:
+        await bulk_ats_routes.rerun_candidate(
+            candidate_id=28,
+            current_user=SimpleNamespace(id=7),
+            session=SimpleNamespace(),
+        )
+
+    assert captured.value.status_code == 503
+    bulk_ats_routes._mark_queue_failure.assert_awaited_once_with(
+        repo, candidate_id=28, batch_id=4
+    )
+    repo.record_audit.assert_awaited_once()
+    assert repo.record_audit.await_args.kwargs["metadata"] == {"queued": False}
+
+
+@pytest.mark.asyncio
+async def test_rerun_returns_job_id_after_successful_enqueue(monkeypatch):
+    candidate = SimpleNamespace(id=28, batch_id=4)
+    repo = SimpleNamespace(
+        update_candidate_status=AsyncMock(),
+        refresh_batch_status=AsyncMock(),
+        record_audit=AsyncMock(),
+    )
+    monkeypatch.setattr(bulk_ats_routes, "BulkATSCRUDRepository", lambda _session: repo)
+    monkeypatch.setattr(
+        bulk_ats_routes,
+        "_get_authorized_candidate",
+        AsyncMock(return_value=candidate),
+    )
+    monkeypatch.setattr(
+        bulk_ats_routes,
+        "enqueue_job",
+        AsyncMock(return_value="rerun-job-28"),
+    )
+
+    result = await bulk_ats_routes.rerun_candidate(
+        candidate_id=28,
+        current_user=SimpleNamespace(id=7),
+        session=SimpleNamespace(),
+    )
+
+    assert result == {"candidateId": 28, "queued": True, "jobId": "rerun-job-28"}
+    repo.refresh_batch_status.assert_awaited_once_with(4)
+    repo.record_audit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -912,6 +980,99 @@ async def test_shareable_feedback_uses_deepseek_without_candidate_identity(monke
     assert "Data Analyst" in serialized_input
     assert "Asha" not in serialized_input
     assert "example.com" not in serialized_input
+    assert '"nextSteps":["..."]' in request["messages"][0]["content"]
+    assert request["max_tokens"] == settings.BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_shareable_feedback_retries_truncated_json_once(monkeypatch):
+    truncated = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content='{"summary":"Incomplete'),
+                finish_reason="length",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=350),
+    )
+    complete = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=(
+                        '{"summary":"Good foundation.",'
+                        '"strengths":["Python evidence"],'
+                        '"improvements":["Quantify outcomes"],'
+                        '"nextSteps":["Update project bullets"],'
+                        '"interviewFocus":["Explain project choices"]}'
+                    )
+                ),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=110, completion_tokens=75),
+    )
+    completion = AsyncMock(side_effect=[truncated, complete])
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=completion))
+    )
+    monkeypatch.setattr(deepseek_feedback, "AsyncOpenAI", lambda **_kwargs: fake_client)
+    monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "configured-for-test")
+    monkeypatch.setattr(settings, "BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED", True)
+
+    content, meta = await deepseek_feedback.generate_shareable_feedback(
+        audience="student",
+        role_name="Data Analyst",
+        evaluation_intent="Assess dashboard readiness",
+        scorecard={"overallScore": 72, "categoryScores": {"skills": 70}},
+        evidence={"skills": [{"source": "resume.skills", "text": "Python"}]},
+        warnings=[],
+    )
+
+    assert content["summary"] == "Good foundation."
+    assert completion.await_count == 2
+    retry_request = completion.await_args_list[1].kwargs
+    assert (
+        "previous response was empty, incomplete"
+        in retry_request["messages"][0]["content"]
+    )
+    assert meta["usage"] == {
+        "promptTokens": 210,
+        "completionTokens": 425,
+        "attempts": 2,
+        "finishReason": "stop",
+    }
+
+
+@pytest.mark.asyncio
+async def test_shareable_feedback_reports_invalid_json_after_bounded_retry(monkeypatch):
+    invalid = SimpleNamespace(
+        choices=[
+            SimpleNamespace(message=SimpleNamespace(content=""), finish_reason="stop")
+        ],
+        usage=None,
+    )
+    completion = AsyncMock(return_value=invalid)
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=completion))
+    )
+    monkeypatch.setattr(deepseek_feedback, "AsyncOpenAI", lambda **_kwargs: fake_client)
+    monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "configured-for-test")
+    monkeypatch.setattr(settings, "BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED", True)
+
+    with pytest.raises(deepseek_feedback.ShareableFeedbackError) as captured:
+        await deepseek_feedback.generate_shareable_feedback(
+            audience="team",
+            role_name="Data Analyst",
+            evaluation_intent="",
+            scorecard={"overallScore": 72},
+            evidence={},
+            warnings=[],
+        )
+
+    assert completion.await_count == 2
+    assert captured.value.code == "invalid_provider_output"
+    assert captured.value.retryable is True
 
 
 @pytest.mark.asyncio

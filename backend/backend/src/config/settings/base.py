@@ -318,7 +318,7 @@ class BackendBaseSettings(BaseSettings):
     # DeepSeek only turns the already-computed compact scorecard into a brief;
     # it never receives the full resume and never changes a score.
     BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED: bool = decouple.config("BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED", cast=bool, default=True)  # type: ignore
-    BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS: int = decouple.config("BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS", cast=int, default=350)  # type: ignore
+    BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS: int = decouple.config("BULK_ATS_DEEPSEEK_FEEDBACK_MAX_TOKENS", cast=int, default=600)  # type: ignore
     BULK_ATS_DEEPSEEK_TIMEOUT_SECONDS: float = decouple.config("BULK_ATS_DEEPSEEK_TIMEOUT_SECONDS", cast=float, default=45.0)  # type: ignore
     BULK_ATS_DEEPSEEK_PROMPT_VERSION: str = decouple.config("BULK_ATS_DEEPSEEK_PROMPT_VERSION", cast=str, default="v1")  # type: ignore
     BULK_ATS_DEFAULT_RETENTION_DAYS: int = decouple.config("BULK_ATS_DEFAULT_RETENTION_DAYS", cast=int, default=90)  # type: ignore
