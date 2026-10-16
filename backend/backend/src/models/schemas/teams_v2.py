@@ -54,6 +54,7 @@ class TeamMemberUpdate(BaseSchemaModel):
     purposes: Optional[List[str]] = Field(None, description="Granular access purposes")
     domain: Optional[str] = Field(None, description="Assigned domain")
     colleges: Optional[List[str]] = Field(None, description="Assigned colleges")
+    password: Optional[str] = Field(None, description="Password to update user credentials")
 
 
 

@@ -217,7 +217,7 @@ def test_team_member_update_allows_partial_fields():
     assert update.access_role == "Lead"
     assert update.name is None
     assert not hasattr(update, "email")
-    assert not hasattr(update, "password")
+    assert update.password is None
 
 
 # --- Router Security & Permission Wiring -------------------------------------
@@ -269,12 +269,12 @@ async def test_add_team_member_rejects_missing_team():
 
 @pytest.mark.asyncio
 async def test_add_team_member_does_not_overwrite_existing_user_password():
-    """Security: Never silently change credentials of an existing global user account."""
+    """Security: Never silently change credentials of an existing super admin account."""
     mock_session = AsyncMock()
     # Team exists
     team = Team(id=1, name="Core", status="active")
-    # Existing user with an established password
-    existing_user = User(id=10, email="admin@barabari.org", password_hash="original_secret_hash")
+    # Existing super admin user with an established password
+    existing_user = User(id=10, email="admin@barabari.org", password_hash="original_secret_hash", is_super_admin=True)
 
     def execute_mock(stmt):
         result = MagicMock()
@@ -295,8 +295,39 @@ async def test_add_team_member_does_not_overwrite_existing_user_password():
     member_data = TeamMemberCreate(name="Admin", email="admin@barabari.org", password="hacker_password", access_role="lead")
     await repo.add_team_member(team_id=1, member_data=member_data)
 
-    # Assert existing user's password hash was NOT mutated
+    # Assert super admin's password hash was NOT mutated
     assert existing_user.password_hash == "original_secret_hash"
+
+
+@pytest.mark.asyncio
+async def test_add_team_member_updates_password_for_regular_member():
+    """Allow Admin/Team Lead to set/reset credentials for team members so login works with configured credentials."""
+    mock_session = AsyncMock()
+    team = Team(id=1, name="Core", status="active")
+    existing_member_user = User(id=20, email="staff@barabari.org", password_hash="old_pw_hash", is_super_admin=False)
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = None
+        elif "from team" in stmt_str or "team.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = team
+        elif "from \"user\"" in stmt_str or "user.email" in stmt_str:
+            result.scalar_one_or_none.return_value = existing_member_user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+
+    repo = TeamCRUDRepository(async_session=mock_session)
+    member_data = TeamMemberCreate(name="Staff", email="staff@barabari.org", password="new_assigned_pw", access_role="lead")
+    await repo.add_team_member(team_id=1, member_data=member_data)
+
+    # Assert regular user's password hash was updated
+    assert existing_member_user.password_hash != "old_pw_hash"
+    assert existing_member_user.password_hash != ""
 
 
 @pytest.mark.asyncio

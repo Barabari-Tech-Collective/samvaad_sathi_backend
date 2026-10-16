@@ -194,17 +194,13 @@ class TeamCRUDRepository(BaseCRUDRepository):
             # Security Note: Do not mutate global user.role with team-scoped access_role!
             # Role authorization is evaluated dynamically from active TeamMember records.
 
-            if member_data.password:
-                is_uninitialized_pw = not user.password_hash
-                if not is_uninitialized_pw:
-                    try:
-                        is_uninitialized_pw = pwd_generator.is_password_authenticated(hash_salt="", password="", hashed_password=user.password_hash)
-                    except Exception:
-                        is_uninitialized_pw = False
-                if is_uninitialized_pw:
-                    # If user existed without a real password (e.g. from student SSO), initialize their password so they can log in
-                    user.password_hash = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
-        # Security Note: If user already exists with an established password, NEVER overwrite their global password.
+            if member_data.password and member_data.password.strip():
+                # Allow Admin/Team Lead to set/reset credentials for team members so the credentials
+                # they configured in the dashboard actually work for login (protect super_admin accounts).
+                if not getattr(user, "is_super_admin", False):
+                    user.password_hash = pwd_generator.generate_hashed_password(
+                        hash_salt="", new_password=member_data.password.strip()
+                    )
 
         # 3. Check existing membership (prevent duplicate rows / reactivate soft-deleted)
         mem_stmt = select(TeamMember).where(TeamMember.team_id == team_id, TeamMember.user_id == user.id)
@@ -326,13 +322,18 @@ class TeamCRUDRepository(BaseCRUDRepository):
         if member_data.domain is not None:
             member.domain = member_data.domain
             
-        # Security Note: Never mutate user's email or password in team-scoped endpoint!
         stmt = select(User).where(User.id == member.user_id)
         result = await self.async_session.execute(stmt)
         user = result.scalar_one_or_none()
         
-        if user and member_data.name:
-            user.name = member_data.name
+        if user:
+            if member_data.name:
+                user.name = member_data.name
+            if member_data.password and member_data.password.strip():
+                if not getattr(user, "is_super_admin", False):
+                    user.password_hash = pwd_generator.generate_hashed_password(
+                        hash_salt="", new_password=member_data.password.strip()
+                    )
             
         await self.async_session.commit()
         await self.async_session.refresh(member)
