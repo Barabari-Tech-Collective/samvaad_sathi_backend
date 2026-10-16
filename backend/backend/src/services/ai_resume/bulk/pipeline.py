@@ -131,7 +131,11 @@ def _assess_role_context(
     has_skills = bool(required_skills or preferred_skills)
     if not has_description:
         warnings.append("missing_job_description")
-    if not has_skills:
+    # A usable job description is itself a skills/capability rubric: the
+    # deterministic scorer extracts recognized capabilities from its raw text,
+    # while Jev evaluates broader domain requirements. Only flag missing rubric
+    # context here when neither a JD nor explicit skills exist.
+    if not has_description and not has_skills:
         warnings.append("missing_skills_rubric")
     if has_intent and not has_useful_intent:
         warnings.append("evaluation_intent_too_brief")
@@ -510,16 +514,12 @@ async def run_candidate_pipeline(
         "Missing": 0.0,
     }
 
-    def blended(deterministic_pct_key: str, jev_pct: float | None) -> float:
+    def blended(deterministic_pct_key: str, jev_pct: float | None) -> float | None:
         det_pct = deterministic_breakdown.get(deterministic_pct_key)
         det_pct = float(det_pct) if isinstance(det_pct, (int, float)) else None
         if det_pct is not None and jev_pct is not None:
             return (det_pct + jev_pct) / 2
-        return (
-            det_pct
-            if det_pct is not None
-            else (jev_pct if jev_pct is not None else 0.0)
-        )
+        return det_pct if det_pct is not None else jev_pct
 
     education_quality_choice = _jev_value(jev_answers, "education_quality")
     education_jev_pct = (
@@ -543,7 +543,14 @@ async def run_candidate_pipeline(
         "links": link_pct,
     }
 
-    applicable_categories = {"skills", "education", "experience", "projects"}
+    if category_pct["skills"] is None:
+        warnings.append("missing_skills_rubric")
+
+    applicable_categories = {
+        key
+        for key in ("skills", "education", "experience", "projects")
+        if isinstance(category_pct.get(key), (int, float))
+    }
     if link_requirement_report.get("scoreApplicable"):
         applicable_categories.add("links")
     weights = resolve_weights(
@@ -611,6 +618,12 @@ async def run_candidate_pipeline(
         "evaluationIntentApplied": bool(evaluation_intent.strip()),
         "domainProfile": domain_profile.as_dict(),
         "scoreApplicability": {
+            "skills": category_pct["skills"] is not None,
+            "skillsReason": (
+                "Capabilities were established from configured skills, the job description, or Jev"
+                if category_pct["skills"] is not None
+                else "No scorable capabilities could be established from the evaluation criteria"
+            ),
             "links": bool(link_requirement_report.get("scoreApplicable")),
             "linksReason": (
                 "Explicitly requested in the evaluation criteria"

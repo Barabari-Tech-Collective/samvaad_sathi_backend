@@ -708,10 +708,13 @@ async def test_candidate_pipeline_builds_metric_scorecard_and_brief(monkeypatch)
         raw_bytes=b"%PDF-1.7\nsynthetic",
         filename="candidate.pdf",
         role_name="Backend Engineer",
-        role_description="Build Python APIs",
+        role_description=(
+            "Build and operate Python APIs, investigate production issues, and "
+            "communicate technical trade-offs to product stakeholders."
+        ),
         evaluation_intent="Evaluate ownership of a short fintech migration project",
-        required_skills=["Python"],
-        preferred_skills=["FastAPI"],
+        required_skills=[],
+        preferred_skills=[],
         experience_mode="experienced",
         weight_overrides=None,
         jev_provider=provider,
@@ -732,6 +735,9 @@ async def test_candidate_pipeline_builds_metric_scorecard_and_brief(monkeypatch)
         "Scored "
     )
     assert scorecard["evaluationIntentApplied"] is True
+    assert scorecard["roleContext"] == "job_description"
+    assert scorecard["scoreApplicability"]["skills"] is True
+    assert "missing_skills_rubric" not in result.warnings
     assert provider.evaluate.await_args.kwargs["evaluation_intent"].startswith(
         "Evaluate ownership"
     )
@@ -995,6 +1001,18 @@ async def test_fresher_batch_suppresses_score_for_jev_experience_mismatch(monkey
 
 
 def test_optional_job_description_reports_role_context_quality():
+    warnings, context = pipeline._assess_role_context(
+        role_description=(
+            "Analyze business data with Excel and SQL, build dashboards, and "
+            "communicate recommendations to operational stakeholders."
+        ),
+        evaluation_intent="",
+        required_skills=[],
+        preferred_skills=[],
+    )
+    assert context == "job_description"
+    assert warnings == []
+
     warnings, context = pipeline._assess_role_context(
         role_description="",
         evaluation_intent="",
