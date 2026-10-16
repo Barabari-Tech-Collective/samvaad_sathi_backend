@@ -56,6 +56,7 @@ class BulkATSCRUDRepository:
         jd_analysis: dict | None,
         retention_until: datetime.datetime | None,
         created_by: int | None,
+        rubric_snapshot: dict | None = None,
     ) -> BulkATSBatch:
         batch = BulkATSBatch(
             name=name,
@@ -69,6 +70,7 @@ class BulkATSCRUDRepository:
             weight_overrides=weight_overrides,
             jd_analysis=jd_analysis,
             retention_until=retention_until,
+            rubric_snapshot=rubric_snapshot,
             created_by=created_by,
         )
         self.session.add(batch)
@@ -207,10 +209,16 @@ class BulkATSCRUDRepository:
         limit: int = 100,
         offset: int = 0,
         sort: str = "score",
+        assigned_reviewer_id: int | None = None,
     ) -> list[BulkATSCandidate]:
-        query = select(BulkATSCandidate).where(BulkATSCandidate.batch_id == batch_id)
+        query = select(BulkATSCandidate).where(
+            BulkATSCandidate.batch_id == batch_id,
+            BulkATSCandidate.merged_into_id.is_(None),
+        )
         if status:
             query = query.where(BulkATSCandidate.status == status)
+        if assigned_reviewer_id is not None:
+            query = query.where(BulkATSCandidate.assigned_reviewer_id == assigned_reviewer_id)
         if sort == "confidence":
             query = query.order_by(
                 BulkATSCandidate.confidence_score.asc().nullsfirst(),
@@ -234,15 +242,20 @@ class BulkATSCRUDRepository:
         return list(result.scalars().all())
 
     async def count_candidates(
-        self, *, batch_id: int, status: str | None = None
+        self, *, batch_id: int, status: str | None = None, assigned_reviewer_id: int | None = None
     ) -> int:
         query = (
             select(func.count())
             .select_from(BulkATSCandidate)
-            .where(BulkATSCandidate.batch_id == batch_id)
+            .where(
+                BulkATSCandidate.batch_id == batch_id,
+                BulkATSCandidate.merged_into_id.is_(None),
+            )
         )
         if status:
             query = query.where(BulkATSCandidate.status == status)
+        if assigned_reviewer_id is not None:
+            query = query.where(BulkATSCandidate.assigned_reviewer_id == assigned_reviewer_id)
         result = await self.session.execute(query)
         return int(result.scalar() or 0)
 
@@ -361,6 +374,7 @@ class BulkATSCRUDRepository:
         decision_reason: str | None,
         interview_outcome: str | None,
         reviewed_by: int,
+        assigned_reviewer_id: int | None = None,
     ) -> BulkATSCandidate | None:
         candidate = await self.get_candidate(candidate_id)
         if candidate is None:
@@ -376,9 +390,54 @@ class BulkATSCRUDRepository:
             )
         candidate.interview_outcome = interview_outcome
         candidate.reviewed_by = reviewed_by
+        if assigned_reviewer_id is not None:
+            candidate.assigned_reviewer_id = assigned_reviewer_id
         await self.session.commit()
         await self.session.refresh(candidate)
         return candidate
+
+    async def merge_candidates(
+        self, *, duplicate_id: int, canonical_id: int
+    ) -> tuple[BulkATSCandidate | None, BulkATSCandidate | None]:
+        duplicate = await self.get_candidate(duplicate_id)
+        canonical = await self.get_candidate(canonical_id)
+        if duplicate is None or canonical is None or duplicate.batch_id != canonical.batch_id:
+            return None, None
+        if duplicate.id == canonical.id or duplicate.merged_into_id is not None:
+            return None, None
+        if not canonical.candidate_name:
+            canonical.candidate_name = duplicate.candidate_name
+        if not canonical.email_or_candidate_id:
+            canonical.email_or_candidate_id = duplicate.email_or_candidate_id
+        if not canonical.resume_url:
+            canonical.resume_url = duplicate.resume_url
+        if not canonical.parsed_resume_json:
+            canonical.parsed_resume_json = duplicate.parsed_resume_json
+        if not canonical.deterministic_report:
+            canonical.deterministic_report = duplicate.deterministic_report
+        if not canonical.jev_report:
+            canonical.jev_report = duplicate.jev_report
+        if not canonical.link_report:
+            canonical.link_report = duplicate.link_report
+        canonical.warnings = list(dict.fromkeys((canonical.warnings or []) + (duplicate.warnings or [])))
+        if duplicate.reviewer_notes:
+            canonical.reviewer_notes = "\n\n".join(
+                value for value in (canonical.reviewer_notes, duplicate.reviewer_notes) if value
+            )
+        duplicate.merged_into_id = canonical.id
+        await self.session.commit()
+        await self.session.refresh(canonical)
+        await self.session.refresh(duplicate)
+        return canonical, duplicate
+
+    async def list_assigned_candidates(
+        self, *, batch_id: int, reviewer_id: int | None = None
+    ) -> list[BulkATSCandidate]:
+        query = select(BulkATSCandidate).where(BulkATSCandidate.batch_id == batch_id)
+        if reviewer_id is not None:
+            query = query.where(BulkATSCandidate.assigned_reviewer_id == reviewer_id)
+        result = await self.session.execute(query.order_by(BulkATSCandidate.created_at.asc()))
+        return list(result.scalars().all())
 
     # -- Audit -------------------------------------------------------------
 

@@ -568,6 +568,7 @@ async def run_candidate_pipeline(
     # Every metric carries resume/validator/provider evidence. Confidence is
     # separately calculated and never modifies the factual weighted score.
     category_evidence = build_category_evidence(
+        resume_text=resume_text,
         parsed_resume_json=parsed_resume_json,
         required_skills=required_skills,
         preferred_skills=preferred_skills,

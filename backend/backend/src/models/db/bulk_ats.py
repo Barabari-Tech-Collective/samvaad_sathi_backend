@@ -89,6 +89,12 @@ class BulkATSBatch(Base):  # type: ignore
     jd_analysis: SQLAlchemyMapped[dict | None] = sqlalchemy_mapped_column(
         JSONB, nullable=True
     )
+    rubric_version: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(
+        sqlalchemy.Integer, nullable=False, server_default="1"
+    )
+    rubric_snapshot: SQLAlchemyMapped[dict | None] = sqlalchemy_mapped_column(
+        JSONB, nullable=True
+    )
     retention_until: SQLAlchemyMapped[datetime.datetime | None] = (
         sqlalchemy_mapped_column(
             sqlalchemy.DateTime(timezone=True), nullable=True, index=True
@@ -135,6 +141,9 @@ class BulkATSBatch(Base):  # type: ignore
         back_populates="batch",
         cascade="all, delete",
         passive_deletes=True,
+    )
+    creator = sqlalchemy.orm.relationship(
+        "User", foreign_keys=[created_by], lazy="joined", viewonly=True
     )
 
 
@@ -254,6 +263,12 @@ class BulkATSCandidate(Base):  # type: ignore
     )
     reviewed_by: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
         sqlalchemy.ForeignKey("user.id", ondelete="SET NULL"), nullable=True
+    )
+    assigned_reviewer_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.ForeignKey("user.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    merged_into_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.ForeignKey("bulk_ats_candidate.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
