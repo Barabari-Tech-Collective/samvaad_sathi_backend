@@ -246,7 +246,12 @@ async def update_member(
             detail="Team Lead or Administrator access required to manage members.",
         )
     try:
-        updated_member = await team_repo.update_team_member(team_id, member_id, member_data)
+        updated_member = await team_repo.update_team_member(
+            team_id=team_id,
+            member_id=member_id,
+            member_data=member_data,
+            caller_user=current_user,
+        )
         if not updated_member:
             raise fastapi.HTTPException(status_code=404, detail="Member not found")
         return TeamMemberResponse(**updated_member)
