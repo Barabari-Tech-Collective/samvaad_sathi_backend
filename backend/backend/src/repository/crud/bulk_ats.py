@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import datetime
 
 from sqlalchemy import select, func
@@ -12,6 +13,26 @@ from src.models.db.bulk_ats import (
     BulkATSAuditEvent,
     BulkATSDriveCredential,
 )
+
+_FEEDBACK_REQUEST_STALE_AFTER = datetime.timedelta(minutes=15)
+
+
+def _feedback_request_is_active(state: dict) -> bool:
+    if state.get("status") not in {"queued", "generating"}:
+        return False
+    timestamp = state.get("startedAt") or state.get("requestedAt")
+    if not isinstance(timestamp, str):
+        return False
+    try:
+        parsed = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return (
+        parsed
+        > datetime.datetime.now(datetime.timezone.utc) - _FEEDBACK_REQUEST_STALE_AFTER
+    )
 
 
 class BulkATSCRUDRepository:
@@ -245,6 +266,91 @@ class BulkATSCRUDRepository:
         await self.session.commit()
         await self.session.refresh(candidate)
         return candidate
+
+    async def begin_feedback_request(
+        self,
+        candidate_id: int,
+        *,
+        audience: str,
+        state: dict,
+        regenerate: bool,
+    ) -> tuple[BulkATSCandidate | None, str]:
+        """Atomically reserve one feedback generation request.
+
+        The candidate row lock prevents two recruiters from enqueueing duplicate
+        provider calls for the same audience and prevents student/team state
+        updates from replacing each other inside ``deterministic_report``.
+        """
+
+        candidate = await self._get_candidate_for_feedback_update(candidate_id)
+        if candidate is None:
+            return None, "not_found"
+
+        report, shareable = self._feedback_container(candidate)
+        current = shareable.get(audience)
+        current = current if isinstance(current, dict) else {}
+        if _feedback_request_is_active(current):
+            await self.session.commit()
+            return candidate, "already_in_progress"
+        if current.get("status") == "ready" and not regenerate:
+            await self.session.commit()
+            return candidate, "already_ready"
+
+        shareable[audience] = copy.deepcopy(state)
+        candidate.deterministic_report = report
+        await self.session.commit()
+        await self.session.refresh(candidate)
+        return candidate, "reserved"
+
+    async def update_feedback_state(
+        self,
+        candidate_id: int,
+        *,
+        audience: str,
+        state: dict,
+        expected_request_id: str,
+    ) -> tuple[BulkATSCandidate | None, bool]:
+        """Merge a feedback state only when its request token is still current."""
+
+        candidate = await self._get_candidate_for_feedback_update(candidate_id)
+        if candidate is None:
+            return None, False
+
+        report, shareable = self._feedback_container(candidate)
+        current = shareable.get(audience)
+        current = current if isinstance(current, dict) else {}
+        if current.get("requestId") != expected_request_id:
+            await self.session.commit()
+            return candidate, False
+
+        shareable[audience] = copy.deepcopy(state)
+        candidate.deterministic_report = report
+        await self.session.commit()
+        await self.session.refresh(candidate)
+        return candidate, True
+
+    async def _get_candidate_for_feedback_update(
+        self, candidate_id: int
+    ) -> BulkATSCandidate | None:
+        result = await self.session.execute(
+            select(BulkATSCandidate)
+            .options(selectinload(BulkATSCandidate.batch))
+            .where(BulkATSCandidate.id == candidate_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def _feedback_container(candidate: BulkATSCandidate) -> tuple[dict, dict]:
+        report = copy.deepcopy(candidate.deterministic_report or {})
+        if not isinstance(report, dict):
+            report = {}
+        shareable = report.get("shareableFeedback")
+        if not isinstance(shareable, dict):
+            shareable = {}
+            report["shareableFeedback"] = shareable
+        return report, shareable
 
     async def update_review(
         self,

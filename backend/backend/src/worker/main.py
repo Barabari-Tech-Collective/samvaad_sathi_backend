@@ -10,6 +10,7 @@ from arq import cron
 
 from src.worker.settings import redis_settings
 from src.worker.tasks import (
+    generate_bulk_ats_feedback_task,
     generate_questions_task,
     submit_resume_score_task,
     process_bulk_ats_candidate_task,
@@ -22,6 +23,7 @@ class WorkerSettings:
         submit_resume_score_task,
         generate_questions_task,
         process_bulk_ats_candidate_task,
+        generate_bulk_ats_feedback_task,
         purge_expired_bulk_ats_batches_task,
     ]
     cron_jobs = [

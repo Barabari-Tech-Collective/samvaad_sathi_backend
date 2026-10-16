@@ -312,6 +312,7 @@ class BackendBaseSettings(BaseSettings):
     # exceed the dashboard hosting/proxy body limit. Keep enough headroom for
     # worst-case 10 MB files (one file per request) plus genuine retries.
     RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR: int = decouple.config("RATE_LIMIT_BULK_ATS_UPLOAD_PER_HOUR", cast=int, default=120)  # type: ignore
+    RATE_LIMIT_BULK_ATS_FEEDBACK_PER_HOUR: int = decouple.config("RATE_LIMIT_BULK_ATS_FEEDBACK_PER_HOUR", cast=int, default=30)  # type: ignore
     DEEPSEEK_BASE_URL: str = decouple.config("DEEPSEEK_BASE_URL", cast=str, default="https://api.deepseek.com")  # type: ignore
     DEEPSEEK_MODEL: str = decouple.config("DEEPSEEK_MODEL", cast=str, default="deepseek-v4-flash")  # type: ignore
     # DeepSeek only turns the already-computed compact scorecard into a brief;

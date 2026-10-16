@@ -1,23 +1,29 @@
+import datetime
 import io
 import zipfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
+import pydantic
 import pytest
 from fastapi import HTTPException
 
 from src.api.routes.bulk_ats import (
     _cell_text,
+    _feedback_states,
+    _format_feedback_copy,
     _get_authorized_batch,
     _get_authorized_candidate,
     _parse_skills,
     _parse_resume_urls,
+    _queue_candidate_feedback,
     _require_role_rubric,
 )
 from src.config.manager import settings
 from src.main import backend_app
 from src.repository.crud.bulk_ats import BulkATSCRUDRepository
+from src.repository.crud.bulk_ats import _feedback_request_is_active
 from src.services.ai_resume.bulk import (
     deepseek_feedback,
     google_drive_oauth,
@@ -794,6 +800,241 @@ def test_deepseek_payload_includes_intent_as_context_only():
 
     assert payload["evaluationIntent"] == "Prioritize evidence of migration ownership"
     assert "resume" not in payload
+
+
+def test_shareable_feedback_rejects_empty_model_output():
+    with pytest.raises(pydantic.ValidationError):
+        deepseek_feedback.ShareableFeedbackPayload.model_validate(
+            {
+                "summary": "",
+                "strengths": [],
+                "improvements": [],
+                "nextSteps": [],
+                "interviewFocus": [],
+            }
+        )
+
+
+def test_feedback_states_tolerate_historical_reports():
+    assert _feedback_states(None) == {"student": None, "team": None}
+    assert _feedback_states(
+        {"shareableFeedback": {"student": {"status": "ready"}}}
+    ) == {"student": "ready", "team": None}
+
+
+def test_feedback_request_recovers_after_stale_or_malformed_timestamp():
+    fresh = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    stale = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+    ).isoformat()
+
+    assert _feedback_request_is_active({"status": "generating", "startedAt": fresh})
+    assert not _feedback_request_is_active({"status": "generating", "startedAt": stale})
+    assert not _feedback_request_is_active(
+        {"status": "queued", "requestedAt": "not-a-timestamp"}
+    )
+
+
+def test_feedback_copy_is_audience_appropriate():
+    candidate = SimpleNamespace(candidate_name="Asha", final_score=82.5)
+    content = {
+        "summary": "Strong evidence for the role.",
+        "strengths": ["Clear Python projects"],
+        "improvements": ["Add measurable outcomes"],
+        "nextSteps": ["Rewrite two project bullets"],
+        "interviewFocus": ["Explain one project decision"],
+    }
+
+    student_copy = _format_feedback_copy(
+        candidate=candidate,
+        audience="student",
+        role_name="Data Analyst",
+        content=content,
+    )
+    team_copy = _format_feedback_copy(
+        candidate=candidate,
+        audience="team",
+        role_name="Data Analyst",
+        content=content,
+    )
+
+    assert "ATS score" not in student_copy
+    assert "Improvements:" in student_copy
+    assert "ATS score: 82.50/100" in team_copy
+    assert "Gaps to validate:" in team_copy
+
+
+@pytest.mark.asyncio
+async def test_shareable_feedback_uses_deepseek_without_candidate_identity(monkeypatch):
+    completion = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=(
+                            '{"summary":"Good foundation.",'
+                            '"strengths":["Python evidence"],'
+                            '"improvements":["Quantify outcomes"],'
+                            '"nextSteps":["Update project bullets"],'
+                            '"interviewFocus":["Explain project choices"]}'
+                        )
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=120, completion_tokens=80),
+        )
+    )
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=completion))
+    )
+    monkeypatch.setattr(deepseek_feedback, "AsyncOpenAI", lambda **_kwargs: fake_client)
+    monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "configured-for-test")
+    monkeypatch.setattr(settings, "BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED", True)
+
+    content, meta = await deepseek_feedback.generate_shareable_feedback(
+        audience="student",
+        role_name="Data Analyst",
+        evaluation_intent="Assess dashboard readiness",
+        scorecard={
+            "overallScore": 82.5,
+            "categoryScores": {"skills": 88},
+            "confidence": {"level": "high"},
+        },
+        evidence={"skills": [{"source": "resume.skills", "text": "Python"}]},
+        warnings=["missing_job_description"],
+    )
+
+    assert content["summary"] == "Good foundation."
+    assert meta["source"] == "deepseek"
+    assert meta["audience"] == "student"
+    request = completion.await_args.kwargs
+    serialized_input = request["messages"][1]["content"]
+    assert "Data Analyst" in serialized_input
+    assert "Asha" not in serialized_input
+    assert "example.com" not in serialized_input
+
+
+@pytest.mark.asyncio
+async def test_feedback_queue_reuses_ready_artifact_without_provider_cost():
+    repo = SimpleNamespace(
+        begin_feedback_request=AsyncMock(return_value=(None, "already_ready")),
+        record_audit=AsyncMock(),
+    )
+    candidate = SimpleNamespace(
+        id=12,
+        batch_id=4,
+        status="completed",
+        deterministic_report={
+            "bulkAtsScorecard": {"categoryScores": {"skills": 80}},
+            "shareableFeedback": {"student": {"status": "ready"}},
+        },
+    )
+
+    result = await _queue_candidate_feedback(
+        repo=repo,
+        candidate=candidate,
+        audience="student",
+        regenerate=False,
+        requested_by=7,
+    )
+
+    assert result == {"candidateId": 12, "status": "already_ready"}
+    repo.begin_feedback_request.assert_awaited_once()
+    repo.record_audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_feedback_queue_persists_request_token_before_enqueue(monkeypatch):
+    enqueue = AsyncMock(return_value="feedback-job-1")
+    monkeypatch.setattr("src.api.routes.bulk_ats.enqueue_job", enqueue)
+    repo = SimpleNamespace(
+        begin_feedback_request=AsyncMock(),
+        update_feedback_state=AsyncMock(),
+        record_audit=AsyncMock(),
+    )
+    candidate = SimpleNamespace(
+        id=13,
+        batch_id=4,
+        status="needs_review",
+        deterministic_report={"bulkAtsScorecard": {"categoryScores": {"skills": 70}}},
+    )
+    repo.begin_feedback_request.return_value = (candidate, "reserved")
+
+    result = await _queue_candidate_feedback(
+        repo=repo,
+        candidate=candidate,
+        audience="team",
+        regenerate=False,
+        requested_by=7,
+    )
+
+    assert result["status"] == "queued"
+    state = repo.begin_feedback_request.await_args.kwargs["state"]
+    assert state["status"] == "queued"
+    assert state["requestId"]
+    assert enqueue.await_args.kwargs["request_id"] == state["requestId"]
+    assert enqueue.await_args.kwargs["audience"] == "team"
+
+
+@pytest.mark.asyncio
+async def test_feedback_state_merge_preserves_other_audience():
+    session = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    repo = BulkATSCRUDRepository(session)
+    candidate = SimpleNamespace(
+        deterministic_report={
+            "bulkAtsScorecard": {"categoryScores": {"skills": 80}},
+            "shareableFeedback": {
+                "student": {"status": "ready", "requestId": "student-1"},
+                "team": {"status": "generating", "requestId": "team-1"},
+            },
+        }
+    )
+    repo._get_candidate_for_feedback_update = AsyncMock(return_value=candidate)
+
+    _, updated = await repo.update_feedback_state(
+        13,
+        audience="team",
+        state={"status": "ready", "requestId": "team-1"},
+        expected_request_id="team-1",
+    )
+
+    assert updated is True
+    assert candidate.deterministic_report["shareableFeedback"]["student"] == {
+        "status": "ready",
+        "requestId": "student-1",
+    }
+    assert candidate.deterministic_report["shareableFeedback"]["team"] == {
+        "status": "ready",
+        "requestId": "team-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_feedback_state_rejects_superseded_worker_result():
+    session = SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock())
+    repo = BulkATSCRUDRepository(session)
+    candidate = SimpleNamespace(
+        deterministic_report={
+            "shareableFeedback": {
+                "student": {"status": "generating", "requestId": "new-request"}
+            }
+        }
+    )
+    repo._get_candidate_for_feedback_update = AsyncMock(return_value=candidate)
+
+    _, updated = await repo.update_feedback_state(
+        13,
+        audience="student",
+        state={"status": "ready", "requestId": "old-request"},
+        expected_request_id="old-request",
+    )
+
+    assert updated is False
+    assert (
+        candidate.deterministic_report["shareableFeedback"]["student"]["status"]
+        == "generating"
+    )
+    session.refresh.assert_not_awaited()
 
 
 @pytest.mark.asyncio
