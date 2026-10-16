@@ -57,10 +57,15 @@ def _safe_link_records(verified_links: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         anchor = str(details.get("anchorText") or "").strip()
         platform = str(details.get("platform") or "").strip()
+        if platform in {"system_link", "email"}:
+            continue
+        human_platform = platform.replace("_", " ").strip().title()
+        if platform in {"custom_domain", "custom_deployment"}:
+            human_platform = parsed.netloc
         records.append(
             {
                 "url": normalized_url,
-                "label": anchor or platform.title() or parsed.netloc,
+                "label": anchor or human_platform or parsed.netloc,
                 "platform": platform or None,
                 "category": str(details.get("category") or "other").strip(),
                 "working": bool(details.get("valid")),

@@ -46,6 +46,7 @@ from src.services.ai_resume.bulk.scoring_weights import resolve_weights
 from src.services.ai_resume.bulk.malware_scan import scan_document
 from src.services.ai_resume.scoring.project_scorer import ProjectScorer
 from src.services.ai_resume.url_validator import extract_professional_urls
+from src.utilities.link_validator import SmartLinkValidator
 from src.worker import tasks as worker_tasks
 from src.worker.tasks import (
     _detect_resume_type,
@@ -854,6 +855,38 @@ def test_non_technical_and_data_work_sample_urls_are_extracted():
     }
 
 
+def test_candidate_link_normalization_rejects_contact_and_malformed_urls():
+    validator = SmartLinkValidator()
+
+    assert validator._normalize_candidate_url("mailto:candidate@example.test") == ""
+    assert (
+        validator._normalize_candidate_url(
+            "https://mailto:candidate@example.test"
+        )
+        == ""
+    )
+    assert validator._normalize_candidate_url("candidate@example.test") == ""
+    assert (
+        validator._normalize_candidate_url("HTTPS://Example.Test/work/#section")
+        == "https://example.test/work"
+    )
+
+
+@pytest.mark.asyncio
+async def test_candidate_link_validation_hides_system_and_contact_links():
+    validator = SmartLinkValidator()
+    result = await validator.validate_all_links_async(
+        [
+            "mailto:candidate@example.test",
+            "https://mailto:candidate@example.test",
+            "https://www.google.com/search?q=candidate",
+        ]
+    )
+
+    assert result["total_links_found"] == 0
+    assert result["links"] == {}
+
+
 def test_domain_aware_project_score_rewards_ownership_and_outcomes_without_github():
     result = ProjectScorer().score_projects(
         [
@@ -1143,6 +1176,20 @@ def test_feedback_states_tolerate_historical_reports():
     assert _feedback_states(
         {"shareableFeedback": {"student": {"status": "ready"}}}
     ) == {"student": "ready", "team": None}
+
+
+def test_feedback_states_turn_stale_jobs_into_terminal_failures():
+    stale = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+    ).isoformat()
+
+    assert _feedback_states(
+        {
+            "shareableFeedback": {
+                "student": {"status": "generating", "startedAt": stale}
+            }
+        }
+    ) == {"student": "failed", "team": None}
 
 
 def test_feedback_request_recovers_after_stale_or_malformed_timestamp():
