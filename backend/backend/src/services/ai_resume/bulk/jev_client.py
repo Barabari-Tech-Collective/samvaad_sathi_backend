@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from typesafe_sdk import (
     AsyncTypeSafeClient,
@@ -114,18 +114,22 @@ def _build_questions() -> dict[str, Choice | Score | Noul]:
     questions["needs_manual_review"] = Noul(
         instructions=_INSTRUCTIONS["needs_manual_review"]
     )
+    questions["experience_mode_mismatch"] = Noul(
+        instructions=_INSTRUCTIONS["experience_mode_mismatch"]
+    )
     return questions
 
 
 _INSTRUCTIONS: dict[str, str] = {
     "skills_score": "Judge how well the candidate's demonstrated skills (via projects/experience, not just keyword mentions) match the role's required and preferred skills.",
     "experience_relevance": "Judge how relevant the candidate's work/internship experience is to this role, independent of raw years.",
-    "project_quality": "Judge the overall quality of the candidate's listed projects: clarity, described contribution, outcome/metrics, and hygiene.",
-    "project_complexity": "Judge the technical/analytical complexity of the candidate's most substantial project, relative to this role.",
+    "project_quality": "Judge the overall quality of the candidate's listed projects or work samples for this domain: problem clarity, personal contribution, role relevance, outcome, and supporting evidence. Do not prefer software projects or GitHub unless the evaluation context explicitly requires them.",
+    "project_complexity": "Judge the scope and difficulty of the candidate's most substantial project relative to this role and domain. Complexity may be technical, analytical, operational, creative, commercial, research, stakeholder, or delivery complexity.",
     "resume_hygiene": "Judge the resume's writing quality: grammar, clarity, consistent formatting, no filler.",
     "education_quality": "Rate the relevance and completeness of the candidate's education for this role.",
-    "project_tier": "Classify the candidate's strongest project for this role.",
+    "project_tier": "Classify the candidate's best-supported project or work sample for this role. Use domain-appropriate evidence and do not prefer GitHub or software work by default.",
     "needs_manual_review": "Is the resume content incomplete, contradictory, or otherwise too ambiguous for automated scoring to be trusted?",
+    "experience_mode_mismatch": "Return true only when experience_mode is fresher and the resume clearly shows sustained professional full-time work beyond a normal fresher or entry-level profile. Internships, volunteering, campus roles, apprenticeships, freelance projects, and short training alone are not a mismatch. Return false whenever experience_mode is experienced.",
 }
 
 QUESTIONS = _build_questions()
@@ -151,6 +155,8 @@ class JevProvider:
         evaluation_intent: str = "",
         required_skills: list[str],
         preferred_skills: list[str],
+        experience_mode: str = "experienced",
+        domain_profile: dict | None = None,
     ) -> dict[str, JevAnswer]:
         raise NotImplementedError
 
@@ -163,10 +169,10 @@ class StubJevProvider(JevProvider):
     provider that was never actually called.
     """
 
-    async def evaluate(self, **_kwargs) -> dict[str, JevAnswer]:
+    async def evaluate(self, **_kwargs: Any) -> dict[str, JevAnswer]:
         answers: dict[str, JevAnswer] = {}
         for qid, q in QUESTIONS.items():
-            value = True if q.type == "noul" else None
+            value = qid == "needs_manual_review" if q.type == "noul" else None
             answers[qid] = JevAnswer(
                 question_id=qid, type=q.type, value=value, confidence=0.0
             )
@@ -196,8 +202,10 @@ class JevClient(JevProvider):
         evaluation_intent: str = "",
         required_skills: list[str],
         preferred_skills: list[str],
+        experience_mode: str = "experienced",
+        domain_profile: dict | None = None,
     ) -> dict[str, JevAnswer]:
-        state = {
+        state: dict[str, Any] = {
             "role_name": role_name,
             "role_description": role_description,
             "evaluation_intent": evaluation_intent,
@@ -207,6 +215,8 @@ class JevClient(JevProvider):
             ),
             "required_skills": required_skills,
             "preferred_skills": preferred_skills,
+            "experience_mode": experience_mode,
+            "domain_profile": domain_profile or {},
             "resume_text": resume_text,
             "parsed_resume": parsed_resume_json,
         }

@@ -15,8 +15,20 @@ CATEGORY_KEYS = ("skills", "education", "experience", "projects", "links")
 # category - its weight is redistributed into skills/projects (the two
 # categories a fresher can actually demonstrate).
 DEFAULT_WEIGHTS: dict[str, dict[str, int]] = {
-    "experienced": {"skills": 30, "education": 15, "experience": 20, "projects": 25, "links": 10},
-    "fresher": {"skills": 35, "education": 20, "experience": 0, "projects": 35, "links": 10},
+    "experienced": {
+        "skills": 30,
+        "education": 15,
+        "experience": 20,
+        "projects": 25,
+        "links": 10,
+    },
+    "fresher": {
+        "skills": 35,
+        "education": 20,
+        "experience": 0,
+        "projects": 35,
+        "links": 10,
+    },
 }
 
 SCORE_BANDS: tuple[tuple[float, str], ...] = (
@@ -27,7 +39,11 @@ SCORE_BANDS: tuple[tuple[float, str], ...] = (
 )
 
 
-def resolve_weights(experience_mode: str, overrides: dict | None) -> dict[str, int]:
+def resolve_weights(
+    experience_mode: str,
+    overrides: dict | None,
+    applicable_categories: set[str] | None = None,
+) -> dict[str, float]:
     """Merge a batch's weight_overrides onto the mode default, then
     renormalize to 100 so a partial override can't silently change the scale
     of the final score."""
@@ -36,6 +52,11 @@ def resolve_weights(experience_mode: str, overrides: dict | None) -> dict[str, i
         for key in CATEGORY_KEYS:
             if key in overrides and isinstance(overrides[key], (int, float)):
                 base[key] = overrides[key]
+
+    if applicable_categories is not None:
+        for key in CATEGORY_KEYS:
+            if key not in applicable_categories:
+                base[key] = 0
 
     total = sum(base.values()) or 1
     return {key: (value / total) * 100 for key, value in base.items()}

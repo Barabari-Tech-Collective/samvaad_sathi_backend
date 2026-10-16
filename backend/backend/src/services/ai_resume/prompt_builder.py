@@ -1,5 +1,6 @@
 import json
 
+
 def build_ats_analysis_prompt(
     resume_text: str,
     target_role: str,
@@ -12,26 +13,38 @@ def build_ats_analysis_prompt(
     Forces OpenAI to return separate, individual feedback blocks for every project.
     """
     role_lower = target_role.lower()
-    is_fresher = any(k in experience_level.lower() for k in ["fresher", "intern", "entry", "0 years"])
+    is_fresher = any(
+        k in experience_level.lower() for k in ["fresher", "intern", "entry", "0 years"]
+    )
     experience_rating = (
         "Fresher profile configuration applied. Scoring focus shifted heavily onto project metrics and academic builds."
         if is_fresher
         else "Evaluated based on corporate experience history and project depth."
     )
 
-    if any(k in role_lower for k in ["design", "ui", "ux", "graphics", "product designer"]):
+    if any(
+        k in role_lower for k in ["design", "ui", "ux", "graphics", "product designer"]
+    ):
         role_track_type = "DESIGN / CREATIVE TRACK"
-        link_validation_instruction = "- Focus on visual portfolios (Behance, Dribbble, Figma)."
+        link_validation_instruction = (
+            "- Focus on visual portfolios (Behance, Dribbble, Figma)."
+        )
     else:
         role_track_type = "TECHNICAL / ENGINEERING TRACK"
-        link_validation_instruction = "- Focus on active code bases (GitHub) and live cloud deployments."
+        link_validation_instruction = (
+            "- Focus on active code bases (GitHub) and live cloud deployments."
+        )
 
     exact_total_score = deterministic_report["atsScore"]
     exact_breakdown = deterministic_report["scoreBreakdown"]
 
     # Extract target project list computed by Python to construct an explicit target template structure
-    python_projects = deterministic_report.get("deterministicMetrics", {}).get("projectModule", {}).get("projectEvaluation", [])
-    
+    python_projects = (
+        deterministic_report.get("deterministicMetrics", {})
+        .get("projectModule", {})
+        .get("projectEvaluation", [])
+    )
+
     project_json_schema_builder = []
     for proj in python_projects:
         name = proj["projectName"]
@@ -40,7 +53,7 @@ def build_ats_analysis_prompt(
         project_json_schema_builder.append(
             f'{{\n      "projectName": "{name}",\n      "feedback": "Write unique, deep critique specifically for the \'{name}\' project. You may state that it scored {score}/35, but DO NOT explain the mathematical breakdown behind it. Incorporate this verified feedback: {gaps_str}."\n    }}'
         )
-    
+
     schema_projects_block = ",\n    ".join(project_json_schema_builder)
 
     return f"""
@@ -126,12 +139,14 @@ JOB DESCRIPTION SPECIFICATION:
 RESUME TEXT DATA TO EVALUATE:
 {resume_text}
 """
+
+
 def build_structuring_prompt(
     resume_text: str,
     analysis_result: dict,
 ) -> str:
     """
-    Builds a prompt that instructs the LLM to structure the raw resume text into the exact JSON 
+    Builds a prompt that instructs the LLM to structure the raw resume text into the exact JSON
     schema required by the resume templates, applying any keyword suggestions from the analysis.
     """
     return f"""
@@ -142,11 +157,11 @@ You will also be provided with an ATS analysis result. Use the feedback and keyw
 optimize the structured data (e.g., inject missing keywords into the summary or bullet points where appropriate).
 
 REQUIREMENTS:
-1. Extract the candidate's name, email, phone, location, and links (LinkedIn, GitHub) for the header.
+1. Extract the candidate's name, email, phone, location, and all visible professional/social links for the header.
 2. Craft a professional summary based on their experience.
 3. Extract all skills into a flat array of strings.
 4. Extract work experience into an array of objects. Each must have: title, duration, company, and an array of bullet points (highlights).
-5. Extract projects into an array of objects. Each must have: title, duration, description, and an array of bullet points (highlights).
+5. Extract projects into an array of objects. Each must have: title, duration, description, projectUrl (when explicitly associated with that project), and an array of bullet points (highlights). Do not invent a URL.
 6. Extract education into an array of objects. Each must have: degree, institution, duration, and grade (CGPA or percentage if available).
 7. Return ONLY valid JSON matching the schema exactly. No markdown wrappers.
 
@@ -158,7 +173,9 @@ JSON SCHEMA EXPECTED:
     "phone": "...",
     "location": "...",
     "linkedin": "...",
-    "github": "..."
+    "github": "...",
+    "portfolio": "...",
+    "links": ["..."]
   }},
   "summary": "...",
   "skills": ["...", "..."],
@@ -175,6 +192,7 @@ JSON SCHEMA EXPECTED:
       "title": "...",
       "duration": "...",
       "description": "...",
+      "projectUrl": "...",
       "highlights": ["...", "..."]
     }}
   ],

@@ -37,7 +37,15 @@ from src.services.ai_resume.bulk.evidence import (
     redact_for_semantic_scoring,
 )
 from src.services.ai_resume.bulk.jd_quality import analyze_job_description
+from src.services.ai_resume.bulk.domain_profile import (
+    explicit_link_requirements,
+    infer_domain_profile,
+)
+from src.services.ai_resume.bulk.link_requirements import check_link_requirements
+from src.services.ai_resume.bulk.scoring_weights import resolve_weights
 from src.services.ai_resume.bulk.malware_scan import scan_document
+from src.services.ai_resume.scoring.project_scorer import ProjectScorer
+from src.services.ai_resume.url_validator import extract_professional_urls
 from src.worker import tasks as worker_tasks
 from src.worker.tasks import (
     _detect_resume_type,
@@ -755,6 +763,235 @@ def test_candidate_brief_surfaces_strongest_and_weakest_metrics():
         "Project quality",
     ]
     assert brief["recommendation"] == "Manual review required"
+
+
+def test_domain_profile_and_link_policy_do_not_make_github_a_data_requirement():
+    profile = infer_domain_profile(
+        role_name="Data Analyst",
+        role_description="Build dashboards and explain business insights",
+        required_skills=["SQL", "Tableau"],
+    )
+    requirements = explicit_link_requirements(
+        role_description="Build dashboards and explain business insights",
+        evaluation_intent="Assess analytical thinking for a retail project",
+        required_skills=["SQL", "Tableau"],
+    )
+    report = check_link_requirements(
+        verified_links={"links": {}},
+        required_categories=requirements,
+        domain_profile=profile,
+    )
+
+    assert profile.id == "data_analytics"
+    assert requirements == ()
+    assert report["scoreApplicable"] is False
+    assert report["linkScore"] is None
+    assert report["missing_required"] == []
+    weights = resolve_weights(
+        "experienced",
+        None,
+        applicable_categories={"skills", "education", "experience", "projects"},
+    )
+    assert weights["links"] == 0
+    assert round(sum(weights.values()), 6) == 100
+
+
+def test_explicit_required_evidence_is_scored_and_all_links_are_returned():
+    profile = infer_domain_profile(role_name="Product Manager")
+    requirements = explicit_link_requirements(
+        role_description="A product case study link is required.",
+        evaluation_intent="",
+        required_skills=[],
+    )
+    report = check_link_requirements(
+        verified_links={
+            "links": {
+                "https://example.test/case-study": {
+                    "valid": True,
+                    "status_code": 200,
+                    "category": "portfolio",
+                    "platform": "custom_domain",
+                    "anchorText": "Launch case study",
+                },
+                "https://linkedin.com/in/candidate": {
+                    "valid": True,
+                    "status_code": 200,
+                    "category": "social",
+                    "platform": "linkedin",
+                },
+            }
+        },
+        required_categories=requirements,
+        domain_profile=profile,
+    )
+
+    assert requirements == ("project_evidence",)
+    assert report["scoreApplicable"] is True
+    assert report["linkScore"] == 100
+    assert report["passed"] == ["project_evidence_working"]
+    assert {item["url"] for item in report["links"]} == {
+        "https://example.test/case-study",
+        "https://linkedin.com/in/candidate",
+    }
+
+
+def test_non_technical_and_data_work_sample_urls_are_extracted():
+    urls = extract_professional_urls(
+        "Dashboard: public.tableau.com/views/retention Portfolio: "
+        "https://research.example.org/case-study Design: behance.net/candidate"
+    )
+
+    assert set(urls) == {
+        "https://public.tableau.com/views/retention",
+        "https://research.example.org/case-study",
+        "https://behance.net/candidate",
+    }
+
+
+def test_domain_aware_project_score_rewards_ownership_and_outcomes_without_github():
+    result = ProjectScorer().score_projects(
+        [
+            {
+                "title": "Community retention programme",
+                "description": "Designed and led interviews with learners.",
+                "highlights": [
+                    "Created a new support journey",
+                    "Coordinated delivery across three teams",
+                    "Improved retention by 18%",
+                ],
+            }
+        ],
+        role_keywords=["programme", "learner", "stakeholder"],
+        domain_profile={
+            "id": "education_social_impact",
+            "label": "Education and social impact",
+        },
+    )
+
+    project = result["projectEvaluation"][0]
+    assert result["scoringModel"] == "domain_aware_v1"
+    assert project["score"] >= 25
+    assert not any(
+        "GitHub" in gap or "repository" in gap for gap in project["detectedGaps"]
+    )
+    assert set(project["breakdown"]) == {
+        "clarity",
+        "ownership",
+        "roleRelevance",
+        "outcomes",
+        "supportingEvidence",
+    }
+
+
+def test_experience_fallback_does_not_treat_internships_as_professional_mismatch():
+    assert not pipeline._has_sustained_professional_experience(
+        {
+            "experience": [
+                {"title": "Data Analyst Intern"},
+                {"title": "Campus Volunteer"},
+            ]
+        }
+    )
+    assert pipeline._has_sustained_professional_experience(
+        {"experience": [{"title": "Data Analyst"}]}
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresher_batch_suppresses_score_for_jev_experience_mismatch(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "extract_resume_text",
+        AsyncMock(
+            return_value={
+                "text": "Product Manager at Example, Jan 2022 - Present",
+                "documentMap": [],
+                "embeddedLinks": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "generate_structured_resume_data",
+        AsyncMock(
+            return_value={
+                "header": {"fullName": "Candidate"},
+                "skills": ["Roadmapping"],
+                "education": [],
+                "projects": [],
+                "experience": [
+                    {
+                        "title": "Product Manager",
+                        "company": "Example",
+                        "duration": "Jan 2022 - Present",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(pipeline, "extract_professional_urls", lambda _text: [])
+
+    class FakeLinkValidator:
+        async def validate_all_links_async(self, _targets):
+            return {"links": {}}
+
+    monkeypatch.setattr(pipeline, "SmartLinkValidator", FakeLinkValidator)
+    monkeypatch.setattr(
+        pipeline._link_scorer,
+        "score_links",
+        lambda **_kwargs: {"categoryBreakdown": {}},
+    )
+    monkeypatch.setattr(
+        pipeline._ats_engine,
+        "run_assessment",
+        lambda **_kwargs: {
+            "scoreBreakdown": {
+                "skillsMatch": 80,
+                "educationScore": 60,
+                "experienceMatch": 90,
+                "projectMatch": 70,
+                "linkIntegrity": 0,
+            },
+            "hygieneCheck": {"hasEmail": True, "hasPhone": True},
+            "deterministicMetrics": {
+                "experienceModule": {
+                    "totalMonths": 48,
+                    "formattedDuration": "4 yrs",
+                },
+                "projectModule": {"projectEvaluation": []},
+            },
+        },
+    )
+    answers = {
+        "skills_score": jev_client.JevAnswer("skills_score", "score", 3.0, 0.9),
+        "needs_manual_review": jev_client.JevAnswer(
+            "needs_manual_review", "noul", False, 0.1
+        ),
+        "experience_mode_mismatch": jev_client.JevAnswer(
+            "experience_mode_mismatch", "noul", True, 0.95
+        ),
+    }
+    provider = SimpleNamespace(evaluate=AsyncMock(return_value=answers))
+
+    result = await pipeline.run_candidate_pipeline(
+        raw_bytes=b"%PDF-1.7\nsynthetic",
+        filename="candidate.pdf",
+        role_name="Product Intern",
+        role_description="Support product discovery",
+        required_skills=["Roadmapping"],
+        preferred_skills=[],
+        experience_mode="fresher",
+        weight_overrides=None,
+        jev_provider=provider,
+    )
+
+    assert result.status == "needs_review"
+    assert result.final_score is None
+    gate = result.deterministic_report["bulkAtsReviewGate"]
+    assert gate["detectedField"] == "Product management"
+    assert gate["source"] == "jev"
+    assert result.deterministic_report["bulkAtsScorecard"]["scoreSuppressed"] is True
+    assert "experienced_candidate_in_fresher_batch" in result.warnings
 
 
 def test_optional_job_description_reports_role_context_quality():
