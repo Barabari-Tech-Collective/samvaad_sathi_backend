@@ -18,6 +18,7 @@ pytestmark = pytest.mark.skipif(
 def test_upgrade_adopts_verified_legacy_team_tables():
     from alembic import command
     from alembic.config import Config
+    from alembic.script import ScriptDirectory
 
     engine = sqlalchemy.create_engine(DATABASE_URL)
     config = Config(str(BACKEND_ROOT / "alembic.ini"))
@@ -26,6 +27,7 @@ def test_upgrade_adopts_verified_legacy_team_tables():
         str(BACKEND_ROOT / "src/repository/migrations"),
     )
     config.set_main_option("sqlalchemy.url", DATABASE_URL)
+    expected_head = ScriptDirectory.from_config(config).get_current_head()
 
     with engine.begin() as connection:
         connection.execute(sqlalchemy.text("DROP SCHEMA IF EXISTS public CASCADE"))
@@ -89,6 +91,6 @@ def test_upgrade_adopts_verified_legacy_team_tables():
         revision = connection.execute(
             sqlalchemy.text("SELECT version_num FROM alembic_version")
         ).scalar_one()
-        assert revision == "b8d5f9a3c722"
+        assert revision == expected_head
 
     engine.dispose()
