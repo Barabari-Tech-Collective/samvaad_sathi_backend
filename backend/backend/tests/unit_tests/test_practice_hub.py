@@ -62,13 +62,38 @@ def test_only_saved_nonempty_transcripts_count_as_evidence():
     saved = datetime.datetime.now(datetime.timezone.utc)
 
     assert has_evidence(
-        SimpleNamespace(answer_saved_at=saved, transcription={"text": "A real answer"})
+        SimpleNamespace(
+            answer_saved_at=saved,
+            transcription={"text": "This is a clear complete answer"},
+            analysis_json={"domain": {"criteria": {"relevance": {"score": 70}}}},
+        )
     )
     assert not has_evidence(
-        SimpleNamespace(answer_saved_at=saved, transcription={"text": "  "})
+        SimpleNamespace(
+            answer_saved_at=saved, transcription={"text": "  "}, analysis_json={}
+        )
     )
     assert not has_evidence(
-        SimpleNamespace(answer_saved_at=None, transcription={"text": "Unsaved"})
+        SimpleNamespace(
+            answer_saved_at=None,
+            transcription={"text": "This transcript was never saved"},
+            analysis_json={"domain": {}},
+        )
+    )
+
+
+def test_low_confidence_transcript_is_not_focus_evidence():
+    saved = datetime.datetime.now(datetime.timezone.utc)
+
+    assert not has_evidence(
+        SimpleNamespace(
+            answer_saved_at=saved,
+            transcription={
+                "text": "This answer has enough words but unreliable recognition",
+                "confidence": 0.1,
+            },
+            analysis_json={"domain": {"criteria": {"relevance": {"score": 90}}}},
+        )
     )
 
 

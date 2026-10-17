@@ -29,6 +29,7 @@ from src.models.schemas.interview import (
     PracticeHubResponse,
     PracticeHubResumeCard,
 )
+from src.services.whisper import transcription_is_usable
 
 FOCUS_EVIDENCE_REQUIRED = 3
 _IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -91,7 +92,12 @@ def _transcript_text(transcription: Any) -> str:
 def has_evidence(attempt: QuestionAttempt) -> bool:
     """An answer is focus evidence only after it is durably saved and transcribed."""
 
-    return bool(attempt.answer_saved_at and _transcript_text(attempt.transcription))
+    return bool(
+        attempt.answer_saved_at
+        and _transcript_text(attempt.transcription)
+        and transcription_is_usable(attempt.transcription)
+        and getattr(attempt, "analysis_json", None)
+    )
 
 
 def _report_action_items(report_json: Any) -> list[str]:
