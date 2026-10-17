@@ -56,6 +56,7 @@ from src.services.interview_session_lease import (
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.practice_drill_completion import record_practice_drill_completion
 from src.services.practice_hub import build_practice_hub
+from src.services.practice_feature_controls import require_practice_feature
 from src.services.practice_navigation import (
     NavigationConflict,
     apply_navigation_transition,
@@ -305,6 +306,8 @@ async def create_or_resume_interview(
             paused_at=getattr(active, "paused_at", None),
             expires_at=getattr(active, "expires_at", None),
         )
+
+    await require_practice_feature(interview_repo.async_session, "practice_new_starts")
 
     difficulty = (payload.difficulty or "medium").lower()
     if difficulty not in ("easy", "medium", "hard", "expert"):
@@ -561,6 +564,7 @@ async def generate_questions(
         get_repository(repo_type=InterviewQuestionCRUDRepository)
     ),
 ) -> GeneratedQuestionsInResponse:
+    await require_practice_feature(question_repo.async_session, "question_generation")
     # Determine target interview: explicit interview_id (if provided and belongs to user) else current active
     interview = None
     if getattr(payload, "interview_id", None) is not None:

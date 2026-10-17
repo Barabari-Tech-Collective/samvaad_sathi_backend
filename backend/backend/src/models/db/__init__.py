@@ -13,6 +13,14 @@ from .job_profile import JobProfile  # noqa: F401
 from .job_profile_question import JobProfileQuestion  # noqa: F401
 from .pacing_practice import PacingPracticeSession  # noqa: F401
 from .practice_drill_completion import PracticeDrillCompletion  # noqa: F401
+from .practice_governance import (  # noqa: F401
+    PracticeAssignment,
+    PracticeConsent,
+    PracticeDashboardAuditEvent,
+    PracticeFeatureControl,
+    PracticeShortlist,
+    PracticeShortlistEntry,
+)
 from .pronunciation_practice import PronunciationPractice  # noqa: F401
 from .question_attempt import QuestionAttempt  # noqa: F401
 from .question_supplement import QuestionSupplement  # noqa: F401

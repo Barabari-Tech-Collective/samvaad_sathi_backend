@@ -7,6 +7,7 @@ from src.api.routes.interviews_v2 import router as interviews_v2_router
 from src.api.routes.audio import router as audio_router
 from src.api.routes.analysis import router as analysis_router
 from src.api.routes.report import router as report_router
+
 # LEGACY - COGNITO, kept for rollback during the Sampark Saathi SSO migration. Uncomment
 # and re-add cognito_router below (plus the frontend's commented-out counterparts in
 # endpoints.ts/auth-provider.tsx) if SSO needs to be reverted.
@@ -24,13 +25,16 @@ from src.api.routes.ai_resume import router as ai_resume_router
 from src.api.routes.resume_builder import router as resume_builder_router
 from src.api.routes.bulk_ats import router as bulk_ats_router
 from src.api.routes.teams_v2 import router as teams_v2_router
+from src.api.routes.practice_dashboard import router as practice_dashboard_router
 
 router = fastapi.APIRouter()
+
 
 # Health check endpoint for ECS/Load Balancer
 @router.get("/health", status_code=200)
 async def health_check():
     return {"status": "healthy", "service": "samvaad-sathi-backend"}
+
 
 router.include_router(router=users_router)
 router.include_router(router=resume_router)
@@ -53,4 +57,5 @@ router.include_router(router=ai_resume_router)
 router.include_router(router=resume_builder_router)
 router.include_router(router=bulk_ats_router)
 router.include_router(router=teams_v2_router)
+router.include_router(router=practice_dashboard_router)
 # //working on staging

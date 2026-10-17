@@ -21,6 +21,7 @@ from src.repository.crud.summary_report import SummaryReportCRUDRepository
 from src.services.analysis import analysis_service
 from src.services.analytics_events import track_analytics_event
 from src.services.summary_report_v2 import SummaryReportServiceV2
+from src.services.practice_feature_controls import require_practice_feature
 
 logger = logging.getLogger(__name__)
 router = fastapi.APIRouter(prefix="/v2", tags=["summary-report-v2"])
@@ -51,6 +52,7 @@ async def generate_summary_report_v2(
         get_repository(SummaryReportCRUDRepository)
     ),
 ):
+    await require_practice_feature(session, "report_generation")
     # logger = logging.getLogger(__name__)
     # logger.info("POST /v2/summary-report called for interview_id=%s by user_id=%s", payload.interview_id, current_user.id)
     request_start = time.perf_counter()
