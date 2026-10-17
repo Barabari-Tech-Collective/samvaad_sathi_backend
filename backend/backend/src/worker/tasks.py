@@ -308,13 +308,18 @@ async def process_answer_transcription_task(
     from src.repository.crud.question import QuestionAttemptCRUDRepository
     from src.services.follow_up import FollowUpService
     from src.services.s3_service import fetch_answer_audio_from_s3
-    from src.services.whisper import transcribe_audio_with_whisper
+    from src.services.whisper import (
+        assess_transcription_evidence,
+        transcribe_audio_with_whisper,
+    )
     from src.worker.database import get_session
 
     job_try = max(1, int(ctx.get("job_try", 1)))
 
-    async def fail_or_retry(*, internal_reason: str, student_message: str) -> dict:
-        if job_try < _TRANSCRIPTION_MAX_TRIES:
+    async def fail_or_retry(
+        *, internal_reason: str, student_message: str, retryable: bool = True
+    ) -> dict:
+        if retryable and job_try < _TRANSCRIPTION_MAX_TRIES:
             session = get_session()
             try:
                 repo = QuestionAttemptCRUDRepository(async_session=session)
@@ -429,6 +434,9 @@ async def process_answer_transcription_task(
                 ),
             )
 
+        evidence = assess_transcription_evidence(transcription)
+        transcription = {**transcription, "evidence": evidence}
+
         session = get_session()
         try:
             repo = QuestionAttemptCRUDRepository(async_session=session)
@@ -446,6 +454,17 @@ async def process_answer_transcription_task(
                 }
         finally:
             await session.close()
+
+    evidence = assess_transcription_evidence(transcription)
+    if evidence["status"] != "usable":
+        return await fail_or_retry(
+            internal_reason=f"unusable speech evidence: {evidence['reason']}",
+            student_message=(
+                "Your answer is saved, but we could not hear enough clear speech to prepare "
+                "reliable feedback. You can continue or record this answer again."
+            ),
+            retryable=False,
+        )
 
     # Follow-up generation may use another model, but its failure cannot make a
     # durably transcribed answer non-terminal or prevent the student continuing.

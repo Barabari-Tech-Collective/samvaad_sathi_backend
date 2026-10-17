@@ -1,4 +1,3 @@
-from fileinput import filename
 import asyncio
 import os
 import time
@@ -11,6 +10,8 @@ from openai import AsyncOpenAI
 from src.config.manager import settings
 
 logger = logging.getLogger(__name__)
+
+MIN_USABLE_TRANSCRIPT_WORDS = 3
 
 _client: AsyncOpenAI | None = None
 
@@ -185,24 +186,68 @@ async def transcribe_audio_with_whisper(
         )
         return None, f"{provider.upper()} API rate limit exceeded", latency_ms, model_name
     
-    except openai.BadRequestError as e:
+    except openai.BadRequestError:
         end_time = time.perf_counter()
         latency_ms = int((end_time - start_time) * 1000)
-        logger.error(
-        "Whisper API error | File=%s | Error=%s",
-        filename,
-        str(e),
-        )
-        return None, f"Whisper API error: {str(e)}", latency_ms, model_name
+        logger.exception("Whisper rejected the audio | File=%s", filename)
+        return None, "The audio could not be processed", latency_ms, model_name
     
-    except Exception as e:
+    except Exception:
         end_time = time.perf_counter()
         latency_ms = int((end_time - start_time) * 1000)
         logger.exception(
         "Unexpected Whisper transcription failure | File=%s",
         filename,
         )
-        return None, f"Transcription failed: {str(e)}", latency_ms, model_name
+        return None, "Speech processing is temporarily unavailable", latency_ms, model_name
+
+
+def assess_transcription_evidence(transcription: dict | None) -> dict:
+    """Classify whether provider output can safely support AI feedback."""
+    if not isinstance(transcription, dict):
+        return {
+            "status": "unavailable",
+            "reason": "missing_transcript",
+            "word_count": 0,
+            "confidence": None,
+        }
+
+    text = str(transcription.get("text") or "").strip()
+    word_count = len(text.split())
+    duration = transcription.get("duration")
+    if isinstance(duration, (int, float)) and duration <= 0:
+        reason = "invalid_duration"
+    elif word_count == 0:
+        reason = "no_speech_detected"
+    elif word_count < MIN_USABLE_TRANSCRIPT_WORDS:
+        reason = "insufficient_speech"
+    else:
+        reason = None
+
+    raw_confidence = transcription.get("confidence")
+    confidence = (
+        max(0.0, min(1.0, float(raw_confidence)))
+        if isinstance(raw_confidence, (int, float))
+        else None
+    )
+    if confidence is not None and confidence < 0.35:
+        reason = "low_confidence"
+
+    return {
+        "status": "usable" if reason is None else "unavailable",
+        "reason": reason,
+        "word_count": word_count,
+        "confidence": confidence,
+    }
+
+
+def transcription_is_usable(transcription: dict | None) -> bool:
+    metadata = (
+        transcription.get("evidence")
+        if isinstance(transcription, dict) and isinstance(transcription.get("evidence"), dict)
+        else assess_transcription_evidence(transcription)
+    )
+    return metadata.get("status") == "usable"
 
 
 def _get_file_extension(filename: str) -> str:
