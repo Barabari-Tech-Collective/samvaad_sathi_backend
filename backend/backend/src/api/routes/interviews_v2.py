@@ -564,7 +564,9 @@ async def generate_questions_v2(
                 years_experience=years,
                 difficulty=interview.difficulty,
                 count=question_count,
-                seed=f"{current_user.id}:{interview.id}"
+                seed=f"{current_user.id}:{interview.id}",
+                interview_id=interview.id,
+                idempotency_key=f"practice-question-generation:{interview.id}:v1",
             )
 
         if not questions:

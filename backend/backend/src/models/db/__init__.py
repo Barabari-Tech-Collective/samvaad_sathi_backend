@@ -1,4 +1,5 @@
 from .ai_resume_analysis import AIResumeAnalysis  # noqa: F401
+from .ai_job import AIJob  # noqa: F401
 from .analytics_event import AnalyticsEvent  # noqa: F401
 from .bulk_ats import (  # noqa: F401
     BulkATSAuditEvent,

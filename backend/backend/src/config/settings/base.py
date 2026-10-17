@@ -292,6 +292,22 @@ class BackendBaseSettings(BaseSettings):
     LLM_PROVIDER: str = decouple.config("LLM_PROVIDER", cast=str, default="openai")  # type: ignore
     DEEPSEEK_API_KEY: str = decouple.config("DEEPSEEK_API_KEY", cast=str, default="")  # type: ignore
 
+    # Practice-interview AI controls. These are independent from the provider
+    # selector so an operator can stop question generation without disabling
+    # transcription or other product features.
+    PRACTICE_AI_QUESTION_GENERATION_ENABLED: bool = decouple.config(
+        "PRACTICE_AI_QUESTION_GENERATION_ENABLED", cast=bool, default=True
+    )  # type: ignore
+    PRACTICE_AI_QUESTION_PROMPT_VERSION: str = decouple.config(
+        "PRACTICE_AI_QUESTION_PROMPT_VERSION", cast=str, default="practice-questions-v1"
+    )  # type: ignore
+    PRACTICE_AI_QUESTION_SCHEMA_VERSION: str = decouple.config(
+        "PRACTICE_AI_QUESTION_SCHEMA_VERSION", cast=str, default="practice-question-set-v1"
+    )  # type: ignore
+    PRACTICE_AI_QUESTION_TIMEOUT_SECONDS: float = decouple.config(
+        "PRACTICE_AI_QUESTION_TIMEOUT_SECONDS", cast=float, default=25.0
+    )  # type: ignore
+
     # Jev (TypeSafe) - typed-decision model used by Bulk ATS for the semantic
     # judgment calls only (project quality/complexity, resume hygiene, etc).
     # Deterministic parsing, link checks and the final weighted score never
