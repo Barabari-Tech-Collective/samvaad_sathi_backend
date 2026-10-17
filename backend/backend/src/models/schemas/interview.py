@@ -281,6 +281,81 @@ class InterviewsListWithSummaryResponse(BaseSchemaModel):
     limit: int
 
 
+class PracticeHubResumeCard(BaseSchemaModel):
+    """The one Practice interview a student can safely continue."""
+
+    interview_id: int
+    track: str
+    difficulty: str
+    status: Literal["active", "paused"]
+    answered_questions: int = pydantic.Field(default=0, ge=0)
+    total_questions: int = pydantic.Field(default=0, ge=0)
+    expires_at: datetime.datetime | None = None
+
+
+class PracticeHubFocus(BaseSchemaModel):
+    """A deterministic coaching focus backed by recent interview evidence."""
+
+    module: Literal["structure", "pronunciation", "pace", "warm_up", "think_fast"]
+    title: str
+    reason: str
+    href: str
+    evidence_answer_count: int = pydantic.Field(ge=3)
+
+
+class PracticeHubActivity(BaseSchemaModel):
+    practice_days_streak: int = pydantic.Field(default=0, ge=0)
+    completed_mocks_this_week: int = pydantic.Field(default=0, ge=0)
+    completed_drills_this_week: int = pydantic.Field(default=0, ge=0)
+
+
+class PracticeHubResponse(BaseSchemaModel):
+    """Evidence-safe data used to render the student's Practice coach plan."""
+
+    activity: PracticeHubActivity
+    resume: PracticeHubResumeCard | None = None
+    focus: PracticeHubFocus | None = None
+    focus_evidence_answer_count: int = pydantic.Field(default=0, ge=0)
+    focus_evidence_required: int = pydantic.Field(default=3, ge=1)
+
+
+class CompletePracticeDrillRequest(BaseSchemaModel):
+    """Verifiable, idempotent completion evidence from a Practice skill builder."""
+
+    module: Literal["pronunciation", "warm_up", "think_fast"]
+    level: Literal["beginner", "intermediate", "advanced"]
+    client_completion_id: str = pydantic.Field(
+        min_length=8,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
+    evidence_kind: Literal["audio", "text", "listening_repeat"]
+    evidence_units: int = pydantic.Field(ge=1, le=10_000_000)
+
+    @pydantic.model_validator(mode="after")
+    def validate_completion_evidence(self) -> "CompletePracticeDrillRequest":
+        if self.module == "pronunciation":
+            if self.evidence_kind != "listening_repeat":
+                raise ValueError(
+                    "Pronunciation completion requires listening-and-repeat evidence"
+                )
+        elif self.evidence_kind == "listening_repeat":
+            raise ValueError(
+                "Listening-and-repeat evidence is only valid for pronunciation"
+            )
+        if self.evidence_kind == "text" and self.evidence_units < 20:
+            raise ValueError("Typed practice requires at least 20 characters")
+        if self.evidence_kind == "audio" and self.evidence_units < 256:
+            raise ValueError("Recorded practice did not contain enough audio data")
+        return self
+
+
+class CompletePracticeDrillResponse(BaseSchemaModel):
+    completion_id: int
+    created: bool
+    completed_at: datetime.datetime
+
+
 class QuestionAttemptItem(BaseSchemaModel):
     question_attempt_id: int = pydantic.Field(
         description="Unique identifier for the question attempt"
