@@ -1,4 +1,5 @@
 from src.models.db.ai_resume_analysis import AIResumeAnalysis
+from src.models.db.ai_job import AIJob
 from src.models.db.interview import Interview
 from src.models.db.job_profile import JobProfile
 from src.models.db.practice_drill_completion import PracticeDrillCompletion
