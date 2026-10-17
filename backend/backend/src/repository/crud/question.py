@@ -1,5 +1,4 @@
 import datetime
-import hashlib
 import logging
 import time
 from typing import Any
@@ -220,32 +219,6 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         await self.async_session.commit()
         if attempt is not None:
             await self.async_session.refresh(attempt)
-        return attempt
-
-    async def save_text_answer(
-        self, *, question_attempt_id: int, text: str, language: str
-    ) -> QuestionAttempt | None:
-        attempt = await self.get_by_id(question_attempt_id=question_attempt_id)
-        if attempt is None:
-            return None
-        checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if attempt.answer_checksum != checksum:
-            attempt.answer_version = (attempt.answer_version or 0) + 1
-        attempt.answer_checksum = checksum
-        attempt.answer_kind = "text"
-        attempt.answer_saved_at = datetime.datetime.now(datetime.timezone.utc)
-        attempt.attempt_state = "answer_saved"
-        attempt.skipped_at = None
-        attempt.follow_up_disposition = "not_applicable"
-        attempt.follow_up_resolved_at = datetime.datetime.now(datetime.timezone.utc)
-        attempt.transcription = {"text": text, "language": language, "segments": []}
-        attempt.transcription_status = "transcribed"
-        attempt.transcription_error = None
-        attempt.transcription_updated_at = datetime.datetime.now(datetime.timezone.utc)
-        attempt.analysis_json = None
-        attempt.feedback = None
-        await self.async_session.commit()
-        await self.async_session.refresh(attempt)
         return attempt
 
     async def mark_transcription_failed(

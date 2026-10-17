@@ -134,6 +134,33 @@ async def test_failed_answer_is_terminal_and_explains_why():
 
 
 @pytest.mark.anyio
+async def test_unusable_speech_requires_a_new_recording_instead_of_provider_retry():
+    row = attempt(
+        transcription_status=TranscriptionStatus.FAILED.value,
+        transcription={
+            "text": "um",
+            "evidence": {
+                "status": "unavailable",
+                "reason": "insufficient_speech",
+                "word_count": 1,
+                "confidence": None,
+            },
+        },
+        transcription_error="We could not hear enough clear speech.",
+    )
+    repo = Repo(row)
+    response = await get_transcription_status(42, current_user=USER, question_repo=repo)
+
+    assert response.evidence_status == "unavailable"
+    assert response.evidence_reason == "insufficient_speech"
+    assert response.retryable is False
+
+    with pytest.raises(fastapi.HTTPException) as raised:
+        await audio.retry_transcription(42, current_user=USER, question_repo=repo)
+    assert raised.value.status_code == fastapi.status.HTTP_409_CONFLICT
+
+
+@pytest.mark.anyio
 async def test_an_attempt_without_audio_is_not_reported_as_saved():
     row = attempt(audio_url=None)
     response = await get_transcription_status(

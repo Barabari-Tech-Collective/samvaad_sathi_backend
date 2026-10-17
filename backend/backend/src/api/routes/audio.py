@@ -16,8 +16,6 @@ from src.models.db.question_attempt import (
 from src.models.schemas.audio import (
     AudioTranscriptionResponse,
     FollowUpQuestion,
-    TextAnswerRequest,
-    TextAnswerResponse,
     TranscriptionStatusResponse,
 )
 from src.repository.crud.interview import InterviewCRUDRepository
@@ -381,58 +379,26 @@ async def transcribe_audio_answer(
 @router.post(
     path="/answers/text",
     name="audio:save-text-answer",
-    response_model=TextAnswerResponse,
-    status_code=fastapi.status.HTTP_200_OK,
-    summary="Save a typed interview answer",
+    status_code=fastapi.status.HTTP_410_GONE,
+    summary="Reject the retired typed-answer mode",
+    include_in_schema=False,
 )
 async def save_text_answer(
-    payload: TextAnswerRequest,
+    _payload: dict,
     current_user=fastapi.Depends(get_current_user),
-    question_repo: QuestionAttemptCRUDRepository = fastapi.Depends(
-        get_repository(repo_type=QuestionAttemptCRUDRepository)
-    ),
-    interview_repo: InterviewCRUDRepository = fastapi.Depends(
-        get_repository(repo_type=InterviewCRUDRepository)
-    ),
-) -> TextAnswerResponse:
-    attempt = await question_repo.get_by_id_and_user(
-        question_attempt_id=payload.question_attempt_id, user_id=current_user.id
-    )
-    if attempt is None:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_404_NOT_FOUND,
-            detail="Question attempt not found or access denied",
-        )
-    await _require_active_interview(
-        attempt,
-        interview_repo,
-        lease_token=payload.session_lease_token,
-        user_id=current_user.id,
-        lock=True,
-    )
-    normalized = " ".join(payload.text.split())
-    if not normalized:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Type an answer before saving.",
-        )
-    try:
-        saved = await question_repo.save_text_answer(
-            question_attempt_id=attempt.id,
-            text=normalized,
-            language=validate_transcription_language(payload.language),
-        )
-    except Exception:
-        await question_repo.async_session.rollback()
-        saved = None
-    if saved is None:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Your typed answer could not be saved. Keep this page open and retry.",
-        )
-    return TextAnswerResponse(
-        question_attempt_id=saved.id,
-        answer_version=max(1, saved.answer_version),
+) -> None:
+    """Fail cached clients closed after typed interview answers were retired.
+
+    Historical text answers remain readable for existing reports, but new
+    interview evidence must come from a durably saved audio recording.
+    """
+    del current_user
+    raise fastapi.HTTPException(
+        status_code=fastapi.status.HTTP_410_GONE,
+        detail=(
+            "Typed interview answers are no longer supported. "
+            "Record an audio answer or skip this question."
+        ),
     )
 
 
@@ -470,6 +436,11 @@ async def get_transcription_status(
 
     status = attempt.transcription_status or TranscriptionStatus.PENDING.value
     transcription = attempt.transcription
+    evidence = (
+        transcription.get("evidence")
+        if isinstance(transcription, dict) and isinstance(transcription.get("evidence"), dict)
+        else {}
+    )
     follow_up_question: FollowUpQuestion | None = None
     if status == TranscriptionStatus.TRANSCRIBED.value and hasattr(
         question_repo, "get_follow_up_payload_for_attempt"
@@ -491,6 +462,9 @@ async def get_transcription_status(
         transcription=strip_word_level_data(transcription) if transcription else None,
         word_count=extract_word_count(transcription) if transcription else None,
         error=attempt.transcription_error,
+        evidence_status=evidence.get("status"),
+        evidence_reason=evidence.get("reason"),
+        retryable=evidence.get("status") != "unavailable",
         follow_up_question=follow_up_question,
         updated_at=(
             attempt.transcription_updated_at.isoformat()
@@ -537,6 +511,20 @@ async def retry_transcription(
             question_attempt_id=question_attempt_id,
             current_user=current_user,
             question_repo=question_repo,
+        )
+    evidence = (
+        attempt.transcription.get("evidence")
+        if isinstance(attempt.transcription, dict)
+        and isinstance(attempt.transcription.get("evidence"), dict)
+        else {}
+    )
+    if evidence.get("status") == "unavailable":
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            detail=(
+                "This recording does not contain enough clear speech to reprocess. "
+                "Record the answer again."
+            ),
         )
 
     # Do not duplicate an active model call. A processing row becomes eligible

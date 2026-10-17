@@ -21,6 +21,7 @@ from src.models.schemas.analysis import (
     PaceAnalysisResponse,
     PauseAnalysisResponse
 )
+from src.services.whisper import transcription_is_usable
 
 logger = logging.getLogger(__name__)
 DEFAULT_ANALYSIS_TYPES = ("domain", "communication", "pace", "pause")
@@ -28,7 +29,7 @@ DEFAULT_ANALYSIS_TYPES = ("domain", "communication", "pace", "pause")
 
 def _has_transcribed_answer(question_attempt: QuestionAttempt) -> bool:
     transcription = question_attempt.transcription
-    if not transcription:
+    if not transcription or not transcription_is_usable(transcription):
         return False
     if isinstance(transcription, dict):
         text = transcription.get("text") or transcription.get("transcript")
@@ -110,12 +111,12 @@ class AnalysisAggregationService:
           bool(question_attempt.transcription),
           bool(question_attempt.analysis_json),
         )
-        if not question_attempt.transcription:
+        if not _has_transcribed_answer(question_attempt):
             logger.error(
-              "COMPLETE_ANALYSIS transcription missing | Attempt=%s",
+              "COMPLETE_ANALYSIS reliable transcription missing | Attempt=%s",
               question_attempt_id,
             )
-            raise ValueError("Question attempt does not have transcription data")
+            raise ValueError("Question attempt does not have reliable speech evidence")
         if answer_version is not None and question_attempt.answer_version != answer_version:
             raise ValueError("The answer changed before feedback processing started")
         logger.info(
@@ -382,8 +383,10 @@ class AnalysisAggregationService:
               bool(transcription_text),
               len(transcription_text or ""),
             )
-            if not transcription_text:
-                raise ValueError(f"No transcription available for {analysis_type} analysis")
+            if not transcription_is_usable(question_attempt.transcription):
+                raise ValueError(
+                    f"No reliable speech evidence available for {analysis_type} analysis"
+                )
             
             if analysis_type == "domain":
                 # Build user profile for LLM analysis

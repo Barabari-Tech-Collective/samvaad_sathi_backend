@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import fastapi
 import pytest
 
 from src.api.routes import audio, interviews
-from src.models.schemas.audio import TextAnswerRequest
 from src.models.schemas.interview import CreateAttemptRequest
 from src.repository.crud.question import AttemptIdempotencyConflict
 
@@ -150,34 +150,12 @@ async def test_audio_is_acknowledged_when_background_queue_is_unavailable(monkey
 
 
 @pytest.mark.asyncio
-async def test_typed_answer_is_saved_as_transcribed_evidence():
-    attempt = SimpleNamespace(id=42, interview_id=9)
-    saved = SimpleNamespace(id=42, answer_version=3)
+async def test_typed_answer_endpoint_is_permanently_retired():
+    with pytest.raises(fastapi.HTTPException) as exc:
+        await audio.save_text_answer(
+            {"questionAttemptId": 42, "text": "I solved the issue", "language": "en"},
+            current_user=USER,
+        )
 
-    class Repo:
-        async def get_by_id_and_user(self, **_kwargs):
-            return attempt
-
-        async def save_text_answer(self, **kwargs):
-            assert kwargs["text"] == "I solved the issue"
-            assert kwargs["language"] == "en"
-            return saved
-
-    result = await audio.save_text_answer(
-        TextAnswerRequest(
-            questionAttemptId=42,
-            text="  I solved   the issue  ",
-            language="en",
-        ),
-        current_user=USER,
-        question_repo=Repo(),
-        interview_repo=SimpleNamespace(
-            get_by_id=AsyncMock(
-                return_value=SimpleNamespace(status="active", expires_at=None)
-            )
-        ),
-    )
-
-    assert result.saved is True
-    assert result.answer_version == 3
-    assert result.transcription_status == "transcribed"
+    assert exc.value.status_code == 410
+    assert "no longer supported" in exc.value.detail

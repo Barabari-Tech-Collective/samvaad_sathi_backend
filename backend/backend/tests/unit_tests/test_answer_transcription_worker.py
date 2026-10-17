@@ -99,7 +99,16 @@ async def test_worker_transcribes_saved_audio_and_publishes_after_follow_up(
     deps.repo.update_audio_transcription.assert_awaited_once_with(
         question_attempt_id=42,
         audio_url="answers/42.webm",
-        transcription={"text": "A durable answer", "language": "en"},
+        transcription={
+            "text": "A durable answer",
+            "language": "en",
+            "evidence": {
+                "status": "usable",
+                "reason": None,
+                "word_count": 3,
+                "confidence": None,
+            },
+        },
         checksum=deps.checksum,
         finalize=False,
     )
@@ -148,6 +157,34 @@ async def test_worker_stops_after_three_failures_with_student_safe_error(
     error = deps.repo.mark_transcription_failed.await_args.kwargs["error"]
     assert "secret provider error" not in error
     assert "saved" in error.lower()
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_empty_speech_without_retrying_or_scoring(
+    worker_dependencies,
+):
+    deps = worker_dependencies
+    deps.transcribe.return_value = (
+        {"text": "um", "language": "en", "duration": 2.0},
+        None,
+        25,
+        "whisper",
+    )
+
+    result = await process_answer_transcription_task(
+        {"job_try": 1},
+        question_attempt_id=42,
+        checksum=deps.checksum,
+        language="en",
+        filename="answer.webm",
+    )
+
+    assert result["status"] == "failed"
+    deps.repo.mark_transcription_pending.assert_not_called()
+    deps.repo.update_audio_transcription.assert_awaited_once()
+    deps.follow_up.assert_not_called()
+    error = deps.repo.mark_transcription_failed.await_args.kwargs["error"]
+    assert "clear speech" in error
 
 
 @pytest.mark.asyncio
