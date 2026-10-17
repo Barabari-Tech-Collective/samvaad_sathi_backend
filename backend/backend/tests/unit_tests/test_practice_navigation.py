@@ -3,12 +3,20 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.models.db.interview import Interview
 from src.services.practice_navigation import (
     NavigationConflict,
     apply_navigation_transition,
     initialize_navigation,
     question_snapshot_hash,
 )
+
+
+def test_current_question_foreign_key_is_drop_safe_for_schema_rebuilds():
+    foreign_key = next(iter(Interview.__table__.c.current_question_id.foreign_keys))
+
+    assert foreign_key.name == "fk_interview_current_question_id_interview_question"
+    assert foreign_key.use_alter is True
 
 
 def question(

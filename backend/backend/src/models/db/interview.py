@@ -37,7 +37,15 @@ class Interview(Base):  # type: ignore
         sqlalchemy.Integer, nullable=False, default=0, server_default="0"
     )
     current_question_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
-        sqlalchemy.ForeignKey("interview_question.id", ondelete="SET NULL"),
+        sqlalchemy.ForeignKey(
+            "interview_question.id",
+            name="fk_interview_current_question_id_interview_question",
+            ondelete="SET NULL",
+            # interview_question already points back to interview. Emitting
+            # this named constraint with ALTER lets SQLAlchemy create and drop
+            # disposable schemas deterministically despite that valid cycle.
+            use_alter=True,
+        ),
         nullable=True,
         index=True,
     )
