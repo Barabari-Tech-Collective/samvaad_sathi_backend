@@ -9,15 +9,23 @@ from src.models.schemas.base import BaseSchemaModel
 
 
 class InterviewQuestionOut(BaseSchemaModel):
-    interview_question_id: int = pydantic.Field(description="Unique identifier for the interview question")
+    interview_question_id: int = pydantic.Field(
+        description="Unique identifier for the interview question"
+    )
     text: str
     topic: str | None = None
     category: str | None = None
     status: str
     resume_used: bool
-    is_follow_up: bool = pydantic.Field(default=False, description="Whether this question is a follow-up prompt")
-    parent_question_id: int | None = pydantic.Field(default=None, description="Parent question ID if this is a follow-up")
-    follow_up_strategy: str | None = pydantic.Field(default=None, description="Strategy used for follow-up generation")
+    is_follow_up: bool = pydantic.Field(
+        default=False, description="Whether this question is a follow-up prompt"
+    )
+    parent_question_id: int | None = pydantic.Field(
+        default=None, description="Parent question ID if this is a follow-up"
+    )
+    follow_up_strategy: str | None = pydantic.Field(
+        default=None, description="Strategy used for follow-up generation"
+    )
     supplement: "QuestionSupplementOut | None" = pydantic.Field(
         default=None,
         description="Optional supplemental snippet (diagram or code) for this question",
@@ -34,13 +42,22 @@ class ResumeQuestionOut(InterviewQuestionOut):
     transcription_status: (
         Literal["pending", "processing", "transcribed", "failed"] | None
     ) = None
+    attempt_state: Literal["in_progress", "answer_saved", "skipped"] | None = None
+    skipped: bool = False
+    follow_up_disposition: (
+        Literal["pending", "generated", "not_generated", "not_applicable", "skipped"]
+        | None
+    ) = None
 
 
 class CreateAttemptResponse(BaseSchemaModel):
     question_attempt_id: int
     created: bool = pydantic.Field(
-        default=True, description="False when an idempotent retry returned the existing attempt"
+        default=True,
+        description="False when an idempotent retry returned the existing attempt",
     )
+    state_version: int = pydantic.Field(default=0, ge=0)
+    current_question_id: int | None = None
 
 
 class CreateAttemptRequest(BaseSchemaModel):
@@ -60,9 +77,7 @@ class CreateAttemptRequest(BaseSchemaModel):
     # Swagger example
     model_config = BaseSchemaModel.model_config.copy()
     model_config["json_schema_extra"] = {
-        "examples": [
-            {"interviewId": 123, "questionId": 456}
-        ]
+        "examples": [{"interviewId": 123, "questionId": 456}]
     }
 
 
@@ -81,6 +96,7 @@ class QuestionItem(BaseSchemaModel):
 
 class QuestionItemWithHint(BaseSchemaModel):
     """Question item with structure hint for practice mode"""
+
     interview_question_id: int | None = None
     text: str
     topic: str | None = None
@@ -90,13 +106,21 @@ class QuestionItemWithHint(BaseSchemaModel):
     parent_question_id: int | None = None
     follow_up_strategy: str | None = None
     supplement: "QuestionSupplementOut | None" = None
-    structure_hint: str = pydantic.Field(description="1-2 line hint about expected answer structure")
+    structure_hint: str = pydantic.Field(
+        description="1-2 line hint about expected answer structure"
+    )
 
 
 class QuestionSupplementOut(BaseSchemaModel):
-    question_id: int = pydantic.Field(description="Interview question ID this supplement belongs to")
-    supplement_type: str = pydantic.Field(description="Type of supplement: 'code' or 'diagram'")
-    format: str | None = pydantic.Field(default=None, description="Language/format such as 'python' or 'mermaid'")
+    question_id: int = pydantic.Field(
+        description="Interview question ID this supplement belongs to"
+    )
+    supplement_type: str = pydantic.Field(
+        description="Type of supplement: 'code' or 'diagram'"
+    )
+    format: str | None = pydantic.Field(
+        default=None, description="Language/format such as 'python' or 'mermaid'"
+    )
     content: str = pydantic.Field(description="Renderable snippet content")
 
 
@@ -109,14 +133,11 @@ class InterviewCreate(BaseSchemaModel):
 class GenerateQuestionsRequest(BaseSchemaModel):
     interview_id: int | None = None
     use_resume: bool = True  # Whether to use resume text for question generation
-    
+
     # Swagger example
     model_config = BaseSchemaModel.model_config.copy()
     model_config["json_schema_extra"] = {
-        "examples": [
-            {"useResume": True},
-            {"interviewId": 123, "useResume": True}
-        ]
+        "examples": [{"useResume": True}, {"interviewId": 123, "useResume": True}]
     }
 
 
@@ -127,7 +148,9 @@ class GenerateNonTechQuestionsRequest(BaseSchemaModel):
 
 
 class InterviewInResponse(BaseSchemaModel):
-    interview_id: int = pydantic.Field(description="Unique identifier for the interview")
+    interview_id: int = pydantic.Field(
+        description="Unique identifier for the interview"
+    )
     track: str
     difficulty: str
     status: str
@@ -149,7 +172,9 @@ class GeneratedQuestionsInResponse(BaseSchemaModel):
     track: str
     count: int
     questions: list[str]
-    question_ids: list[int] | None = None  # Include question IDs for consistency with get-questions endpoint
+    question_ids: list[int] | None = (
+        None  # Include question IDs for consistency with get-questions endpoint
+    )
     items: list[QuestionItem] | None = None
     cached: bool | None = None
     llm_model: str | None = None
@@ -163,6 +188,7 @@ class GeneratedQuestionsInResponse(BaseSchemaModel):
 
 class StructurePracticeQuestionsResponse(BaseSchemaModel):
     """Response for structure practice mode with hints"""
+
     interview_id: int | None = None
     track: str
     count: int
@@ -176,29 +202,69 @@ class StructurePracticeQuestionsResponse(BaseSchemaModel):
 
 
 class InterviewItem(BaseSchemaModel):
-    interview_id: int = pydantic.Field(description="Unique identifier for the interview")
+    interview_id: int = pydantic.Field(
+        description="Unique identifier for the interview"
+    )
     track: str
     difficulty: str
     status: str
     created_at: datetime.datetime
-    knowledge_percentage: float | None = pydantic.Field(default=None, ge=0.0, le=100.0, description="Knowledge competence percentage from summary report")
-    speech_fluency_percentage: float | None = pydantic.Field(default=None, ge=0.0, le=100.0, description="Speech fluency percentage from summary report")
-    attempts_count: int = pydantic.Field(default=0, ge=0, description="Number of summary reports/attempts for this interview")
-    resume_used: bool = pydantic.Field(default=False, description="Whether resume was used for question generation")
+    knowledge_percentage: float | None = pydantic.Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Knowledge competence percentage from summary report",
+    )
+    speech_fluency_percentage: float | None = pydantic.Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Speech fluency percentage from summary report",
+    )
+    attempts_count: int = pydantic.Field(
+        default=0,
+        ge=0,
+        description="Number of summary reports/attempts for this interview",
+    )
+    resume_used: bool = pydantic.Field(
+        default=False, description="Whether resume was used for question generation"
+    )
 
 
 class InterviewItemWithSummary(BaseSchemaModel):
     """Enhanced interview item that includes summary report data for completed interviews."""
-    interview_id: int = pydantic.Field(description="Unique identifier for the interview")
+
+    interview_id: int = pydantic.Field(
+        description="Unique identifier for the interview"
+    )
     track: str
     difficulty: str
     status: str
     created_at: datetime.datetime
-    knowledge_percentage: float | None = pydantic.Field(default=None, ge=0.0, le=100.0, description="Knowledge competence percentage from summary report")
-    speech_fluency_percentage: float | None = pydantic.Field(default=None, ge=0.0, le=100.0, description="Speech fluency percentage from summary report")
-    summary_report_available: bool = pydantic.Field(default=False, description="Whether a summary report exists for this interview")
-    attempts_count: int = pydantic.Field(default=0, ge=0, description="Number of summary reports/attempts for this interview")
-    top_action_items: list[str] = pydantic.Field(default_factory=list, description="Top 3 action items from the latest summary report")
+    knowledge_percentage: float | None = pydantic.Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Knowledge competence percentage from summary report",
+    )
+    speech_fluency_percentage: float | None = pydantic.Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Speech fluency percentage from summary report",
+    )
+    summary_report_available: bool = pydantic.Field(
+        default=False, description="Whether a summary report exists for this interview"
+    )
+    attempts_count: int = pydantic.Field(
+        default=0,
+        ge=0,
+        description="Number of summary reports/attempts for this interview",
+    )
+    top_action_items: list[str] = pydantic.Field(
+        default_factory=list,
+        description="Top 3 action items from the latest summary report",
+    )
 
 
 class InterviewsListResponse(BaseSchemaModel):
@@ -209,13 +275,16 @@ class InterviewsListResponse(BaseSchemaModel):
 
 class InterviewsListWithSummaryResponse(BaseSchemaModel):
     """Enhanced interviews list response that includes summary report data."""
+
     items: list[InterviewItemWithSummary]
     next_cursor: int | None
     limit: int
 
 
 class QuestionAttemptItem(BaseSchemaModel):
-    question_attempt_id: int = pydantic.Field(description="Unique identifier for the question attempt")
+    question_attempt_id: int = pydantic.Field(
+        description="Unique identifier for the question attempt"
+    )
     question_text: str
     question_id: int | None = None
     audio_url: str | None = None
@@ -242,6 +311,38 @@ class CompleteInterviewRequest(BaseSchemaModel):
     session_lease_token: str | None = pydantic.Field(
         default=None, min_length=20, max_length=256
     )
+
+
+AdvanceInterviewAction = Literal["answer_saved", "skip", "continue_without_follow_up"]
+
+
+class AdvanceInterviewRequest(BaseSchemaModel):
+    interview_id: int
+    from_question_id: int
+    expected_state_version: int = pydantic.Field(ge=0)
+    transition_id: str = pydantic.Field(
+        min_length=8,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+        description="Stable idempotency key retained across client retries",
+    )
+    action: AdvanceInterviewAction
+    answer_version: int | None = pydantic.Field(default=None, ge=0)
+    session_lease_token: str | None = pydantic.Field(
+        default=None, min_length=20, max_length=256
+    )
+
+
+class AdvanceInterviewResponse(BaseSchemaModel):
+    interview_id: int
+    status: str
+    state_version: int = pydantic.Field(ge=0)
+    question_set_version: int = pydantic.Field(ge=0)
+    current_question_id: int | None = None
+    current_question_index: int | None = None
+    complete_ready: bool
+    duplicate: bool = False
+    questions: list[ResumeQuestionOut]
 
 
 class PauseInterviewRequest(BaseSchemaModel):
@@ -306,8 +407,12 @@ class ResumeInterviewResponse(BaseSchemaModel):
     questions: list[ResumeQuestionOut] = pydantic.Field(
         description="The complete immutable question snapshot with durable answer checkpoints"
     )
-    total_questions: int = pydantic.Field(description="Total number of questions in the interview")
-    attempted_questions: int = pydantic.Field(description="Number of questions with attempts")
+    total_questions: int = pydantic.Field(
+        description="Total number of questions in the interview"
+    )
+    attempted_questions: int = pydantic.Field(
+        description="Number of questions with attempts"
+    )
     answered_questions: int = pydantic.Field(
         description="Number of questions whose answer is durably saved"
     )
@@ -315,8 +420,13 @@ class ResumeInterviewResponse(BaseSchemaModel):
         description="Number of questions without a durably saved answer"
     )
     resume_question_index: int | None = pydantic.Field(
-        description="Zero-based first question without a durable answer, or null when all are saved"
+        description="Zero-based authoritative current question, or null after terminal navigation"
     )
+    state_version: int = pydantic.Field(default=0, ge=0)
+    question_set_version: int = pydantic.Field(default=0, ge=0)
+    current_question_id: int | None = None
+    current_question_index: int | None = None
+    complete_ready: bool = False
     status: str = pydantic.Field(description="Authoritative interview lifecycle status")
     paused_at: datetime.datetime | None = None
     expires_at: datetime.datetime | None = None
@@ -332,4 +442,6 @@ class ResumeInterviewResponse(BaseSchemaModel):
 
 class QuestionSupplementsResponse(BaseSchemaModel):
     interview_id: int = pydantic.Field(description="Interview identifier")
-    supplements: list[QuestionSupplementOut] = pydantic.Field(description="Generated supplements mapped to questions")
+    supplements: list[QuestionSupplementOut] = pydantic.Field(
+        description="Generated supplements mapped to questions"
+    )
