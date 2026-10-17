@@ -1,6 +1,7 @@
 from __future__ import annotations
-import time
+
 import logging
+import time
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
@@ -20,72 +21,112 @@ class FollowUpService:
 
     def __init__(self, async_session: SQLAlchemyAsyncSession):
         self._async_session = async_session
-        self._question_attempt_repo = QuestionAttemptCRUDRepository(async_session=async_session)
-        self._interview_question_repo = InterviewQuestionCRUDRepository(async_session=async_session)
+        self._question_attempt_repo = QuestionAttemptCRUDRepository(
+            async_session=async_session
+        )
+        self._interview_question_repo = InterviewQuestionCRUDRepository(
+            async_session=async_session
+        )
         self._interview_repo = InterviewCRUDRepository(async_session=async_session)
 
-    async def handle_transcription_saved(self, question_attempt_id: int) -> dict[str, Any] | None:
+    async def _resolve_follow_up(self, *, attempt, disposition: str) -> None:
+        """Persist Gate 2 state only for a real stored attempt."""
+        attempt_id = getattr(attempt, "id", None)
+        resolver = getattr(self._question_attempt_repo, "resolve_follow_up", None)
+        if attempt_id is None or not callable(resolver):
+            return
+        await resolver(
+            question_attempt_id=attempt_id,
+            disposition=disposition,
+        )
+
+    async def handle_transcription_saved(
+        self, question_attempt_id: int
+    ) -> dict[str, Any] | None:
         start_time = time.perf_counter()
 
         logger.info(
-          "Follow-up workflow started | QuestionAttempt=%s",
-          question_attempt_id,
+            "Follow-up workflow started | QuestionAttempt=%s",
+            question_attempt_id,
         )
         """Trigger follow-up generation after a transcription is persisted."""
-        attempt = await self._question_attempt_repo.get_by_id(question_attempt_id=question_attempt_id)
+        attempt = await self._question_attempt_repo.get_by_id(
+            question_attempt_id=question_attempt_id
+        )
         logger.info(
-          "Question attempt loaded | QuestionAttempt=%s | Found=%s | Interview=%s | Question=%s",
-          question_attempt_id,
-          attempt is not None,
-          attempt.interview_id if attempt else None,
-          attempt.question_id if attempt else None,
+            "Question attempt loaded | QuestionAttempt=%s | Found=%s | Interview=%s | Question=%s",
+            question_attempt_id,
+            attempt is not None,
+            attempt.interview_id if attempt else None,
+            attempt.question_id if attempt else None,
         )
         if not attempt or not attempt.question_id:
             return None
         logger.info(
-          "Proceeding to follow-up generation | QuestionAttempt=%s",
-          question_attempt_id,
+            "Proceeding to follow-up generation | QuestionAttempt=%s",
+            question_attempt_id,
         )
         return await self._maybe_generate_follow_up(attempt=attempt)
 
-    async def _maybe_generate_follow_up(self, attempt: QuestionAttempt) -> dict[str, Any] | None:
+    async def _maybe_generate_follow_up(
+        self, attempt: QuestionAttempt
+    ) -> dict[str, Any] | None:
         generation_start = time.perf_counter()
 
         logger.info(
-          "Evaluating follow-up generation | Interview=%s | Question=%s",
-          attempt.interview_id,
-          attempt.question_id,
+            "Evaluating follow-up generation | Interview=%s | Question=%s",
+            attempt.interview_id,
+            attempt.question_id,
         )
         if not attempt.question_id:
+            return None
+        if getattr(attempt, "follow_up_disposition", None) == "skipped":
+            logger.info(
+                "Follow-up skipped by student | QuestionAttempt=%s",
+                attempt.id,
+            )
             return None
 
         question = await self._interview_question_repo.get_by_id(question_id=attempt.question_id)  # type: ignore[arg-type]
         logger.info(
-          "Interview question loaded | Question=%s | IsFollowUp=%s | Strategy=%s",
-          question.id if question else None,
-          question.is_follow_up if question else None,
-          question.follow_up_strategy if question else None,
+            "Interview question loaded | Question=%s | IsFollowUp=%s | Strategy=%s",
+            question.id if question else None,
+            question.is_follow_up if question else None,
+            question.follow_up_strategy if question else None,
         )
         if not question or question.is_follow_up or not question.follow_up_strategy:
             return None
 
-        existing = await self._interview_question_repo.get_follow_up_for_parent(parent_question_id=question.id)
+        existing = await self._interview_question_repo.get_follow_up_for_parent(
+            parent_question_id=question.id
+        )
         logger.info(
-          "Existing follow-up check | ParentQuestion=%s | Exists=%s",
-          question.id,
-          existing is not None,
+            "Existing follow-up check | ParentQuestion=%s | Exists=%s",
+            question.id,
+            existing is not None,
         )
         if existing:
+            await self._resolve_follow_up(
+                attempt=attempt,
+                disposition="generated",
+            )
             return None
 
         answer_chunk = self._extract_answer_chunk(transcription=attempt.transcription)
         logger.info(
-          "Answer chunk extracted | Question=%s | Characters=%d",
-          question.id,
-          len(answer_chunk),
+            "Answer chunk extracted | Question=%s | Characters=%d",
+            question.id,
+            len(answer_chunk),
         )
         if not answer_chunk:
-            logger.debug("Skipping follow-up generation due to empty transcription chunk for question %s", question.id)
+            logger.debug(
+                "Skipping follow-up generation due to empty transcription chunk for question %s",
+                question.id,
+            )
+            await self._resolve_follow_up(
+                attempt=attempt,
+                disposition="not_generated",
+            )
             return None
 
         # Same threshold analyze_domain_with_llm/analyze_communication_with_llm
@@ -96,89 +137,156 @@ class FollowUpService:
         # never said anything to clarify.
         if _is_near_empty_answer(answer_chunk):
             logger.debug(
-                "Skipping follow-up generation for near-empty answer (question %s)", question.id
+                "Skipping follow-up generation for near-empty answer (question %s)",
+                question.id,
+            )
+            await self._resolve_follow_up(
+                attempt=attempt,
+                disposition="not_generated",
             )
             return None
 
-        interview = await self._interview_repo.get_by_id(interview_id=attempt.interview_id)
+        interview = await self._interview_repo.get_by_id(
+            interview_id=attempt.interview_id
+        )
 
         track = interview.track if interview else "general"
         difficulty = interview.difficulty if interview else "medium"
 
         logger.info(
-        "Interview loaded | Interview=%s | Track=%s | Difficulty=%s",
-        attempt.interview_id,
-        track,
-        difficulty,
+            "Interview loaded | Interview=%s | Track=%s | Difficulty=%s",
+            attempt.interview_id,
+            track,
+            difficulty,
         )
         # Enforce strict question count for Full Stack Developer mode
         if track == "Full Stack Developer":
-            unasked_qs = await self._interview_question_repo.get_questions_without_attempts(interview_id=attempt.interview_id)
-            unasked_base_qs = [q for q in unasked_qs if not getattr(q, "is_follow_up", False)]
+            unasked_qs = (
+                await self._interview_question_repo.get_questions_without_attempts(
+                    interview_id=attempt.interview_id
+                )
+            )
+            unasked_base_qs = [
+                q for q in unasked_qs if not getattr(q, "is_follow_up", False)
+            ]
             if not unasked_base_qs:
-                logger.debug("Skipping follow-up generation for Full Stack Developer because no unasked base questions remain to splice.")
+                logger.debug(
+                    "Skipping follow-up generation for Full Stack Developer because no unasked base questions remain to splice."
+                )
+                await self._resolve_follow_up(
+                    attempt=attempt,
+                    disposition="not_generated",
+                )
                 return None
 
         llm_start = time.perf_counter()
 
         logger.info(
-          "Follow-up LLM request started | Interview=%s | Question=%s",
-          attempt.interview_id,
-          question.id,
+            "Follow-up LLM request started | Interview=%s | Question=%s",
+            attempt.interview_id,
+            question.id,
         )
-        follow_up_text, llm_error, latency_ms, llm_model = await generate_follow_up_question(
-            track=track,
-            difficulty=difficulty,
-            base_question=question.text,
-            answer_excerpt=answer_chunk,
-            topic=question.topic,
+        follow_up_text, llm_error, latency_ms, llm_model = (
+            await generate_follow_up_question(
+                track=track,
+                difficulty=difficulty,
+                base_question=question.text,
+                answer_excerpt=answer_chunk,
+                topic=question.topic,
+            )
         )
         logger.info(
-          "Follow-up LLM completed | Question=%s | Duration=%.2fs | Model=%s | Error=%s | Generated=%s",
-          question.id,
-          time.perf_counter() - llm_start,
-          llm_model,
-          llm_error,
-          bool(follow_up_text),
+            "Follow-up LLM completed | Question=%s | Duration=%.2fs | Model=%s | Error=%s | Generated=%s",
+            question.id,
+            time.perf_counter() - llm_start,
+            llm_model,
+            llm_error,
+            bool(follow_up_text),
         )
         if not follow_up_text:
             logger.debug(
-                "Follow-up generation returned empty text (error=%s) for question %s", llm_error, question.id
+                "Follow-up generation returned empty text (error=%s) for question %s",
+                llm_error,
+                question.id,
+            )
+            await self._resolve_follow_up(
+                attempt=attempt,
+                disposition="not_generated",
+            )
+            return None
+        # The model call happens outside the student's request. They may choose
+        # "continue without follow-up" while it runs, so check the locked row
+        # again immediately before publishing anything.
+        attempt_id = getattr(attempt, "id", None)
+        latest_attempt = (
+            await self._question_attempt_repo.lock_by_id(question_attempt_id=attempt_id)
+            if attempt_id is not None
+            else attempt
+        )
+        if latest_attempt is None:
+            await self._async_session.rollback()
+            return None
+        if getattr(latest_attempt, "follow_up_disposition", None) == "skipped":
+            await self._async_session.rollback()
+            logger.info(
+                "Late follow-up discarded after student continued | QuestionAttempt=%s",
+                attempt.id,
+            )
+            return None
+        existing = await self._interview_question_repo.get_follow_up_for_parent(
+            parent_question_id=question.id
+        )
+        if existing is not None:
+            # Another at-least-once worker published while this worker was in
+            # the model call. Reuse the persisted child; never append a second
+            # prompt for the same answer.
+            await self._question_attempt_repo.create_or_get_attempt(
+                interview_id=attempt.interview_id,
+                question_id=existing.id,
+                question_text=existing.text,
+                client_attempt_id=f"follow-up:{existing.id}",
+            )
+            await self._resolve_follow_up(
+                attempt=attempt,
+                disposition="generated",
             )
             return None
         db_start = time.perf_counter()
-        follow_up_question = await self._interview_question_repo.create_follow_up_question(
-            interview_id=attempt.interview_id,
-            parent_question_id=question.id,
-            text=follow_up_text,
-            topic=question.topic,
-            category=question.category,
-            strategy=question.follow_up_strategy,
+        follow_up_question = (
+            await self._interview_question_repo.create_follow_up_question(
+                interview_id=attempt.interview_id,
+                parent_question_id=question.id,
+                text=follow_up_text,
+                topic=question.topic,
+                category=question.category,
+                strategy=question.follow_up_strategy,
+            )
         )
         logger.info(
-          "Follow-up question saved | Question=%s | NewQuestion=%s | Time=%.2fs",
-          question.id,
-          follow_up_question.id,
-          time.perf_counter() - db_start,
+            "Follow-up question saved | Question=%s | NewQuestion=%s | Time=%.2fs",
+            question.id,
+            follow_up_question.id,
+            time.perf_counter() - db_start,
         )
-        follow_up_attempt = await self._question_attempt_repo.create_attempt(
-            interview_id=attempt.interview_id,
-            question_id=follow_up_question.id,
-            question_text=follow_up_question.text,
-        )
+        if attempt_id is None:
+            follow_up_attempt = await self._question_attempt_repo.create_attempt(
+                interview_id=attempt.interview_id,
+                question_id=follow_up_question.id,
+                question_text=follow_up_question.text,
+            )
+        else:
+            follow_up_attempt, _created = (
+                await self._question_attempt_repo.create_or_get_attempt(
+                    interview_id=attempt.interview_id,
+                    question_id=follow_up_question.id,
+                    question_text=follow_up_question.text,
+                    client_attempt_id=f"follow-up:{follow_up_question.id}",
+                )
+            )
         logger.info(
-          "Follow-up attempt created | Attempt=%s",
-          follow_up_attempt.id,
+            "Follow-up attempt created | Attempt=%s",
+            follow_up_attempt.id,
         )
-
-        if track == "Full Stack Developer":
-            unasked_qs = await self._interview_question_repo.get_questions_without_attempts(interview_id=attempt.interview_id)
-            unasked_base_qs = [q for q in unasked_qs if not getattr(q, "is_follow_up", False) and q.id != follow_up_question.id]
-            if unasked_base_qs:
-                last_q = unasked_base_qs[-1]
-                logger.info("Splicing queue for strict count: deleting unasked base question %s", last_q.id)
-                await self._async_session.delete(last_q)
-                await self._async_session.commit()
 
         metadata = {
             "parent_question_id": question.id,
@@ -195,17 +303,21 @@ class FollowUpService:
             question_attempt_id=follow_up_attempt.id,
             analysis_json={"follow_up": metadata},
         )
-        logger.info(
-          "Follow-up metadata persisted | Attempt=%s | Time=%.2fs",
-          follow_up_attempt.id,
-          time.perf_counter() - analysis_start,
+        await self._resolve_follow_up(
+            attempt=attempt,
+            disposition="generated",
         )
         logger.info(
-           "Follow-up workflow completed | Interview=%s | ParentQuestion=%s | FollowUpQuestion=%s | TotalTime=%.2fs",
-           attempt.interview_id,
-           question.id,
-           follow_up_question.id,
-           time.perf_counter() - generation_start,
+            "Follow-up metadata persisted | Attempt=%s | Time=%.2fs",
+            follow_up_attempt.id,
+            time.perf_counter() - analysis_start,
+        )
+        logger.info(
+            "Follow-up workflow completed | Interview=%s | ParentQuestion=%s | FollowUpQuestion=%s | TotalTime=%.2fs",
+            attempt.interview_id,
+            question.id,
+            follow_up_question.id,
+            time.perf_counter() - generation_start,
         )
         return metadata
 

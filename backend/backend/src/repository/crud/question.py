@@ -121,6 +121,10 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         attempt.answer_checksum = checksum
         attempt.answer_kind = "audio"
         attempt.answer_saved_at = datetime.datetime.now(datetime.timezone.utc)
+        attempt.attempt_state = "answer_saved"
+        attempt.skipped_at = None
+        attempt.follow_up_disposition = "pending"
+        attempt.follow_up_resolved_at = None
         attempt.transcription = None
         # The HTTP request owns durable storage only.  Transcription is queued
         # after this commit, so the row must stay pending until a worker
@@ -230,6 +234,10 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         attempt.answer_checksum = checksum
         attempt.answer_kind = "text"
         attempt.answer_saved_at = datetime.datetime.now(datetime.timezone.utc)
+        attempt.attempt_state = "answer_saved"
+        attempt.skipped_at = None
+        attempt.follow_up_disposition = "not_applicable"
+        attempt.follow_up_resolved_at = datetime.datetime.now(datetime.timezone.utc)
         attempt.transcription = {"text": text, "language": language, "segments": []}
         attempt.transcription_status = "transcribed"
         attempt.transcription_error = None
@@ -253,6 +261,53 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
                 transcription_status="failed",
                 transcription_error=error[:1000],
                 transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            .returning(QuestionAttempt)
+        )
+        attempt = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        if attempt is not None:
+            await self.async_session.refresh(attempt)
+        return attempt
+
+    async def lock_by_id(self, *, question_attempt_id: int) -> QuestionAttempt | None:
+        stmt = (
+            sqlalchemy.select(QuestionAttempt)
+            .where(QuestionAttempt.id == question_attempt_id)
+            .with_for_update()
+        )
+        return (await self.async_session.execute(stmt)).scalar_one_or_none()
+
+    async def list_by_interview_for_update(
+        self, *, interview_id: int
+    ) -> list[QuestionAttempt]:
+        """Lock attempts in a stable order while navigation is committed."""
+        stmt = (
+            sqlalchemy.select(QuestionAttempt)
+            .where(QuestionAttempt.interview_id == interview_id)
+            .order_by(QuestionAttempt.id.asc())
+            .with_for_update()
+        )
+        return list((await self.async_session.execute(stmt)).scalars().all())
+
+    async def resolve_follow_up(
+        self,
+        *,
+        question_attempt_id: int,
+        disposition: str,
+    ) -> QuestionAttempt | None:
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(
+                QuestionAttempt.id == question_attempt_id,
+                sqlalchemy.or_(
+                    QuestionAttempt.follow_up_disposition.is_(None),
+                    QuestionAttempt.follow_up_disposition != "skipped",
+                ),
+            )
+            .values(
+                follow_up_disposition=disposition,
+                follow_up_resolved_at=datetime.datetime.now(datetime.timezone.utc),
             )
             .returning(QuestionAttempt)
         )
