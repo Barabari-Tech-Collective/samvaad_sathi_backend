@@ -4,14 +4,18 @@ import logging
 
 import fastapi
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
+from src.api.dependencies.session import get_async_session
 from src.models.schemas.interview import (
     AdvanceInterviewRequest,
     AdvanceInterviewResponse,
     ClaimSessionLeaseRequest,
     CompleteInterviewRequest,
+    CompletePracticeDrillRequest,
+    CompletePracticeDrillResponse,
     CreateAttemptRequest,
     CreateAttemptResponse,
     GeneratedQuestionsInResponse,
@@ -26,6 +30,7 @@ from src.models.schemas.interview import (
     InterviewsListWithSummaryResponse,
     PauseInterviewRequest,
     PauseInterviewResponse,
+    PracticeHubResponse,
     ProctoringViolationResponse,
     QuestionAttemptItem,
     QuestionAttemptsListResponse,
@@ -49,6 +54,8 @@ from src.services.interview_session_lease import (
     session_lease_matches,
 )
 from src.services.llm import generate_interview_questions_with_llm
+from src.services.practice_drill_completion import record_practice_drill_completion
+from src.services.practice_hub import build_practice_hub
 from src.services.practice_navigation import (
     NavigationConflict,
     apply_navigation_transition,
@@ -72,6 +79,49 @@ logger = logging.getLogger(__name__)
 
 
 router = fastapi.APIRouter(prefix="", tags=["interviews"])
+
+
+@router.get(
+    path="/practice/hub",
+    name="practice:hub",
+    response_model=PracticeHubResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Get the current student's evidence-safe Practice coach plan",
+)
+async def get_practice_hub(
+    current_user=fastapi.Depends(get_current_user),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
+) -> PracticeHubResponse:
+    return await build_practice_hub(
+        interview_repo.async_session,
+        user_id=current_user.id,
+    )
+
+
+@router.post(
+    path="/practice/drills/complete",
+    name="practice:complete-drill",
+    response_model=CompletePracticeDrillResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Record a Practice skill-builder completion idempotently",
+)
+async def complete_practice_drill(
+    payload: CompletePracticeDrillRequest,
+    current_user=fastapi.Depends(get_current_user),
+    session: AsyncSession = fastapi.Depends(get_async_session),
+) -> CompletePracticeDrillResponse:
+    completion, created = await record_practice_drill_completion(
+        session,
+        user_id=current_user.id,
+        payload=payload,
+    )
+    return CompletePracticeDrillResponse(
+        completion_id=completion.id,
+        created=created,
+        completed_at=completion.completed_at,
+    )
 
 
 def _session_lease_error(code: str, message: str) -> fastapi.HTTPException:
