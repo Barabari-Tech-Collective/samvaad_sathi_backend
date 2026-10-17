@@ -1,95 +1,117 @@
-"""Schemas for the new V2 summary report (lite version).
-
-This response is restructured to provide a cleaner, more actionable format:
-- reportId: Unique identifier for the report
-- candidateInfo: Basic interview metadata
-- scoreSummary: Numeric scores with max values and percentages
-- questionAnalysis: Per-question breakdown with simplified feedback (single line strengths/improvements)
-- recommendedPractice: A specific practice exercise recommendation
-- speechFluencyFeedback: Detailed speech feedback with rating
-- nextSteps: List of immediate next steps
-- finalTip: A concluding tip for the candidate
-"""
+"""Evidence-safe schemas for the student Practice report."""
 
 from __future__ import annotations
 
+from typing import Any, Literal
+
 import pydantic
-from typing import List, Union, Any
 
 from src.models.schemas.base import BaseSchemaModel
-from src.models.schemas.summary_report import (
-    ScoreSummary,
-)
+from src.models.schemas.summary_report import ScoreSummary
+
+ReportStatus = Literal["ready", "partial", "needs_review", "insufficient_evidence"]
+EvidenceConfidence = Literal["high", "medium", "low", "insufficient"]
+QuestionEvidenceStatus = Literal[
+    "evaluated", "needs_review", "insufficient", "unavailable", "not_attempted"
+]
+PracticeModule = Literal["structure", "pronunciation", "pace", "warm_up", "think_fast"]
+
 
 class CandidateInfoLite(BaseSchemaModel):
-    """Basic candidate and interview information for Lite report."""
-    name: str | None = pydantic.Field(default=None, description="Candidate name if available")
-    interviewDate: str = pydantic.Field(description="ISO date string for interview")
-    roleTopic: str = pydantic.Field(description="Interview track/role (e.g., 'Frontend Development')")
-    duration: str | None = pydantic.Field(default=None, description="Duration of the interview (e.g., '25 mins')")
-    durationFeedback: str | None = pydantic.Field(default=None, description="Feedback on time management")
+    name: str | None = None
+    interviewDate: str
+    roleTopic: str
+    duration: str | None = None
+    durationFeedback: str | None = None
+
 
 class QuestionFeedbackLite(BaseSchemaModel):
-    """Simplified feedback for a question with single-line strings."""
-    strengths: str | None = pydantic.Field(default=None, description="Single line summary of strengths")
-    areasOfImprovement: str | None = pydantic.Field(default=None, description="Single line summary of areas for improvement")
+    strengths: str | None = None
+    areasOfImprovement: str | None = None
+
+
+class QuestionEvidenceLite(BaseSchemaModel):
+    status: QuestionEvidenceStatus
+    observation: str | None = None
+    interpretation: str | None = None
+    uncertainty: str | None = None
+
 
 class QuestionAnalysisItemLite(BaseSchemaModel):
-    """Individual question analysis with simplified feedback."""
-    id: int = pydantic.Field(description="Question ID")
-    totalQuestions: int = pydantic.Field(description="Total number of questions in interview")
-    type: str = pydantic.Field(description="Question type (e.g., 'Technical question')")
-    question: str = pydantic.Field(description="Question text")
-    transcript: str | None = pydantic.Field(
-        default=None,
-        description="The candidate's answer transcript that the feedback below was generated from (null if not attempted).",
-    )
-    feedback: QuestionFeedbackLite | None = pydantic.Field(default=None, description="Feedback (null if not attempted)")
+    id: int
+    totalQuestions: int
+    type: str
+    question: str
+    transcript: str | None = None
+    feedback: QuestionFeedbackLite | None = None
+    evidence: QuestionEvidenceLite | None = None
+
 
 class RecommendedPracticeLite(BaseSchemaModel):
-    """Recommended practice exercise."""
-    title: str = pydantic.Field(description="Title of the practice exercise")
-    description: str = pydantic.Field(description="Description of the practice exercise")
+    module: PracticeModule | None = None
+    title: str
+    description: str
+    href: str | None = None
+    reason: str | None = None
+    evidenceAnswerCount: int | None = pydantic.Field(default=None, ge=0)
+
 
 class SpeechFluencyFeedbackLite(BaseSchemaModel):
-    """Detailed speech fluency feedback."""
-    strengths: str = pydantic.Field(description="Paragraph describing speech strengths")
-    areasOfImprovement: str = pydantic.Field(description="Paragraph describing speech areas for improvement")
-    ratingEmoji: str = pydantic.Field(description="Emoji representing the rating (e.g., 'Slightly-happy')")
-    ratingTitle: str = pydantic.Field(description="Title of the rating (e.g., 'You are a Clear but Structurally Inconsistent Speaker')")
-    ratingDescription: str = pydantic.Field(description="Description of the rating")
+    strengths: str
+    areasOfImprovement: str
+    ratingEmoji: str
+    ratingTitle: str
+    ratingDescription: str
+
 
 class NextStepLite(BaseSchemaModel):
-    """Immediate next step for the candidate."""
-    title: str = pydantic.Field(description="Title of the next step")
+    title: str
+
 
 class FinalTipLite(BaseSchemaModel):
-    """Concluding tip for the candidate."""
-    title: str = pydantic.Field(description="Title of the tip")
-    description: str = pydantic.Field(description="Description of the tip")
+    title: str
+    description: str
+
+
+class ReportEvidenceSummaryLite(BaseSchemaModel):
+    totalQuestions: int = pydantic.Field(ge=0)
+    savedAnswers: int = pydantic.Field(ge=0)
+    usableAnswers: int = pydantic.Field(ge=0)
+    evaluatedAnswers: int = pydantic.Field(ge=0)
+    minimumRequired: int = pydantic.Field(default=3, ge=1)
+    coveragePercentage: int = pydantic.Field(ge=0, le=100)
+    confidence: EvidenceConfidence
+    statusMessage: str
+
 
 class SummaryReportResponseLite(BaseSchemaModel):
-    """Restructured summary report response matching new V2 format."""
-    reportId: str = pydantic.Field(description="Unique report identifier (UUID)")
+    """Versioned report contract that never converts missing evidence into a score."""
+
+    reportId: str
+    reportVersion: str = "practice-report-v1"
+    reportStatus: ReportStatus = "ready"
+    generatedAt: str | None = None
     candidateInfo: CandidateInfoLite
-    scoreSummary: ScoreSummary
-    questionAnalysis: List[QuestionAnalysisItemLite]
-    recommendedPractice: RecommendedPracticeLite | None = pydantic.Field(default=None, description="Recommended practice exercise")
-    speechFluencyFeedback: SpeechFluencyFeedbackLite | None = pydantic.Field(default=None, description="Speech fluency feedback")
-    nextSteps: List[Union[NextStepLite, str]] | None = pydantic.Field(default=None, description="List of next steps")
-    finalTip: FinalTipLite | None = pydantic.Field(default=None, description="Final tip for candidate")
-@pydantic.field_validator("nextSteps", mode="after")
-@classmethod
-def normalize_next_steps(cls, v: List[Any] | None) -> List[NextStepLite] | None:
-    """Automatically convert raw strings like ['Review Node.js'] into [{'title': 'Review Node.js'}]"""
-    if v is None:
-        return None
-    normalized = []
-    for item in v:
-        if isinstance(item, str):
-            normalized.append(NextStepLite(title=item))
-        elif isinstance(item, dict):
-            normalized.append(NextStepLite(**item))
-        elif isinstance(item, NextStepLite):
-            normalized.append(item)
+    scoreSummary: ScoreSummary | None = None
+    evidenceSummary: ReportEvidenceSummaryLite | None = None
+    uncertaintyNotice: str | None = None
+    questionAnalysis: list[QuestionAnalysisItemLite]
+    recommendedPractice: RecommendedPracticeLite | None = None
+    speechFluencyFeedback: SpeechFluencyFeedbackLite | None = None
+    nextSteps: list[NextStepLite] | None = None
+    finalTip: FinalTipLite | None = None
+
+    @pydantic.field_validator("nextSteps", mode="before")
+    @classmethod
+    def normalize_next_steps(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        normalized: list[NextStepLite] = []
+        for item in value:
+            if isinstance(item, str):
+                normalized.append(NextStepLite(title=item))
+            elif isinstance(item, dict):
+                normalized.append(NextStepLite(**item))
+            elif isinstance(item, NextStepLite):
+                normalized.append(item)
         return normalized
