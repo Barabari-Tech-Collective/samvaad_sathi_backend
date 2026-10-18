@@ -16,6 +16,7 @@ from src.worker.tasks import (
     process_answer_transcription_task,
     process_bulk_ats_candidate_task,
     purge_expired_bulk_ats_batches_task,
+    sweep_stalled_answer_transcriptions_task,
     submit_resume_score_task,
 )
 
@@ -32,7 +33,12 @@ class WorkerSettings:
     cron_jobs = [
         cron(
             purge_expired_bulk_ats_batches_task, hour=2, minute=15, run_at_startup=False
-        )
+        ),
+        cron(
+            sweep_stalled_answer_transcriptions_task,
+            minute={0, 10, 20, 30, 40, 50},
+            run_at_startup=False,
+        ),
     ]
     redis_settings = redis_settings
     max_tries = (

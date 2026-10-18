@@ -14,7 +14,7 @@ services:
       - key: ENVIRONMENT
         value: STAGING
       - key: PYTHON_VERSION
-        value: 3.13.0
+        value: 3.12.0
       - key: BACKEND_SERVER_HOST
         sync: false
       - key: BACKEND_SERVER_PORT

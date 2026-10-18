@@ -3,7 +3,9 @@ name = "samvaad-sathi-backend"
 version = "0.1.0"
 description = "Samvaad Sathi Backend - AI-powered speech analysis and feedback system"
 readme = "README.md"
-requires-python = ">=3.13"
+# Production and CI run Python 3.12. Keep the package metadata aligned so a
+# release build cannot select a different interpreter than the one we test.
+requires-python = ">=3.12,<3.14"
 dependencies = [
     # Core FastAPI and async dependencies
     "alembic",
@@ -76,7 +78,7 @@ packages = ["backend/backend/src"]
 
 [tool.black]
 line-length = 88
-target-version = ['py313']
+target-version = ['py312']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -102,7 +104,7 @@ line_length = 88
 known_first_party = ["src", "backend"]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

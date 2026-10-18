@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from arq.worker import Retry
 
-from src.worker.tasks import process_answer_transcription_task
+from src.worker.tasks import (
+    process_answer_transcription_task,
+    sweep_stalled_answer_transcriptions_task,
+)
 
 
 @pytest.fixture
@@ -203,3 +206,50 @@ async def test_worker_drops_a_job_for_a_superseded_recording(worker_dependencies
     assert result["status"] == "superseded"
     deps.transcribe.assert_not_called()
     deps.repo.mark_transcription_processing.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stalled_transcription_sweep_requeues_saved_audio(monkeypatch):
+    checksum = "c" * 64
+    attempt = SimpleNamespace(
+        id=73,
+        answer_checksum=checksum,
+        answer_kind="audio",
+        audio_url="answer-audio/73.wav",
+        transcription_status="processing",
+        transcription_updated_at=None,
+        transcription=None,
+    )
+    session = SimpleNamespace(close=AsyncMock())
+    session.execute = AsyncMock(
+        return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [attempt]))
+    )
+    repo = SimpleNamespace(
+        mark_transcription_pending=AsyncMock(return_value=attempt),
+        mark_transcription_failed=AsyncMock(),
+    )
+
+    import src.repository.crud.question as question_module
+    import src.repository.database as database_module
+    import src.worker.queue as queue_module
+
+    monkeypatch.setattr(database_module.async_db, "get_session", lambda: session)
+    monkeypatch.setattr(
+        question_module, "QuestionAttemptCRUDRepository", MagicMock(return_value=repo)
+    )
+    monkeypatch.setattr(queue_module, "enqueue_job", AsyncMock(return_value="job-73"))
+
+    result = await sweep_stalled_answer_transcriptions_task({})
+
+    assert result == {"scanned": 1, "requeued": 1}
+    repo.mark_transcription_pending.assert_awaited_once_with(
+        question_attempt_id=73, checksum=checksum
+    )
+    queue_module.enqueue_job.assert_awaited_once_with(
+        "process_answer_transcription_task",
+        question_attempt_id=73,
+        checksum=checksum,
+        language="en",
+        filename="answer-73",
+    )
+    session.close.assert_awaited_once()

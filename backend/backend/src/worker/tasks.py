@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass
 
 from arq.worker import Retry
+from sqlalchemy import select
 
 from src.services.barabari_integration import submit_resume_score_to_barabari
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _RESUME_FETCH_MAX_BYTES = 10 * 1024 * 1024
 _TRANSCRIPTION_MAX_TRIES = 3
+_TRANSCRIPTION_STALL_AFTER = datetime.timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -922,5 +924,63 @@ async def purge_expired_bulk_ats_batches_task(ctx: dict) -> dict:
             await repo.delete_batch(batch)
             purged += 1
         return {"purged": purged, "skipped": skipped}
+    finally:
+        await session.close()
+
+
+async def sweep_stalled_answer_transcriptions_task(ctx: dict) -> dict:
+    """Requeue answers left in ``processing`` by a killed worker.
+
+    The compare-and-set claim in ``process_answer_transcription_task`` keeps
+    normal retries idempotent. This sweep covers the gap where the worker dies
+    after claiming the row but before arq can record a retry. It only touches
+    rows with a durable recording and a stale processing timestamp.
+    """
+    from src.models.db.question_attempt import QuestionAttempt
+    from src.repository.crud.question import QuestionAttemptCRUDRepository
+    from src.repository.database import async_db
+    from src.worker.queue import enqueue_job
+
+    session = async_db.get_session()
+    requeued = 0
+    try:
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - _TRANSCRIPTION_STALL_AFTER
+        result = await session.execute(
+            select(QuestionAttempt).where(
+                QuestionAttempt.answer_kind == "audio",
+                QuestionAttempt.audio_url.is_not(None),
+                QuestionAttempt.answer_checksum.is_not(None),
+                QuestionAttempt.transcription_status == "processing",
+                QuestionAttempt.transcription_updated_at < cutoff,
+            ).limit(100)
+        )
+        stale_attempts = list(result.scalars().all())
+        for attempt in stale_attempts:
+            repo = QuestionAttemptCRUDRepository(async_session=session)
+            pending = await repo.mark_transcription_pending(
+                question_attempt_id=attempt.id,
+                checksum=attempt.answer_checksum,
+            )
+            if pending is None:
+                continue
+            job_id = await enqueue_job(
+                "process_answer_transcription_task",
+                question_attempt_id=attempt.id,
+                checksum=attempt.answer_checksum,
+                language=(attempt.transcription or {}).get("language", "en"),
+                filename=f"answer-{attempt.id}",
+            )
+            if job_id:
+                requeued += 1
+            else:
+                await repo.mark_transcription_failed(
+                    question_attempt_id=attempt.id,
+                    checksum=attempt.answer_checksum,
+                    error=(
+                        "Your answer is saved, but speech feedback could not be restarted. "
+                        "Select Retry speech feedback."
+                    ),
+                )
+        return {"scanned": len(stale_attempts), "requeued": requeued}
     finally:
         await session.close()

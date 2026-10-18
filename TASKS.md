@@ -34,7 +34,7 @@ No staging environment exists. Local and CI are the only gates before production
 
 ## Critical findings — unresolved
 
-### C1. About 15 students can answer at once, platform-wide · `TODO`
+### C1. About 15 students can answer at once, platform-wide · `LOCAL`
 
 **This is the concurrency limit behind "it breaks when several students use it".**
 
@@ -155,10 +155,10 @@ instead of one flag-day — this is what replaces having a staging environment.
 | O3.0b | Consent wording covering voice recording storage | `TODO` — see below |
 | O3.0c | Delete a student's recordings on request | `TODO` — see below |
 | O3.4a | Worker connection pool, sized separately from the API's | `LOCAL` |
-| O3.5 | arq task that performs the transcription | `TODO` — blocked by O3.0 |
-| O3.6 | `POST /audio/transcribe` returns `202` when the client opts in; synchronous by default | `TODO` |
-| O3.7 | Frontend polls to a terminal status | `TODO` |
-| O3.8 | Sweep for rows stalled in `processing` (a killed worker must not strand a student) | `TODO` |
+| O3.5 | arq task that performs the transcription | `LOCAL` |
+| O3.6 | `POST /audio/transcribe` returns `202` when the client opts in; synchronous by default | `LOCAL` |
+| O3.7 | Frontend polls to a terminal status | `LOCAL` |
+| O3.8 | Sweep for rows stalled in `processing` (a killed worker must not strand a student) | `LOCAL` |
 | O3.9 | Remove the synchronous path once no client uses it | `TODO` |
 
 ### O3.0 — answer audio is never stored (discovered 2026-10-12)
@@ -239,7 +239,7 @@ cannot attach to a question the student has left.
 | 3.2 | CI Python pinned to 3.12 to match production | `CI` |
 | 3.3 | CI PostgreSQL pinned to 17 to match Aiven | `CI` |
 | 3.4 | Push branch so CI runs for the first time | `CI` (2026-10-12) |
-| 3.5 | Rewrite `ops/ec2-release.sh` for the real layout | `TODO` — blocked, see below |
+| 3.5 | Rewrite `ops/ec2-release.sh` for the real layout | `LOCAL` — syntax and safety tests pass |
 | 3.6 | Frontend-first deploy ordering (the `audio.py` 503 is a breaking change) | `TODO` |
 | 3.7 | Walk one full interview locally — the only pre-production rehearsal available | `TODO` |
 
