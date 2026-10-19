@@ -103,6 +103,7 @@ def fetch_json(
     timeout: int = 15,
     max_bytes: int = MAX_RESPONSE_BYTES,
     user_agent: str = "Samvaad-Public-Contract-Smoke/2.0",
+    use_proxy: bool = True,
 ) -> object:
     request = urllib.request.Request(
         origin + path,
@@ -111,8 +112,11 @@ def fetch_json(
             "User-Agent": user_agent,
         },
     )
+    handlers = [NoRedirect()]
+    if not use_proxy:
+        handlers.append(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.build_opener(NoRedirect()).open(
+        with urllib.request.build_opener(*handlers).open(
             request, timeout=timeout
         ) as response:
             if response.status != 200:
