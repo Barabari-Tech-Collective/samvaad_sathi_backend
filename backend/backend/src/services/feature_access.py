@@ -2,6 +2,7 @@
 from fastapi import HTTPException
 
 CATALOGUE = {
+    "placement_shortlists": {"label": "Course placement shortlists", "operations": ["read", "create", "update", "publish", "delete"]},
     "interview_authoring": {"label": "Interview templates and question banks", "operations": ["read", "create", "update", "delete", "publish", "generate"]},
     "course_workspace": {"label": "Course workspace", "operations": ["read", "update", "export"]},
     "analytics": {"label": "Reports and analytics", "operations": ["read"]},
@@ -43,6 +44,10 @@ def require_permission(policy, feature, operation):
 
 
 def route_operation(method, path):
+    if path.rstrip("/").endswith("/finalize"):
+        return "publish"
+    if path.rstrip("/").endswith("/archive"):
+        return "delete"
     if path.rstrip("/").endswith("/export"):
         return "export"
     if method in {"GET", "HEAD", "OPTIONS"}:

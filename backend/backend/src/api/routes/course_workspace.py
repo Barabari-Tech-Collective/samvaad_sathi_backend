@@ -172,6 +172,7 @@ async def course_students(
 ):
     if response is not None:
         response.headers["Cache-Control"] = "no-store"
+    from src.services.course_shortlists import can_open
     filters = RosterFilters(q=q, activity=activity)
     authorized = await _shared_student_predicate(course_id, current_user, session)
     completed = completed_practice_count(course_id)
@@ -194,6 +195,7 @@ async def course_students(
         "course_id": course_id,
         "page": page,
         "limit": limit,
+        "can_open_shortlists": await can_open(current_user, course_id, session),
         "filters": filters.model_dump(),
         "total": summary.students,
         "summary": {

@@ -82,6 +82,14 @@ class PracticeAssignment(Base):  # type: ignore
 
 class PracticeShortlist(Base):  # type: ignore
     __tablename__ = "practice_shortlist"
+    __table_args__ = (
+        sqlalchemy.UniqueConstraint("created_by", "request_key", name="uq_practice_shortlist_request"),
+    )
+    course_id: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(128), index=True
+    )
+    request_key: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(36))
+    request_hash: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(64))
 
     id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(primary_key=True)
     name: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(160))
