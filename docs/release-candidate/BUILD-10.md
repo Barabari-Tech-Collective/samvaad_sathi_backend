@@ -1,3 +1,5 @@
+> **Latest operational preflight:** AWS login and the verified encrypted database backup are complete. All four PRs passed CI. Production remains held for seven staff course assignments, scoped workflow parity and authenticated acceptance. See [PRODUCTION-PREFLIGHT-2026-10-19.md](./PRODUCTION-PREFLIGHT-2026-10-19.md). Earlier checkpoint statements below are historical.
+
 # Build 10 — personal feature permissions and production release candidate
 
 19 October 2026. User authorized GitHub publication and production deployment. Production has not been deployed by this build.
