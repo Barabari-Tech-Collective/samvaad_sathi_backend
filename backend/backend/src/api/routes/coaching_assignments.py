@@ -16,8 +16,12 @@ from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.services.feature_access import permits
 from src.api.dependencies.session import get_async_session
 from src.models.db.coaching_assignment import CoachingAssignment
-from src.models.db.user import User
-from src.services.coaching_assignments import authorize_staff, serialize, audit
+from src.services.coaching_assignments import (
+    authorize_staff,
+    serialize,
+    audit,
+    lock_student,
+)
 
 router = fastapi.APIRouter(
     prefix="/v2/coaching-assignments", tags=["coaching-assignments"]
@@ -156,10 +160,10 @@ async def create_assignment(
     session=fastapi.Depends(get_async_session),
 ):
     await authorize_staff(session, user, course_id, student_id, "create")
-    # Serialize writes for this student, including retries and date validation.
-    await session.execute(
-        sa.select(User.id).where(User.id == student_id).with_for_update()
-    )
+    # Enrollment snapshots update the same user row. Recheck scope/enrollment
+    # after waiting for that lock, rather than trusting the earlier read.
+    await lock_student(session, student_id)
+    await authorize_staff(session, user, course_id, student_id, "create")
     fingerprint = hashlib.sha256(
         json.dumps(
             {
@@ -227,6 +231,8 @@ async def cancel_assignment(
     session=fastapi.Depends(get_async_session),
 ):
     await authorize_staff(session, user, course_id, student_id, "update")
+    await lock_student(session, student_id)
+    await authorize_staff(session, user, course_id, student_id, "update")
     row = (
         await session.execute(
             sa.select(CoachingAssignment)
@@ -236,6 +242,7 @@ async def cancel_assignment(
                 CoachingAssignment.course_id == course_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if row is None:

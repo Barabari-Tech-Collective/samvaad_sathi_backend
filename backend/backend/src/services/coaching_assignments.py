@@ -63,6 +63,23 @@ async def authorize_staff(session, user, course_id, student_id, operation):
         raise fastapi.HTTPException(404, "Shared coaching student not found.")
 
 
+async def lock_student(session, student_id):
+    """Serialize enrollment snapshots and assignment writes in user-first order."""
+    # PostgreSQL NO KEY UPDATE still serializes enrollment changes, while
+    # allowing foreign-key key-share locks from independent practice inserts.
+    student = (
+        await session.execute(
+            sa.select(User)
+            .where(User.id == student_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if student is None:
+        raise fastapi.HTTPException(404, "Student not found.")
+    return student
+
+
 async def require_owned_enrollment(session, user_id, course_id):
     active = (
         await session.execute(
@@ -78,6 +95,9 @@ async def require_owned_enrollment(session, user_id, course_id):
 
 
 async def complete_assignment(session, *, user_id, payload):
+    from src.services.practice_drill_completion import require_matching_receipt
+
+    await lock_student(session, user_id)
     row = (
         await session.execute(
             sa.select(CoachingAssignment)
@@ -86,6 +106,7 @@ async def complete_assignment(session, *, user_id, payload):
                 CoachingAssignment.student_id == user_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if row is None:
@@ -95,13 +116,12 @@ async def complete_assignment(session, *, user_id, payload):
             422, "Complete the assigned speaking drill with voice."
         )
     if row.status == "completed":
-        evidence = await session.get(PracticeDrillCompletion, row.completion_id)
-        if (
-            evidence.client_completion_id != payload.client_completion_id
-            or evidence.level != payload.level
-            or evidence.evidence_units != payload.evidence_units
-        ):
-            raise fastapi.HTTPException(409, "This assignment is already completed.")
+        evidence = (
+            await session.get(PracticeDrillCompletion, row.completion_id)
+            if row.completion_id is not None
+            else None
+        )
+        require_matching_receipt(evidence, user_id=user_id, payload=payload)
         return evidence, False
     if row.status != "assigned":
         raise fastapi.HTTPException(409, "This assignment has been cancelled.")
