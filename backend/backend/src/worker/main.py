@@ -18,11 +18,13 @@ from src.worker.tasks import (
     purge_expired_bulk_ats_batches_task,
     sweep_stalled_answer_transcriptions_task,
     submit_resume_score_task,
+    synchronize_sampark_enrollments_task,
 )
 
 
 class WorkerSettings:
     functions = [
+        func(synchronize_sampark_enrollments_task,max_tries=1,timeout=300),
         submit_resume_score_task,
         generate_questions_task,
         func(process_answer_transcription_task, max_tries=3, timeout=300),
@@ -31,6 +33,7 @@ class WorkerSettings:
         purge_expired_bulk_ats_batches_task,
     ]
     cron_jobs = [
+        cron(synchronize_sampark_enrollments_task,minute=set(range(0,60,5)),run_at_startup=False),
         cron(
             purge_expired_bulk_ats_batches_task, hour=2, minute=15, run_at_startup=False
         ),

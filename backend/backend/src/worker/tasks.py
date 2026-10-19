@@ -223,6 +223,8 @@ async def generate_questions_task(
     job_profile_id: int,
     levels: list[dict],
     knowledge_reference_context: str | None = None,
+    generation_token: str | None = None,
+    expected_revision: int | None = None,
 ) -> dict:
     """Generate interview questions for a job profile and persist them to the DB.
 
@@ -241,6 +243,7 @@ async def generate_questions_task(
         if profile is None:
             raise ValueError(f"Job profile {job_profile_id} not found")
 
+        repo.require_unpublished(profile)
         track = profile.job_name
         context_text = profile.job_description
         skills_list = profile.skills or []
@@ -258,6 +261,7 @@ async def generate_questions_task(
             )
             for l in levels
         ]
+        await session.rollback()
         results = await asyncio.gather(*level_tasks)
 
         generated_questions_data = []
@@ -265,7 +269,7 @@ async def generate_questions_task(
             for level, difficulty, item in level_results:
                 generated_questions_data.append(
                     {
-                        "job_profile_id": profile.id,
+                        "job_profile_id": job_profile_id,
                         "question_text": item["text"],
                         "level": level,
                         "difficulty": difficulty,
@@ -278,7 +282,25 @@ async def generate_questions_task(
                     }
                 )
 
-        db_questions = await repo.create_job_profile_questions(generated_questions_data)
+        for level in levels:
+            if (
+                sum(1 for q in generated_questions_data if q["level"] == level["level"])
+                != level["count"]
+            ):
+                raise ValueError(
+                    "AI returned a short question bank; existing draft was preserved."
+                )
+        db_questions = await repo.create_job_profile_questions(
+            generated_questions_data,
+            **(
+                {
+                    "expected_revision": expected_revision,
+                    "generation_token": generation_token,
+                }
+                if generation_token is not None
+                else {}
+            ),
+        )
         await session.commit()
         logger.info(
             "generate_questions_task: saved %d questions for job profile %d",
@@ -288,6 +310,8 @@ async def generate_questions_task(
         return {"count": len(db_questions)}
     except Exception:
         await session.rollback()
+        if generation_token is not None:
+            await repo.finish_generation(job_profile_id, generation_token, "failed")
         raise
     finally:
         await session.close()
@@ -944,15 +968,19 @@ async def sweep_stalled_answer_transcriptions_task(ctx: dict) -> dict:
     session = async_db.get_session()
     requeued = 0
     try:
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - _TRANSCRIPTION_STALL_AFTER
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc) - _TRANSCRIPTION_STALL_AFTER
+        )
         result = await session.execute(
-            select(QuestionAttempt).where(
+            select(QuestionAttempt)
+            .where(
                 QuestionAttempt.answer_kind == "audio",
                 QuestionAttempt.audio_url.is_not(None),
                 QuestionAttempt.answer_checksum.is_not(None),
                 QuestionAttempt.transcription_status == "processing",
                 QuestionAttempt.transcription_updated_at < cutoff,
-            ).limit(100)
+            )
+            .limit(100)
         )
         stale_attempts = list(result.scalars().all())
         for attempt in stale_attempts:
@@ -982,5 +1010,19 @@ async def sweep_stalled_answer_transcriptions_task(ctx: dict) -> dict:
                     ),
                 )
         return {"scanned": len(stale_attempts), "requeued": requeued}
+    finally:
+        await session.close()
+
+
+async def synchronize_sampark_enrollments_task(ctx: dict):
+    from src.repository.database import async_db
+    from src.services.sampark_enrollment_sync import synchronize
+
+    session = async_db.get_session()
+    try:
+        return await synchronize(session)
+    except Exception:
+        await session.rollback()
+        raise
     finally:
         await session.close()

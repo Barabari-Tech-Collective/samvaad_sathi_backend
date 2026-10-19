@@ -149,6 +149,10 @@ class FollowUpService:
         interview = await self._interview_repo.get_by_id(
             interview_id=attempt.interview_id
         )
+        from src.services.interview_question_plan import planned_count
+        if interview is not None and planned_count(interview) is not None:
+            await self._resolve_follow_up(attempt=attempt, disposition="not_applicable")
+            return None
 
         track = interview.track if interview else "general"
         difficulty = interview.difficulty if interview else "medium"

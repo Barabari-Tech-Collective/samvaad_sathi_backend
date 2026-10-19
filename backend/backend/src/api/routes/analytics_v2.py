@@ -57,6 +57,7 @@ from src.models.schemas.analytics_v2 import (
     TimeSeriesResponse,
 )
 from src.services.analytics import AnalyticsService
+from src.services.course_access import legacy_analytics_guard
 
 
 COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -76,7 +77,7 @@ router = fastapi.APIRouter(
     prefix="/v2/analytics",
     tags=["analytics-v2"],
     responses=COMMON_ERROR_RESPONSES,
-    dependencies=[Depends(get_current_admin_user)],
+    dependencies=[Depends(get_current_admin_user), Depends(legacy_analytics_guard)],
 )
 
 

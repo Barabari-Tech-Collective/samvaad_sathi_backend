@@ -24,6 +24,7 @@ from src.models.schemas.analytics import (
     SystemAnalyticsResponse,
 )
 from src.services.analytics import AnalyticsService
+from src.services.course_access import legacy_analytics_guard
 from src.services.analytics_events import track_analytics_event
 
 
@@ -155,6 +156,7 @@ async def get_interview_analytics(
 
 @router.get(
     "/segment/role",
+    dependencies=[Depends(legacy_analytics_guard)],
     response_model=SegmentAnalyticsResponse,
     status_code=200,
     summary="Role-level segment analytics",
@@ -185,6 +187,7 @@ async def get_role_segment_analytics(
 
 @router.get(
     "/segment/difficulty",
+    dependencies=[Depends(legacy_analytics_guard)],
     response_model=SegmentAnalyticsResponse,
     status_code=200,
     summary="Difficulty-level segment analytics",
@@ -216,6 +219,7 @@ async def get_difficulty_segment_analytics(
 
 @router.get(
     "/segment/college",
+    dependencies=[Depends(legacy_analytics_guard)],
     response_model=SegmentAnalyticsResponse,
     status_code=200,
     summary="College-level segment analytics",
@@ -246,6 +250,7 @@ async def get_college_segment_analytics(
 
 @router.get(
     "/system",
+    dependencies=[Depends(legacy_analytics_guard)],
     response_model=SystemAnalyticsResponse,
     status_code=200,
     summary="System/product-level analytics",
@@ -275,6 +280,7 @@ async def get_system_analytics(
 
 @router.get(
     "/scoring",
+    dependencies=[Depends(legacy_analytics_guard)],
     response_model=ScoringAnalyticsResponse,
     status_code=200,
     summary="Scoring quality analytics",
@@ -304,6 +310,7 @@ async def get_scoring_analytics(
 
 @router.get(
     "/alerts",
+    dependencies=[Depends(legacy_analytics_guard)],
     response_model=AlertsAnalyticsResponse,
     status_code=200,
     summary="Computed analytics alerts",

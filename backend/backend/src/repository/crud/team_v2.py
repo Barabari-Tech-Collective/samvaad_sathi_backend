@@ -215,6 +215,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
         if existing_member:
             # Reactivate soft-deleted member
             existing_member.status = "active"
+            existing_member.course_ids = []
             existing_member.removed_date = None
             existing_member.access_role = member_data.access_role
             existing_member.purposes = member_data.purposes
@@ -271,6 +272,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
             return False
             
         member.status = 'active'
+        member.course_ids = []
         member.removed_date = None
         await self.async_session.commit()
         return True
@@ -298,6 +300,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
         member = result.scalar_one_or_none()
         if not member:
             return None
+        previous_scope = (member.access_role, member.domain, tuple(member.colleges or []))
         
         raw_role = member_data.access_role if member_data.access_role is not None else member.access_role
         effective_role = (raw_role or "").strip().replace("_", " ").lower()
@@ -332,6 +335,10 @@ class TeamCRUDRepository(BaseCRUDRepository):
             member.purposes = member_data.purposes
         if member_data.domain is not None:
             member.domain = member_data.domain
+        if previous_scope != (member.access_role, member.domain, tuple(member.colleges or [])):
+            # A team lead cannot widen a course grant by changing the role or
+            # college scope around it. A global admin must reapprove courses.
+            member.course_ids = []
             
         stmt = select(User).where(User.id == member.user_id)
         result = await self.async_session.execute(stmt)

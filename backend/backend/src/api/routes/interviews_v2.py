@@ -1,5 +1,6 @@
 import json
 import fastapi
+from src.services.interview_question_plan import planned_count, snapshotted_questions
 import logging
 import re
 from typing import Any
@@ -201,12 +202,7 @@ def _prepare_audio_for_questions(questions: list[dict]) -> list[dict]:
         return []
 
     import hashlib
-    from decouple import config
-
-    from src.services.s3_service import tts_audio_s3_key
-
-    bucket = config("AWS_S3_BUCKET_NAME", default="barabari-edtech-service-staging")
-    region = config("AWS_REGION", default="ap-south-1")
+    from src.services.s3_service import tts_audio_public_url
 
     questions_to_process = []
 
@@ -216,8 +212,9 @@ def _prepare_audio_for_questions(questions: list[dict]) -> list[dict]:
             continue
 
         h_id = int(hashlib.md5(text.encode()).hexdigest()[:12], 16)
-        s3_file_path = tts_audio_s3_key(h_id)
-        public_url = f"https://{bucket}.s3.{region}.amazonaws.com/{s3_file_path}"
+        public_url = tts_audio_public_url(h_id)
+        if public_url is None:
+            continue
 
         if q_data.get("audio_url") == public_url:
             continue
@@ -328,6 +325,8 @@ async def create_or_resume_interview_v2(
         get_repository(repo_type=JobProfileCRUDRepository)
     ),
 ) -> InterviewInResponse:
+    if payload.course_id is not None and payload.course_id not in (getattr(current_user, "enrolled_course_ids", None) or []):
+        raise fastapi.HTTPException(403, "Current enrollment in this course is required.")
     difficulty = (payload.difficulty or "medium").lower()
     # Refuse rather than coerce. This used to silently fall back to medium, so a
     # typo started a different interview than the student asked for - and on a
@@ -338,6 +337,8 @@ async def create_or_resume_interview_v2(
             detail=f"Unknown difficulty '{difficulty}'. Choose one of: {', '.join(DIFFICULTIES)}.",
         )
 
+    if payload.question_count is not None and payload.client_contract != "fixed-round-v1":
+        raise fastapi.HTTPException(409, "Refresh to the current app before starting a fixed-length practice round.")
     active = await interview_repo.get_active_by_user(user_id=current_user.id)
     # Difficulty is part of an interview's identity, not a detail of it. Without
     # it here, a student holding an active easy interview who started a medium
@@ -348,7 +349,11 @@ async def create_or_resume_interview_v2(
         and active.track == payload.track
         and active.job_profile_id == payload.job_profile_id
         and active.difficulty == difficulty
+        and getattr(active, "course_id", None) == payload.course_id
+        and (payload.question_count is None or planned_count(active) == payload.question_count)
     ):
+        if planned_count(active) is not None and payload.client_contract != "fixed-round-v1":
+            raise fastapi.HTTPException(409, "Refresh to the current app to resume this fixed-length round.")
         res = InterviewInResponse(
             interview_id=active.id,
             track=active.track,
@@ -357,6 +362,7 @@ async def create_or_resume_interview_v2(
             created_at=active.created_at,
             resumed=True,
             interview_mode=active.interview_mode,
+            planned_question_count=planned_count(active),
         )
 
         # Resumed Interview Response
@@ -371,7 +377,8 @@ async def create_or_resume_interview_v2(
     await require_practice_feature(interview_repo.async_session, "practice_new_starts")
 
     if (
-        payload.track == FULL_STACK_ROLE
+        payload.job_profile_id is None
+        and payload.track == FULL_STACK_ROLE
         and difficulty == "medium"
         and getattr(payload, "use_resume", True)
     ):
@@ -392,6 +399,8 @@ async def create_or_resume_interview_v2(
         # A curated interview is an assessment against questions a facilitator
         # published for this level. If there are none, the honest answer is no -
         # not a set the LLM invented, which is what used to happen downstream.
+        if getattr(job_profile, "questions_per_interview", None) is not None and payload.client_contract != "fixed-round-v1":
+            raise fastapi.HTTPException(409, "Refresh to the current app before starting this fixed-length assessment.")
         refusal = unavailable_reason(job_profile, difficulty)
         if refusal is not None:
             raise fastapi.HTTPException(
@@ -400,9 +409,12 @@ async def create_or_resume_interview_v2(
 
     interview = await interview_repo.create_interview(
         user_id=current_user.id,
+        course_id=payload.course_id,
         track=payload.track,
         difficulty=difficulty,
         job_profile_id=payload.job_profile_id,
+        question_count=payload.question_count,
+        fixed_length=payload.client_contract == "fixed-round-v1",
     )
     await track_analytics_event(
         interview_repo.async_session,
@@ -430,6 +442,7 @@ async def create_or_resume_interview_v2(
         created_at=interview.created_at,
         resumed=False,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
     # =========================================================================
@@ -521,7 +534,9 @@ async def generate_questions_v2(
         has_skills = bool(skills_list)
 
         if (
-            interview.track == FULL_STACK_ROLE
+            not getattr(interview, "job_profile_id", None)
+            and snapshotted_questions(interview) is None
+            and interview.track == FULL_STACK_ROLE
             and interview.difficulty == "medium"
             and not has_resume
         ):
@@ -571,6 +586,7 @@ async def generate_questions_v2(
                 llm_latency_ms=qs.get("latency_ms"),
                 llm_error=qs.get("llm_error"),
                 interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
             )
 
             # Static Resume Warning Response
@@ -582,7 +598,7 @@ async def generate_questions_v2(
 
             return res
 
-        question_count = (
+        question_count = planned_count(interview) or (
             7 if interview.track == FULL_STACK_ROLE else 5
         )  # Base questions, leaves room for dynamic follow-ups
 
@@ -592,8 +608,13 @@ async def generate_questions_v2(
         llm_model = "static"
         items = None
 
-        is_curated = bool(getattr(interview, "job_profile_id", None))
-        if is_curated:
+        frozen = snapshotted_questions(interview)
+        is_curated = bool(getattr(interview, "job_profile_id", None)) or frozen is not None
+        if frozen is not None:
+            questions = [q["text"] for q in frozen]
+            llm_model = "facilitator_published_snapshot_v1"
+            items = [{**q, "audioUrl": q.get("audio_url")} for q in frozen]
+        elif is_curated:
             admin_questions = await job_profile_repo.get_job_profile_questions(
                 interview.job_profile_id
             )
@@ -815,6 +836,7 @@ async def generate_questions_v2(
         llm_latency_ms=latency_val,
         llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
     # =========================================================================
@@ -878,6 +900,9 @@ async def generate_non_tech_questions_v2(
             detail="Job profile not found",
         )
 
+    if getattr(job_profile, "questions_per_interview", None) is not None and payload.client_contract != "fixed-round-v1":
+        raise fastapi.HTTPException(409, "Refresh to the current app before starting this fixed-length interview.")
+
     # Recorded for analytics only. This flow shows the student no level picker,
     # so whatever arrives here is a client default rather than a choice, and
     # honouring it would be honouring a phantom.
@@ -900,12 +925,13 @@ async def generate_non_tech_questions_v2(
     normalized_job_name = _normalize_non_tech_job_name(job_profile.job_name)
     track = f"Non-Tech: {normalized_job_name}"
     interview = await interview_repo.get_active_by_user(user_id=current_user.id)
-    if interview is None or interview.track != track:
+    if interview is None or interview.track != track or interview.job_profile_id != job_profile.id or interview.difficulty != difficulty:
         interview = await interview_repo.create_interview(
             user_id=current_user.id,
             track=track,
             difficulty=difficulty,
             job_profile_id=job_profile.id,
+            fixed_length=payload.client_contract == "fixed-round-v1",
         )
         await track_analytics_event(
             interview_repo.async_session,
@@ -943,8 +969,8 @@ async def generate_non_tech_questions_v2(
             )
         )
 
-        questions_data = None
-        if getattr(interview, "job_profile_id", None):
+        questions_data = snapshotted_questions(interview)
+        if questions_data is None and getattr(interview, "job_profile_id", None):
             admin_questions = await job_profile_repo.get_job_profile_questions(
                 interview.job_profile_id
             )
@@ -981,7 +1007,7 @@ async def generate_non_tech_questions_v2(
                 past_interview_count=past_interview_count,
             )
 
-        if payload.use_resume and isinstance(
+        if snapshotted_questions(interview) is None and payload.use_resume and isinstance(
             getattr(current_user, "resume_text", None), str
         ):
             resume_context = (getattr(current_user, "resume_text", None) or "").strip()
@@ -1083,6 +1109,7 @@ async def generate_non_tech_questions_v2(
         llm_latency_ms=latency_val,
         llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
 

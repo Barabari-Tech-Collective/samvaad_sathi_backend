@@ -141,25 +141,80 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         track: str,
         difficulty: str = "medium",
         job_profile_id: int | None = None,
+        course_id: str | None = None,
+        question_count: int | None = None,
+        fixed_length: bool = False,
     ) -> Interview:
+        if course_id is not None:
+            import fastapi
+            from src.models.db.user import User
+
+            student = await self.async_session.get(User, user_id, populate_existing=True, with_for_update=True)
+            from src.services.sampark_enrollment_sync import fresh
+            if student is None or not fresh(student) or course_id not in (student.enrolled_course_ids or []):
+                raise fastapi.HTTPException(
+                    403, "Current enrollment in this course is required."
+                )
         # Derived here, not accepted as a parameter, so every caller - v1, v2,
         # the non-tech flow - gets a correct snapshot without each having to
         # remember to look it up and pass it through themselves.
         interview_mode = "practice"
+        question_plan = None
+        from src.services.interview_question_plan import (
+            configured_count,
+            make_curated_plan,
+        )
+
+        configured_count(question_count)
         if job_profile_id is not None:
             from src.models.db.job_profile import JobProfile
 
             profile = await self.async_session.get(JobProfile, job_profile_id)
             if profile is not None:
                 interview_mode = profile.interview_mode
+                if question_count is not None:
+                    raise ValueError("The creator controls a curated interview's count")
+                if (
+                    getattr(profile, "questions_per_interview", None) is not None
+                    or fixed_length
+                ):
+                    from src.services.interview_eligibility import unavailable_reason
+                    import fastapi
+
+                    refusal = unavailable_reason(profile, difficulty)
+                    if refusal:
+                        raise fastapi.HTTPException(409, refusal)
+                    count = await self.count_user_interviews_by_profile_and_difficulty(
+                        user_id=user_id,
+                        job_profile_id=job_profile_id,
+                        difficulty=difficulty,
+                        current_interview_id=0,
+                    )
+                    total = profile.questions_per_interview or 5
+                    question_plan = make_curated_plan(
+                        profile,
+                        difficulty=difficulty,
+                        offset=count * total,
+                        default_count=5,
+                    )
+        elif question_count is not None:
+            question_plan = {
+                "version": 1,
+                "total": question_count,
+                "adaptive_slots": 0,
+                "interviewer_mode": "ai",
+                "duration_seconds": question_count * 180,
+            }
 
         new_interview = Interview(
             user_id=user_id,
+            course_id=course_id,
             track=track,
             difficulty=difficulty,
             status="active",
             job_profile_id=job_profile_id,
             interview_mode=interview_mode,
+            question_plan=question_plan,
             expires_at=(
                 datetime.datetime.now(datetime.timezone.utc) + PRACTICE_SESSION_TTL
                 if interview_mode == "practice"
@@ -261,6 +316,50 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         interview.completed_at = datetime.datetime.now(datetime.timezone.utc)
         interview.duration_seconds = duration_seconds
         self.clear_session_lease(interview)
+        await self.async_session.commit()
+        await self.async_session.refresh(interview)
+        return interview
+
+    async def record_integrity_event(
+        self, *, interview_id: int, user_id: int, reason: str, event_id: str
+    ):
+        import fastapi
+
+        stmt = (
+            sqlalchemy.select(Interview)
+            .where(Interview.id == interview_id, Interview.user_id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        interview = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        if interview is None:
+            raise fastapi.HTTPException(404, "Interview not found")
+        if interview.interview_mode != "assessment":
+            raise fastapi.HTTPException(
+                409, "Browser integrity events do not apply to practice."
+            )
+        if interview.status not in ("active", "completed", "terminated"):
+            raise fastapi.HTTPException(
+                409, "Browser events require an active or finished assessment."
+            )
+        events = list(interview.integrity_events or [])
+        if interview.status == "active" and not any(
+            e["eventId"] == event_id for e in events
+        ):
+            # Preserve the first 100 events. A client cannot grow an unbounded JSON row.
+            if len(events) < 100:
+                events.append(
+                    {
+                        "eventId": event_id,
+                        "reason": reason,
+                        "recordedAt": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                        "source": "browser_signal",
+                        "verdict": None,
+                    }
+                )
+                interview.integrity_events = events
         await self.async_session.commit()
         await self.async_session.refresh(interview)
         return interview

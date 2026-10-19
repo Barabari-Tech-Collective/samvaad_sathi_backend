@@ -9,16 +9,32 @@ from src.models.db.job_profile import JobProfileStatus
 #: both Create and Response rather than letting each schema invent its own copy.
 InterviewMode = Literal["practice", "assessment"]
 
+
 # --- feature/roles-page-api schemas ---
 class JobProfileBase(BaseSchemaModel):
+    authoring_mode: Literal["ai", "manual"] | None = None
+    content_revision: int = 0
+    @pydantic.field_validator("content_revision", mode="before")
+    @classmethod
+    def missing_revision(cls, value):
+        return 0 if value is None else value
+    published_at: datetime.datetime | None = None
+    parent_profile_id: int | None = None
+    generation_token: str | None = None
+    generation_state: str | None = None
+    questions_per_interview: int | None = pydantic.Field(
+        default=None, strict=True, ge=1, le=50
+    )
     job_name: str = pydantic.Field(
         validation_alias=pydantic.AliasChoices("job_name", "jobName", "title"),
-        serialization_alias="job_name"
+        serialization_alias="job_name",
     )
     job_description: Optional[str] = pydantic.Field(
         default=None,
-        validation_alias=pydantic.AliasChoices("job_description", "jobDescription", "description"),
-        serialization_alias="job_description"
+        validation_alias=pydantic.AliasChoices(
+            "job_description", "jobDescription", "description"
+        ),
+        serialization_alias="job_description",
     )
     company_name: Optional[str] = None
     experience_level: Optional[str] = None
@@ -29,7 +45,7 @@ class JobProfileBase(BaseSchemaModel):
         default=None,
         alias="employmentType",
         validation_alias=pydantic.AliasChoices("employmentType", "employment_type"),
-        serialization_alias="employmentType"
+        serialization_alias="employmentType",
     )
     # Defaults to assessment so a client that omits this field - an older
     # build of the dashboard, say - keeps creating exactly what it always
@@ -38,7 +54,7 @@ class JobProfileBase(BaseSchemaModel):
         default="assessment",
         alias="interviewMode",
         validation_alias=pydantic.AliasChoices("interviewMode", "interview_mode"),
-        serialization_alias="interviewMode"
+        serialization_alias="interviewMode",
     )
 
     @pydantic.field_validator("interview_mode", mode="before")
@@ -51,19 +67,38 @@ class JobProfileBase(BaseSchemaModel):
         # this field exists to make backward compatible.
         return "assessment" if value is None else value
 
+
 class JobProfileCreateV2(JobProfileBase):
-    pass
+    authoring_mode: Literal["ai", "manual"] = "ai"
+    questions_per_interview: int = pydantic.Field(default=5, strict=True, ge=1, le=50)
+
 
 class JobProfileUpdateV2(BaseSchemaModel):
+    authoring_mode: Literal["ai", "manual"] | None = None
+    questions_per_interview: int | None = pydantic.Field(
+        default=None, strict=True, ge=1, le=50
+    )
+
+    @pydantic.field_validator("questions_per_interview")
+    @classmethod
+    def count_cannot_be_cleared(cls, value):
+        if value is None:
+            raise ValueError(
+                "Choose a question count; an existing plan cannot be cleared"
+            )
+        return value
+
     job_name: Optional[str] = pydantic.Field(
         default=None,
         validation_alias=pydantic.AliasChoices("job_name", "jobName", "title"),
-        serialization_alias="job_name"
+        serialization_alias="job_name",
     )
     job_description: Optional[str] = pydantic.Field(
         default=None,
-        validation_alias=pydantic.AliasChoices("job_description", "jobDescription", "description"),
-        serialization_alias="job_description"
+        validation_alias=pydantic.AliasChoices(
+            "job_description", "jobDescription", "description"
+        ),
+        serialization_alias="job_description",
     )
     company_name: Optional[str] = None
     experience_level: Optional[str] = None
@@ -74,7 +109,7 @@ class JobProfileUpdateV2(BaseSchemaModel):
         default=None,
         alias="employmentType",
         validation_alias=pydantic.AliasChoices("employmentType", "employment_type"),
-        serialization_alias="employmentType"
+        serialization_alias="employmentType",
     )
     # Absent, rather than defaulted, because this is an update: omitting it
     # must leave the existing mode alone, not reset a published role back to
@@ -83,8 +118,45 @@ class JobProfileUpdateV2(BaseSchemaModel):
         default=None,
         alias="interviewMode",
         validation_alias=pydantic.AliasChoices("interviewMode", "interview_mode"),
-        serialization_alias="interviewMode"
+        serialization_alias="interviewMode",
     )
+
+
+class AssessmentRoleCreate(JobProfileCreateV2):
+    """The dashboard Roles surface creates formal assessments only."""
+
+    interview_mode: Literal["assessment"] = pydantic.Field(
+        default="assessment",
+        validation_alias=pydantic.AliasChoices("interviewMode", "interview_mode"),
+        serialization_alias="interviewMode",
+    )
+
+
+class AssessmentRoleUpdate(JobProfileUpdateV2):
+    # Unlike the generic editor, this surface may never switch an existing
+    # practice template or sitting into an assessment.
+    interview_mode: Literal["assessment"] = pydantic.Field(
+        default="assessment",
+        validation_alias=pydantic.AliasChoices("interviewMode", "interview_mode"),
+        serialization_alias="interviewMode",
+    )
+
+
+class PracticeTemplateCreate(JobProfileCreateV2):
+    interview_mode: Literal["practice"] = pydantic.Field(
+        default="practice",
+        validation_alias=pydantic.AliasChoices("interviewMode", "interview_mode"),
+        serialization_alias="interviewMode",
+    )
+
+
+class PracticeTemplateUpdate(JobProfileUpdateV2):
+    interview_mode: Literal["practice"] = pydantic.Field(
+        default="practice",
+        validation_alias=pydantic.AliasChoices("interviewMode", "interview_mode"),
+        serialization_alias="interviewMode",
+    )
+
 
 class JobProfileResponse(JobProfileBase):
     id: int
@@ -92,10 +164,10 @@ class JobProfileResponse(JobProfileBase):
         default=None,
         alias="jobProfileId",
         validation_alias=pydantic.AliasChoices("id", "jobProfileId"),
-        serialization_alias="jobProfileId"
+        serialization_alias="jobProfileId",
     )
     created_at: datetime.datetime
-    
+
     status: JobProfileStatus
     easy_questions: int = 0
     medium_questions: int = 0
@@ -104,14 +176,16 @@ class JobProfileResponse(JobProfileBase):
     advanced_questions: Optional[int] = pydantic.Field(
         default=0,
         alias="advanced_questions",
-        validation_alias=pydantic.AliasChoices("expert_questions", "advanced_questions"),
-        serialization_alias="advanced_questions"
+        validation_alias=pydantic.AliasChoices(
+            "expert_questions", "advanced_questions"
+        ),
+        serialization_alias="advanced_questions",
     )
     totalQuestions: Optional[int] = pydantic.Field(
         default=0,
         alias="totalQuestions",
         validation_alias=pydantic.AliasChoices("totalQuestions", "total_questions"),
-        serialization_alias="totalQuestions"
+        serialization_alias="totalQuestions",
     )
 
     @pydantic.computed_field(  # type: ignore[prop-decorator]
@@ -131,17 +205,18 @@ class JobProfileResponse(JobProfileBase):
         from src.services.interview_eligibility import available_difficulties
 
         return available_difficulties(self)
+
     adminComment: Optional[str] = pydantic.Field(
         default=None,
         alias="adminComment",
         validation_alias=pydantic.AliasChoices("adminComment", "admin_comment"),
-        serialization_alias="adminComment"
+        serialization_alias="adminComment",
     )
     submittedAt: Optional[datetime.datetime] = pydantic.Field(
         default=None,
         alias="submittedAt",
         validation_alias=pydantic.AliasChoices("submittedAt", "submitted_at"),
-        serialization_alias="submittedAt"
+        serialization_alias="submittedAt",
     )
 
     @pydantic.computed_field
@@ -164,15 +239,18 @@ class JobProfileResponse(JobProfileBase):
     def description(self) -> Optional[str]:
         return self.job_description
 
+
 class JobProfileSummaryResponse(BaseSchemaModel):
     total_roles: int
     pending_review: int
     approved: int
     rejected: int
 
+
 class JobProfileListResponse(BaseSchemaModel):
     items: List[JobProfileResponse]
     total: int
+
 
 class JobProfileActivityResponse(BaseSchemaModel):
     id: int
@@ -181,16 +259,19 @@ class JobProfileActivityResponse(BaseSchemaModel):
     message: str
     created_at: datetime.datetime
 
+
 class KnowledgeQuestionLevelResponse(BaseSchemaModel):
     level: int
     question_count: int
     questions: List[str]
+
 
 class KnowledgeQuestionTopicResponse(BaseSchemaModel):
     topic_name: str
     candidate_type: str
     question_count: int
     levels: List[KnowledgeQuestionLevelResponse]
+
 
 class JobProfileUploadResponse(BaseSchemaModel):
     success: bool
@@ -203,19 +284,24 @@ class JobProfileUploadResponse(BaseSchemaModel):
     topics: List[KnowledgeQuestionTopicResponse] = []
     extracted_text: Optional[str] = None
 
+
 class JobProfileExtractSkillsRequest(BaseSchemaModel):
     job_description: str
+
 
 class JobProfileExtractSkillsResponse(BaseSchemaModel):
     skills: List[str]
 
+
 class JobProfileAdminReviewRequest(BaseSchemaModel):
+    expected_revision: int | None = pydantic.Field(default=None, strict=True, ge=0)
     status: Optional[JobProfileStatus] = None
     adminComment: Optional[str] = pydantic.Field(
         default=None,
         alias="adminComment",
-        validation_alias=pydantic.AliasChoices("adminComment", "admin_comment")
+        validation_alias=pydantic.AliasChoices("adminComment", "admin_comment"),
     )
+
 
 # --- upstream/master schemas ---
 class JobProfileCreate(BaseSchemaModel):
@@ -254,9 +340,11 @@ class JobProfileQuestionLevelRequest(BaseSchemaModel):
     level: int = pydantic.Field(ge=1, le=4)
     count: int = pydantic.Field(ge=1, le=50)
 
+
 class JobProfileGenerateQuestionsRequest(BaseSchemaModel):
     levels: List[JobProfileQuestionLevelRequest] = pydantic.Field(max_length=4)
     knowledge_reference_context: Optional[str] = None
+
 
 class JobProfileGeneratedQuestionItem(BaseSchemaModel):
     question_id: str
@@ -269,6 +357,7 @@ class JobProfileGeneratedQuestionItem(BaseSchemaModel):
     concepts_covered: List[str] = []
     expected_answer: Optional[str] = None
     example_output: Optional[str] = None
+
 
 class JobProfileGenerateQuestionsResponse(BaseSchemaModel):
     job_profile_id: str
@@ -297,6 +386,7 @@ class JobProfileQuestionLevelCounts(BaseSchemaModel):
     level_3: int = 0
     level_4: int = 0
 
+
 class JobProfileQuestionItem(BaseSchemaModel):
     question_id: str
     question: str
@@ -310,7 +400,11 @@ class JobProfileQuestionItem(BaseSchemaModel):
     expected_answer: Optional[str] = None
     example_output: Optional[str] = None
 
+
 class JobProfileQuestionsListResponse(BaseSchemaModel):
+    profile_status: str | None = None
+    authoring_mode: str | None = None
+    content_revision: int = 0
     job_profile_id: str
     total_questions: int
     level_counts: JobProfileQuestionLevelCounts
@@ -328,6 +422,7 @@ class JobProfileAddQuestionRequest(BaseSchemaModel):
     concepts_covered: Optional[List[str]] = []
     expected_answer: Optional[str] = None
     example_output: Optional[str] = None
+
 
 class JobProfileAddQuestionResponse(BaseSchemaModel):
     question_id: str
@@ -354,6 +449,7 @@ class JobProfileUpdateQuestionRequest(BaseSchemaModel):
     concepts_covered: Optional[List[str]] = None
     expected_answer: Optional[str] = None
     example_output: Optional[str] = None
+
 
 class JobProfileUpdateQuestionResponse(BaseSchemaModel):
     question_id: str
@@ -405,13 +501,16 @@ class JobProfileReviewRoleDetails(BaseSchemaModel):
     employment_type: Optional[str] = None
     description: Optional[str] = None
 
+
 class JobProfileReviewJdSummary(BaseSchemaModel):
     extracted_skills: List[str] = []
     competencies: List[str] = []
 
+
 class JobProfileReviewPreviewQuestion(BaseSchemaModel):
     question_id: int
     question: str
+
 
 class JobProfileReviewLevelInfo(BaseSchemaModel):
     level: int
@@ -420,10 +519,12 @@ class JobProfileReviewLevelInfo(BaseSchemaModel):
     question_count: int
     preview_questions: List[JobProfileReviewPreviewQuestion] = []
 
+
 class JobProfileReviewQuestionSummary(BaseSchemaModel):
     total_questions: int
     total_levels: int
     levels: List[JobProfileReviewLevelInfo] = []
+
 
 class JobProfileReviewResponse(BaseSchemaModel):
     job_profile_id: int
@@ -442,11 +543,3 @@ class JobProfileSubmitResponse(BaseSchemaModel):
     total_questions: int
     total_levels: int
     message: str = "Role submitted successfully"
-
-
-
-
-
-
-
-

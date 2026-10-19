@@ -110,10 +110,23 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         question_attempt_id: int,
         audio_url: str,
         checksum: str,
+        immutable: bool = False,
+        follow_up_expected: bool = True,
     ) -> QuestionAttempt | None:
-        attempt = await self.get_by_id(question_attempt_id=question_attempt_id)
+        if immutable:
+            result = await self.async_session.execute(
+                sqlalchemy.select(QuestionAttempt).where(QuestionAttempt.id == question_attempt_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )
+            attempt = result.scalar_one_or_none()
+        else:
+            attempt = await self.get_by_id(question_attempt_id=question_attempt_id)
         if attempt is None:
             return None
+        if immutable and attempt.answer_saved_at is not None:
+            if attempt.answer_checksum != checksum:
+                raise ValueError("ASSESSMENT_ANSWER_COMMITTED")
+            return attempt
         if attempt.answer_checksum != checksum:
             attempt.answer_version = (attempt.answer_version or 0) + 1
         attempt.audio_url = audio_url
@@ -122,7 +135,7 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         attempt.answer_saved_at = datetime.datetime.now(datetime.timezone.utc)
         attempt.attempt_state = "answer_saved"
         attempt.skipped_at = None
-        attempt.follow_up_disposition = "pending"
+        attempt.follow_up_disposition = "pending" if follow_up_expected else "not_applicable"
         attempt.follow_up_resolved_at = None
         attempt.transcription = None
         # The HTTP request owns durable storage only.  Transcription is queued

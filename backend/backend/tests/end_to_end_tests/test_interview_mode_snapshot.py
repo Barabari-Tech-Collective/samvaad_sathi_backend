@@ -130,7 +130,10 @@ async def test_changing_the_profiles_mode_does_not_touch_past_interviews(
     )
     assert interview.interview_mode == "practice"
 
-    await job_profile_repo.update_profile(profile.id, {"interview_mode": "assessment"})
+    import fastapi
+    with pytest.raises(fastapi.HTTPException) as error:
+        await job_profile_repo.update_profile(profile.id, {"interview_mode": "assessment"})
+    assert error.value.status_code == 409
 
     reloaded = await interview_repo.get_active_by_user(user_id=user_id)
     assert reloaded.interview_mode == "practice", (

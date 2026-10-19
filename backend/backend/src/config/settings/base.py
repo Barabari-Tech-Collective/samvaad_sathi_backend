@@ -378,6 +378,11 @@ class BackendBaseSettings(BaseSettings):
     MOCK_TTS: bool = decouple.config("MOCK_TTS", cast=bool, default=False)  # type: ignore
 
     # Barabari Sampark Saathi resume-round callback
+    # Explicit opt-in until both local/staging migrations and source mapping are verified.
+    SAMPARK_ENROLLMENT_SYNC_ENABLED: bool = decouple.config("SAMPARK_ENROLLMENT_SYNC_ENABLED", cast=bool, default=False)
+    SAMPARK_ENROLLMENT_SYNC_URL: str = decouple.config("SAMPARK_ENROLLMENT_SYNC_URL", default="")
+    SAMPARK_ENROLLMENT_SYNC_KEY: str = decouple.config("SAMPARK_ENROLLMENT_SYNC_KEY", default="")
+    SAMPARK_ENROLLMENT_MAX_AGE_SECONDS: int = decouple.config("SAMPARK_ENROLLMENT_MAX_AGE_SECONDS", cast=int, default=900)
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
     # Auth-service Central Student Registry. Product backends use this server-side key to

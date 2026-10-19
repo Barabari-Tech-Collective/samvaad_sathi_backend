@@ -48,7 +48,7 @@ async def _require_active_interview(
     lease_token: str | None = None,
     user_id: int | None = None,
     lock: bool = False,
-) -> None:
+) -> object | None:
     if lock and user_id is not None and hasattr(interview_repo, "lock_by_id_and_user"):
         parent_interview = await interview_repo.lock_by_id_and_user(
             interview_id=question_attempt.interview_id, user_id=user_id
@@ -74,6 +74,9 @@ async def _require_active_interview(
             status_code=fastapi.status.HTTP_409_CONFLICT,
             detail="This interview is paused or has ended and cannot accept answers.",
         )
+    if parent_interview is not None:
+        from src.services.fixed_interview_lifecycle import require_answer_window
+        require_answer_window(parent_interview, attempt=question_attempt)
     if (
         parent_interview is not None
         and getattr(parent_interview, "interview_mode", None) == "practice"
@@ -95,6 +98,7 @@ async def _require_active_interview(
                     "message": "Reconnect before saving this answer.",
                 },
             )
+    return parent_interview
 
 
 @router.post(
@@ -174,7 +178,7 @@ async def transcribe_audio_answer(
     # question attempt that was already created before it ended - otherwise a
     # proctoring termination only locks the student out of *starting* new
     # questions, not from finishing the one they were on when they left.
-    await _require_active_interview(
+    parent_interview = await _require_active_interview(
         question_attempt,
         interview_repo,
         lease_token=session_lease_token,
@@ -214,6 +218,11 @@ async def transcribe_audio_answer(
         and question_attempt.audio_url
         and question_attempt.answer_kind == "audio"
     )
+    from src.services.interview_question_plan import planned_count
+    fixed_plan = parent_interview is not None and planned_count(parent_interview) is not None
+    immutable = fixed_plan and parent_interview.interview_mode == "assessment"
+    if immutable and question_attempt.answer_saved_at is not None and not same_answer:
+        raise fastapi.HTTPException(409, "This assessment answer is already committed. Continue with the saved answer.")
     if same_answer:
         stored_attempt = question_attempt
         audio_url = str(question_attempt.audio_url)
@@ -250,7 +259,13 @@ async def transcribe_audio_answer(
                 question_attempt_id=question_attempt_id_int,
                 audio_url=audio_url,
                 checksum=checksum,
+                **({"immutable": immutable, "follow_up_expected": False} if fixed_plan else {}),
             )
+        except ValueError as exc:
+            await question_repo.async_session.rollback()
+            if str(exc) == "ASSESSMENT_ANSWER_COMMITTED":
+                raise fastapi.HTTPException(409, "This assessment answer is already committed. Reload the saved checkpoint.") from exc
+            saved_attempt = None
         except Exception:
             await question_repo.async_session.rollback()
             saved_attempt = None

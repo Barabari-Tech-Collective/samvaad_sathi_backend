@@ -129,3 +129,36 @@ def test_ec2_release_has_a_local_health_gate_and_application_rollback():
     rollback_checkout = script.index('git checkout --quiet --force "$previous_sha"')
     assert script.rfind('cd "$APP_ROOT"', 0, rollback_checkout) != -1
     assert "Database downgrade is intentionally NOT automatic" in script
+
+
+@pytest.mark.parametrize("expected,actual", [("222222222222", "111111111111"), ("invalid", "222222222222")])
+def test_release_rejects_wrong_or_malformed_destination(monkeypatch, expected, actual):
+    release = load_release_module()
+    monkeypatch.setenv("AWS_EXPECTED_ACCOUNT_ID", expected)
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    monkeypatch.setattr(release, "command", lambda *args: {"Account": actual})
+    with pytest.raises(RuntimeError, match="account mismatch|12 digits"):
+        release.verify_aws_destination()
+
+
+def test_release_rejects_unconfigured_destination_before_aws_call(monkeypatch):
+    release = load_release_module()
+    monkeypatch.delenv("AWS_EXPECTED_ACCOUNT_ID", raising=False)
+    def no_call(*args):
+        raise AssertionError("No AWS call should occur before configuration validation")
+    monkeypatch.setattr(release, "command", no_call)
+    with pytest.raises(RuntimeError, match="AWS_EXPECTED_ACCOUNT_ID"):
+        release.verify_aws_destination()
+
+
+def test_release_accepts_only_the_explicit_destination(monkeypatch):
+    release = load_release_module()
+    monkeypatch.setenv("AWS_EXPECTED_ACCOUNT_ID", "222222222222")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    calls = []
+    def command(*args):
+        calls.append(args)
+        return {"Account": "222222222222"}
+    monkeypatch.setattr(release, "command", command)
+    assert release.verify_aws_destination() == "222222222222"
+    assert calls == [("aws", "sts", "get-caller-identity", "--region", "eu-west-1", "--output", "json")]

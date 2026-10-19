@@ -43,6 +43,20 @@ def wait_for(fetch, status, success, failure, timeout=1500):
     )
 
 
+def verify_aws_destination():
+    """Read-only identity gate before any release or deployment mutation."""
+    expected = required("AWS_EXPECTED_ACCOUNT_ID")
+    region = required("AWS_REGION")
+    if not re.fullmatch(r"[0-9]{12}", expected):
+        raise RuntimeError("AWS_EXPECTED_ACCOUNT_ID must contain exactly 12 digits")
+    identity = command(
+        "aws", "sts", "get-caller-identity", "--region", region, "--output", "json"
+    )
+    if identity.get("Account") != expected:
+        raise RuntimeError("AWS account mismatch; no release action was started")
+    return expected
+
+
 def verify_production_source(repository, sha):
     repo = command("gh", "api", f"repos/{repository}")
     default_branch = repo["default_branch"]
@@ -215,6 +229,7 @@ def main():
     backup_reference = None
     if required("PRODUCTION_PROVIDER") == "ec2":
         backup_reference = verify_database_backup_reference()
+    verify_aws_destination()
     verify_production_source(repository, sha)
     payload = {
         "ref": sha,
