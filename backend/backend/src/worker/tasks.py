@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 _RESUME_FETCH_MAX_BYTES = 10 * 1024 * 1024
 _TRANSCRIPTION_MAX_TRIES = 3
-_TRANSCRIPTION_STALL_AFTER = datetime.timedelta(minutes=5)
+_TRANSCRIPTION_STALL_AFTER = datetime.timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
@@ -953,14 +953,16 @@ async def purge_expired_bulk_ats_batches_task(ctx: dict) -> dict:
 
 
 async def sweep_stalled_answer_transcriptions_task(ctx: dict) -> dict:
-    """Requeue answers left in ``processing`` by a killed worker.
+    """Reserve and requeue stale pending/processing saved answers.
 
     The compare-and-set claim in ``process_answer_transcription_task`` keeps
     normal retries idempotent. This sweep covers the gap where the worker dies
     after claiming the row but before arq can record a retry. It only touches
-    rows with a durable recording and a stale processing timestamp.
+    rows with a durable recording and stale pending/processing state.
     """
     from src.models.db.question_attempt import QuestionAttempt
+    from src.models.db.interview import Interview
+    from sqlalchemy import or_
     from src.repository.crud.question import QuestionAttemptCRUDRepository
     from src.repository.database import async_db
     from src.worker.queue import enqueue_job
@@ -972,38 +974,59 @@ async def sweep_stalled_answer_transcriptions_task(ctx: dict) -> dict:
             datetime.datetime.now(datetime.timezone.utc) - _TRANSCRIPTION_STALL_AFTER
         )
         result = await session.execute(
-            select(QuestionAttempt)
+            select(QuestionAttempt, Interview.user_id)
+            .join(Interview, Interview.id == QuestionAttempt.interview_id)
             .where(
                 QuestionAttempt.answer_kind == "audio",
                 QuestionAttempt.audio_url.is_not(None),
                 QuestionAttempt.answer_checksum.is_not(None),
-                QuestionAttempt.transcription_status == "processing",
-                QuestionAttempt.transcription_updated_at < cutoff,
+                QuestionAttempt.transcription_status.in_(["pending", "processing"]),
+                or_(
+                    QuestionAttempt.transcription_updated_at.is_(None),
+                    QuestionAttempt.transcription_updated_at < cutoff,
+                ),
+            )
+            .order_by(
+                QuestionAttempt.transcription_updated_at.asc().nullsfirst(),
+                QuestionAttempt.id.asc(),
             )
             .limit(100)
         )
-        stale_attempts = list(result.scalars().all())
-        for attempt in stale_attempts:
+        stale_attempts = list(result.all())
+        for attempt, user_id in stale_attempts:
             repo = QuestionAttemptCRUDRepository(async_session=session)
-            pending = await repo.mark_transcription_pending(
+            checksum = attempt.answer_checksum
+            pending = await repo.reserve_transcription_retry(
                 question_attempt_id=attempt.id,
-                checksum=attempt.answer_checksum,
+                user_id=user_id,
+                checksum=checksum,
+                answer_version=attempt.answer_version or 0,
+                expected_status=attempt.transcription_status,
+                expected_updated_at=attempt.transcription_updated_at,
             )
             if pending is None:
                 continue
+            reserved_at = pending.transcription_updated_at
+            transcript = (
+                pending.transcription if isinstance(pending.transcription, dict) else {}
+            )
+            language = transcript.get("language", "en")
+            if language not in {"en", "hi"}:
+                language = "en"
             job_id = await enqueue_job(
                 "process_answer_transcription_task",
                 question_attempt_id=attempt.id,
-                checksum=attempt.answer_checksum,
-                language=(attempt.transcription or {}).get("language", "en"),
+                checksum=checksum,
+                language=language,
                 filename=f"answer-{attempt.id}",
             )
             if job_id:
                 requeued += 1
             else:
-                await repo.mark_transcription_failed(
+                await repo.fail_transcription_retry_reservation(
                     question_attempt_id=attempt.id,
-                    checksum=attempt.answer_checksum,
+                    checksum=checksum,
+                    reserved_at=reserved_at,
                     error=(
                         "Your answer is saved, but speech feedback could not be restarted. "
                         "Select Retry speech feedback."

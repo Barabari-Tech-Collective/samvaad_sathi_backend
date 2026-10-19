@@ -152,6 +152,88 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(attempt)
         return attempt
 
+    async def reserve_transcription_retry(
+        self,
+        *,
+        question_attempt_id: int,
+        user_id: int,
+        checksum: str,
+        answer_version: int,
+        expected_status: str | None,
+        expected_updated_at: datetime.datetime | None,
+    ) -> QuestionAttempt | None:
+        """Only one observer of this exact failed/stalled state may requeue it."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # Worker calls time out at five minutes. Give timeout handling and queue
+        # retries a further buffer before manually reclaiming processing work.
+        cutoff = now - datetime.timedelta(minutes=10)
+        retryable = sqlalchemy.or_(
+            QuestionAttempt.transcription_status == "failed",
+            sqlalchemy.and_(
+                sqlalchemy.or_(
+                    QuestionAttempt.transcription_status.is_(None),
+                    QuestionAttempt.transcription_status.in_(["pending", "processing"]),
+                ),
+                sqlalchemy.or_(
+                    QuestionAttempt.transcription_updated_at.is_(None),
+                    QuestionAttempt.transcription_updated_at <= cutoff,
+                ),
+            ),
+        )
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(
+                QuestionAttempt.id == question_attempt_id,
+                QuestionAttempt.interview.has(user_id=user_id),
+                QuestionAttempt.answer_checksum == checksum,
+                QuestionAttempt.answer_version == answer_version,
+                QuestionAttempt.answer_kind == "audio",
+                QuestionAttempt.audio_url.is_not(None),
+                QuestionAttempt.transcription_status == expected_status,
+                QuestionAttempt.transcription_updated_at == expected_updated_at,
+                retryable,
+            )
+            .values(
+                transcription_status="pending",
+                transcription_error=None,
+                transcription_updated_at=now,
+            )
+            .returning(QuestionAttempt)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        return row
+
+    async def fail_transcription_retry_reservation(
+        self,
+        *,
+        question_attempt_id: int,
+        checksum: str,
+        reserved_at: datetime.datetime,
+        error: str,
+    ) -> QuestionAttempt | None:
+        """A failed enqueue must not overwrite a worker or a newer answer."""
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(
+                QuestionAttempt.id == question_attempt_id,
+                QuestionAttempt.answer_checksum == checksum,
+                QuestionAttempt.transcription_status == "pending",
+                QuestionAttempt.transcription_updated_at == reserved_at,
+            )
+            .values(
+                transcription_status="failed",
+                transcription_error=error[:1000],
+                transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            .returning(QuestionAttempt)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        return row
+
     async def mark_transcription_pending(
         self, *, question_attempt_id: int, checksum: str
     ) -> QuestionAttempt | None:
@@ -442,7 +524,7 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
                 QuestionAttempt.interview.has(user_id=user_id),
             )
         )
-        query = await self.async_session.execute(statement=stmt)
+        query = await self.async_session.execute(statement=stmt.execution_options(populate_existing=True))
         result = query.scalar_one_or_none()
 
         logger.info(

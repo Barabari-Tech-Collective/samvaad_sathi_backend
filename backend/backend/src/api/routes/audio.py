@@ -452,7 +452,7 @@ async def get_transcription_status(
         )
 
     status = attempt.transcription_status or TranscriptionStatus.PENDING.value
-    transcription = attempt.transcription
+    transcription = attempt.transcription if isinstance(attempt.transcription, dict) else None
     evidence = (
         transcription.get("evidence")
         if isinstance(transcription, dict) and isinstance(transcription.get("evidence"), dict)
@@ -544,61 +544,59 @@ async def retry_transcription(
             ),
         )
 
-    # Do not duplicate an active model call. A processing row becomes eligible
-    # for recovery only after the worker's five-minute timeout window, covering
-    # a killed worker without charging for two simultaneous transcriptions.
-    processing_updated_at = attempt.transcription_updated_at
-    if (
-        attempt.transcription_status == TranscriptionStatus.PROCESSING.value
-        and processing_updated_at is not None
-        and datetime.datetime.now(datetime.timezone.utc) - processing_updated_at
-        < datetime.timedelta(minutes=5)
-    ):
+    # Reserve the exact observed answer/state atomically. Fresh pending work is
+    # not re-enqueued, and stale reads cannot reset a newer worker claim.
+    checksum = attempt.answer_checksum
+    pending = await question_repo.reserve_transcription_retry(
+        question_attempt_id=attempt.id,
+        user_id=current_user.id,
+        checksum=checksum,
+        answer_version=attempt.answer_version or 0,
+        expected_status=attempt.transcription_status,
+        expected_updated_at=attempt.transcription_updated_at,
+    )
+    if pending is None:
         return await get_transcription_status(
             question_attempt_id=question_attempt_id,
             current_user=current_user,
             question_repo=question_repo,
         )
-
-    pending = await question_repo.mark_transcription_pending(
-        question_attempt_id=attempt.id,
-        checksum=attempt.answer_checksum,
+    reserved_at = pending.transcription_updated_at
+    transcription = (
+        pending.transcription if isinstance(pending.transcription, dict) else {}
     )
-    if pending is None:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_409_CONFLICT,
-            detail="This answer changed while speech feedback was being retried.",
-        )
+    language = transcription.get("language", "en")
+    if language not in {"en", "hi"}:
+        language = "en"
     job_id = await enqueue_job(
         "process_answer_transcription_task",
-        question_attempt_id=attempt.id,
-        checksum=attempt.answer_checksum,
-        language=(attempt.transcription or {}).get("language", "en"),
-        filename=f"answer-{attempt.id}{Path(attempt.audio_url).suffix or '.wav'}",
+        question_attempt_id=pending.id,
+        checksum=checksum,
+        language=language,
+        filename=f"answer-{pending.id}{Path(pending.audio_url).suffix or '.wav'}",
     )
     if not job_id:
-        await question_repo.mark_transcription_failed(
-            question_attempt_id=attempt.id,
-            checksum=attempt.answer_checksum,
-            error=(
-                "Your answer is saved, but speech feedback could not be started. "
-                "Select Retry speech feedback."
-            ),
+        failed = await question_repo.fail_transcription_retry_reservation(
+            question_attempt_id=pending.id,
+            checksum=checksum,
+            reserved_at=reserved_at,
+            error="Your answer is saved, but speech feedback could not be started. Select Retry speech feedback.",
         )
+        if failed is None:
+            # A worker/new answer won while queue submission was in flight.
+            return await get_transcription_status(
+                question_attempt_id=question_attempt_id,
+                current_user=current_user,
+                question_repo=question_repo,
+            )
         raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            status_code=503,
             detail="Your answer is saved, but speech feedback could not be started. Try again.",
             headers={"Retry-After": "3"},
         )
-    return TranscriptionStatusResponse(
-        question_attempt_id=pending.id,
-        status=TranscriptionStatus.PENDING.value,
-        is_terminal=False,
-        saved=True,
-        answer_version=max(0, pending.answer_version or 0),
-        updated_at=(
-            pending.transcription_updated_at.isoformat()
-            if pending.transcription_updated_at
-            else None
-        ),
+    # A worker can already have progressed beyond pending; report current state.
+    return await get_transcription_status(
+        question_attempt_id=question_attempt_id,
+        current_user=current_user,
+        question_repo=question_repo,
     )
