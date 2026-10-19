@@ -8,7 +8,7 @@ data. Legacy untagged interviews remain invisible to scoped staff.
 from __future__ import annotations
 
 import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 import fastapi
 import sqlalchemy as sa
@@ -173,6 +173,7 @@ async def course_students(
     if response is not None:
         response.headers["Cache-Control"] = "no-store"
     from src.services.course_shortlists import can_open
+    from src.services.course_support import can_open as support_can_open
     filters = RosterFilters(q=q, activity=activity)
     authorized = await _shared_student_predicate(course_id, current_user, session)
     completed = completed_practice_count(course_id)
@@ -195,6 +196,7 @@ async def course_students(
         "course_id": course_id,
         "page": page,
         "limit": limit,
+        "can_open_support": await support_can_open(current_user, course_id, session),
         "can_open_shortlists": await can_open(current_user, course_id, session),
         "filters": filters.model_dump(),
         "total": summary.students,
@@ -277,6 +279,84 @@ async def export_course_students(
             "Content-Disposition": 'attachment; filename="course-practice.csv"',
         },
     )
+
+
+@router.get("/courses/{course_id}/support")
+async def course_support(
+    course_id: str,
+    response: fastapi.Response,
+    page: int = fastapi.Query(1, ge=1),
+    limit: int = fastapi.Query(25, ge=1, le=100),
+    issue: Literal[
+        "all",
+        "session_blocked",
+        "report_delayed",
+        "open_over_two_hours",
+        "answer_processing_failed",
+    ] = "all",
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    from src.services.course_support import allowed, support_query
+
+    if not allowed(current_user):
+        raise fastapi.HTTPException(
+            403,
+            "An administrator must enable the practice support queue for your account.",
+        )
+    authorized = await _shared_student_predicate(
+        course_id, current_user, session, coaching_only=True
+    )
+    signals = support_query(course_id, authorized)
+    predicate = signals.c.issue.is_not(None)
+    if issue != "all":
+        predicate = sa.and_(predicate, signals.c.issue == issue)
+    summary = (
+        await session.execute(
+            sa.select(
+                sa.func.count().label("sessions"),
+                sa.func.coalesce(sa.func.sum(signals.c.failed_answers), 0).label(
+                    "failed_answers"
+                ),
+            )
+            .select_from(signals)
+            .where(predicate)
+        )
+    ).one()
+    rows = (
+        (
+            await session.execute(
+                sa.select(signals)
+                .where(predicate)
+                .order_by(signals.c.created_at.asc(), signals.c.interview_id.asc())
+                .offset((page - 1) * limit)
+                .limit(limit)
+            )
+        )
+        .mappings()
+        .all()
+    )
+    session.add(
+        PracticeDashboardAuditEvent(
+            actor_id=current_user.id,
+            action="course_support_viewed",
+            purpose="facilitator_coaching",
+            target_type="course",
+            target_id=course_id,
+            reason="Opened the current shared practice support queue.",
+            event_metadata={"issue": issue, "page": page, "returned": len(rows)},
+        )
+    )
+    await session.commit()
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "items": [dict(row) for row in rows],
+        "total": summary.sessions,
+        "failed_answers": summary.failed_answers,
+        "page": page,
+        "limit": limit,
+        "notice": "Signals for investigation, not a diagnosis or cheating judgment. Long-open means age since creation, not proven inactivity. One primary signal per session is shown. No automatic reset or regeneration is performed.",
+    }
 
 
 @router.get("/courses/{course_id}/students/{student_id}/practice")

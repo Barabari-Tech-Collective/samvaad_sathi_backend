@@ -2,6 +2,7 @@
 from fastapi import HTTPException
 
 CATALOGUE = {
+    "practice_support": {"label": "Course practice support queue", "operations": ["read"]},
     "placement_shortlists": {"label": "Course placement shortlists", "operations": ["read", "create", "update", "publish", "delete"]},
     "interview_authoring": {"label": "Interview templates and question banks", "operations": ["read", "create", "update", "delete", "publish", "generate"]},
     "course_workspace": {"label": "Course workspace", "operations": ["read", "update", "export"]},
