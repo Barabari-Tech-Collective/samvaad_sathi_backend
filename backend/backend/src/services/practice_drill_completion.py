@@ -18,6 +18,10 @@ async def record_practice_drill_completion(
 ) -> tuple[PracticeDrillCompletion, bool]:
     """Create one completion or return the existing row for an idempotent retry."""
 
+    if payload.assignment_id is not None:
+        from src.services.coaching_assignments import complete_assignment
+        return await complete_assignment(session, user_id=user_id, payload=payload)
+
     existing_stmt = sqlalchemy.select(PracticeDrillCompletion).where(
         PracticeDrillCompletion.user_id == user_id,
         PracticeDrillCompletion.client_completion_id == payload.client_completion_id,

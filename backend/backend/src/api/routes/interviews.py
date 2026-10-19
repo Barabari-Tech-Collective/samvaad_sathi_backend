@@ -120,6 +120,7 @@ async def complete_practice_drill(
         payload=payload,
     )
     return CompletePracticeDrillResponse(
+        assignment_id=payload.assignment_id,
         completion_id=completion.id,
         created=created,
         completed_at=completion.completed_at,

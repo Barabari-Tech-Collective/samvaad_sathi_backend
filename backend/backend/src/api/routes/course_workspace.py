@@ -109,7 +109,7 @@ async def my_course_scope(
     }
 
 
-async def _shared_student_predicate(course_id, current_user, session):
+async def _shared_student_predicate(course_id, current_user, session, *, coaching_only=False):
     memberships = await get_user_active_memberships(current_user.id, session)
     grants = membership_grants(memberships)
     require_course(course_id, grants, current_user)
@@ -130,7 +130,7 @@ async def _shared_student_predicate(course_id, current_user, session):
             if not paired or not any(course_id in grant.course_ids for grant in paired):
                 continue
             role = resolve_dashboard_role(current_user, [item])
-            if role not in {"facilitator", "placements"}:
+            if role not in ({"facilitator"} if coaching_only else {"facilitator", "placements"}):
                 continue
             purpose = "opportunity_readiness" if role == "placements" else "facilitator_coaching"
             clauses.append(sa.and_(student_predicate(course_id, paired, global_access=False), consent(purpose)))

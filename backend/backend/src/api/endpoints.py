@@ -69,3 +69,6 @@ router.include_router(router=feature_access_router)
 
 from src.api.routes.staff_access import router as staff_access_router
 router.include_router(router=staff_access_router)
+
+from src.api.routes.coaching_assignments import router as coaching_assignments_router
+router.include_router(router=coaching_assignments_router)

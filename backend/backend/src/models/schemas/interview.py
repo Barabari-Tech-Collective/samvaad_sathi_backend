@@ -335,6 +335,7 @@ class PracticeHubResponse(BaseSchemaModel):
 class CompletePracticeDrillRequest(BaseSchemaModel):
     """Verifiable, idempotent completion evidence from a Practice skill builder."""
 
+    assignment_id: int | None = pydantic.Field(default=None, ge=1)
     module: Literal["pronunciation", "warm_up", "think_fast"]
     level: Literal["beginner", "intermediate", "advanced"]
     client_completion_id: str = pydantic.Field(
@@ -364,6 +365,7 @@ class CompletePracticeDrillRequest(BaseSchemaModel):
 
 
 class CompletePracticeDrillResponse(BaseSchemaModel):
+    assignment_id: int | None = None
     completion_id: int
     created: bool
     completed_at: datetime.datetime
