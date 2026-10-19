@@ -3,6 +3,7 @@ import json
 import logging
 
 import fastapi
+from src.services.interview_course_access import require_interview_course_access
 from src.services.interview_question_plan import planned_count, snapshotted_questions
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -172,7 +173,10 @@ def _require_session_lease(interview, lease_token: str | None) -> None:
 async def _lock_owned_interview(interview_repo, *, interview_id: int, user_id: int):
     lock = getattr(interview_repo, "lock_by_id_and_user", None)
     if callable(lock):
-        return await lock(interview_id=interview_id, user_id=user_id)
+        interview = await lock(interview_id=interview_id, user_id=user_id)
+        if interview is not None:
+            await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
+        return interview
     get_owned = getattr(interview_repo, "get_by_id_and_user", None)
     if callable(get_owned):
         return await get_owned(interview_id, user_id)
@@ -323,6 +327,7 @@ async def create_or_resume_interview(
             or planned_count(active) == payload.question_count
         )
     ):
+        await require_interview_course_access(getattr(interview_repo, "async_session", None), active)
         return InterviewInResponse(
             interview_id=active.id,
             track=active.track,
@@ -620,6 +625,8 @@ async def generate_questions(
                 status_code=fastapi.status.HTTP_400_BAD_REQUEST,
                 detail="No active interview to generate questions for",
             )
+
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
 
     # This endpoint has no job-profile awareness: it goes straight to the
     # syllabus and the LLM. Serving a curated interview from here would assess a
@@ -1205,6 +1212,8 @@ async def list_interview_questions(
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
         )
+
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
 
     safe_limit = max(1, min(100, int(limit)))
     items, next_cursor = await question_repo.list_by_interview_cursor(

@@ -2,6 +2,7 @@ import datetime
 from typing import List, Optional, Tuple
 
 import sqlalchemy
+from src.services.interview_course_access import require_interview_course_access
 
 from src.models.db.interview import Interview
 from src.models.db.question_attempt import QuestionAttempt
@@ -50,6 +51,7 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         if interview_has_expired(interview):
             return interview, "expired", None
 
+        await require_interview_course_access(self.async_session, interview)
         now = datetime.datetime.now(datetime.timezone.utc)
         if force:
             token = new_session_lease_token()
@@ -95,6 +97,7 @@ class InterviewCRUDRepository(BaseCRUDRepository):
             or not session_lease_matches(interview, lease_token)
         ):
             return None
+        await require_interview_course_access(self.async_session, interview)
         interview.session_lease_expires_at = (
             datetime.datetime.now(datetime.timezone.utc) + SESSION_LEASE_TTL
         )

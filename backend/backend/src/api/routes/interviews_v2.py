@@ -1,5 +1,6 @@
 import json
 import fastapi
+from src.services.interview_course_access import require_interview_course_access
 from src.services.interview_question_plan import planned_count, snapshotted_questions
 import logging
 import re
@@ -352,6 +353,7 @@ async def create_or_resume_interview_v2(
         and getattr(active, "course_id", None) == payload.course_id
         and (payload.question_count is None or planned_count(active) == payload.question_count)
     ):
+        await require_interview_course_access(getattr(interview_repo, "async_session", None), active)
         if planned_count(active) is not None and payload.client_contract != "fixed-round-v1":
             raise fastapi.HTTPException(409, "Refresh to the current app to resume this fixed-length round.")
         res = InterviewInResponse(
@@ -506,6 +508,8 @@ async def generate_questions_v2(
                 status_code=fastapi.status.HTTP_400_BAD_REQUEST,
                 detail="No active interview to generate questions for",
             )
+
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
 
     if interview.track and interview.track.startswith("Non-Tech:"):
         raise fastapi.HTTPException(
@@ -949,6 +953,8 @@ async def generate_non_tech_questions_v2(
             },
         )
 
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
+
     # After the interview-creation commit above, never before it: a commit ends
     # the transaction the lock is scoped to and would release it mid-generation.
     await lock_question_generation(
@@ -1243,6 +1249,7 @@ async def generate_supplements_v2(
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
         )
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
     if not _supplements_enabled_for_track(interview.track):
         return QuestionSupplementsResponse(interview_id=interview.id, supplements=[])
 
@@ -1278,6 +1285,7 @@ async def get_supplements_v2(
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
         )
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
     if not _supplements_enabled_for_track(interview.track):
         return QuestionSupplementsResponse(interview_id=interview.id, supplements=[])
 

@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import fastapi
+from src.services.interview_course_access import require_interview_course_access
 from fastapi import File, Form, UploadFile
 
 from src.api.dependencies.auth import get_current_user
@@ -75,6 +76,7 @@ async def _require_active_interview(
             detail="This interview is paused or has ended and cannot accept answers.",
         )
     if parent_interview is not None:
+        await require_interview_course_access(getattr(interview_repo, "async_session", None), parent_interview)
         from src.services.fixed_interview_lifecycle import require_answer_window
         require_answer_window(parent_interview, attempt=question_attempt)
     if (
