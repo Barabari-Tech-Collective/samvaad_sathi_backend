@@ -295,15 +295,22 @@ class InterviewsListWithSummaryResponse(BaseSchemaModel):
 
 
 class PracticeHubResumeCard(BaseSchemaModel):
-    """The one Practice interview a student can safely continue."""
+    """Latest retained Practice sitting, with advisory participation readiness."""
 
     interview_id: int
     track: str
     difficulty: str
-    status: Literal["active", "paused"]
-    answered_questions: int = pydantic.Field(default=0, ge=0)
-    total_questions: int = pydantic.Field(default=0, ge=0)
+    status: Literal["active", "paused", "preparing"]
+    answered_questions: int | None = pydantic.Field(default=None, ge=0)
+    total_questions: int | None = pydantic.Field(default=None, ge=0)
     expires_at: datetime.datetime | None = None
+    readiness: Literal[
+        "ready",
+        "preparing",
+        "enrollment_revoked",
+        "enrollment_unverified",
+        "plan_unavailable",
+    ] = "ready"
 
 
 class PracticeHubFocus(BaseSchemaModel):
