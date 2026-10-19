@@ -387,6 +387,8 @@ class BackendBaseSettings(BaseSettings):
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
     # Auth-service Central Student Registry. Product backends use this server-side key to
     # hydrate common profile fields; it must match auth-service CENTRAL_PROFILE_API_KEY.
+    CENTRAL_IDENTITY_CHECK_ENABLED: bool = decouple.config("CENTRAL_IDENTITY_CHECK_ENABLED", cast=bool, default=False)  # type: ignore
+    PRODUCT_IDENTITY_API_KEY: str = decouple.config("PRODUCT_IDENTITY_API_KEY", cast=str, default="")  # type: ignore
     CENTRAL_PROFILE_API_KEY: str = decouple.config("CENTRAL_PROFILE_API_KEY", cast=str, default="")  # type: ignore
 
     # Super-admin plan, Phase 12: shared secret for the *inbound* direction (auth-service's

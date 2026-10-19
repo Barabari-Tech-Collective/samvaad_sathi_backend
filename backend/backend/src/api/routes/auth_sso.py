@@ -183,14 +183,8 @@ async def sso_callback(
     if synced_degree and synced_university and not user.is_onboarded:
         await user_repo.set_onboarded(user_id=user.id, value=True)
 
-    # Sync admin status from the JWT role claim so ADMIN/SUPER_ADMIN users get backend
-    # access without requiring a manual DB update or ADMIN_EMAILS entry.
-    # One-way only: promote here, never demote — revocation is auth-service's job via
-    # the /internal/admin/set-admin-status endpoint.
-    token_role = str(claims.get("role") or "").strip().upper()
-    if token_role in {"ADMIN", "SUPER_ADMIN"} and not is_admin_user(user):
-        await user_repo.set_admin_status(email=email, is_admin=True)
-
+    # Central authority is evaluated from the verified token on each request.
+    # Do not turn an SSO role into a permanent product-admin database grant.
     return RedirectResponse(url=f"{target}?token={quote(access_token)}&refresh_token={quote(refresh_token)}")
 
 

@@ -24,7 +24,7 @@ from src.models.db.practice_governance import (
 from src.models.db.team import Team
 from src.models.db.team_member import TeamMember
 from src.models.db.user import User
-from src.services.course_access import grants_for, require_course, student_predicate
+from src.services.course_access import grants_for, require_course, student_predicate, membership_grants
 from src.api.dependencies.admin import get_user_active_memberships
 from src.api.routes.practice_dashboard import resolve_dashboard_role
 
@@ -110,32 +110,33 @@ async def my_course_scope(
 
 
 async def _shared_student_predicate(course_id, current_user, session):
-    grants = await grants_for(current_user, session)
-    require_course(course_id, grants, current_user)
-    global_access = is_admin_user(current_user)
-    predicate = student_predicate(course_id, grants, global_access=global_access)
     memberships = await get_user_active_memberships(current_user.id, session)
-    role = resolve_dashboard_role(current_user, memberships)
-    if role not in {"facilitator", "placements", "admin", "super_admin"}:
-        raise fastapi.HTTPException(
-            403, "A coaching or placement responsibility is required."
-        )
-    purpose = (
-        "opportunity_readiness" if role == "placements" else "facilitator_coaching"
-    )
-    # A course grant never substitutes for the student's purpose-specific choice.
+    grants = membership_grants(memberships)
+    require_course(course_id, grants, current_user)
     now = datetime.datetime.now(datetime.timezone.utc)
-    consenting = sa.exists(
-        sa.select(PracticeConsent.id).where(
-            PracticeConsent.user_id == User.id,
-            PracticeConsent.purpose == purpose,
-            PracticeConsent.granted.is_(True),
-            PracticeConsent.withdrawn_at.is_(None),
-            sa.or_(
-                PracticeConsent.expires_at.is_(None), PracticeConsent.expires_at > now
-            ),
-        )
-    )
+
+    def consent(purpose):
+        return sa.exists(sa.select(PracticeConsent.id).where(
+            PracticeConsent.user_id == User.id, PracticeConsent.purpose == purpose,
+            PracticeConsent.granted.is_(True), PracticeConsent.withdrawn_at.is_(None),
+            sa.or_(PracticeConsent.expires_at.is_(None), PracticeConsent.expires_at > now)))
+
+    if is_admin_user(current_user):
+        predicate = sa.and_(student_predicate(course_id, grants, global_access=True), consent("facilitator_coaching"))
+    else:
+        clauses = []
+        for item in memberships:
+            paired = membership_grants([item])
+            if not paired or not any(course_id in grant.course_ids for grant in paired):
+                continue
+            role = resolve_dashboard_role(current_user, [item])
+            if role not in {"facilitator", "placements"}:
+                continue
+            purpose = "opportunity_readiness" if role == "placements" else "facilitator_coaching"
+            clauses.append(sa.and_(student_predicate(course_id, paired, global_access=False), consent(purpose)))
+        if not clauses:
+            raise fastapi.HTTPException(403, "A scoped coaching or placement responsibility is required.")
+        predicate = sa.or_(*clauses)
     is_staff = sa.exists(
         sa.select(TeamMember.id).where(
             TeamMember.user_id == User.id, TeamMember.status == "active"
@@ -143,7 +144,6 @@ async def _shared_student_predicate(course_id, current_user, session):
     )
     predicate = sa.and_(
         predicate,
-        consenting,
         ~is_staff,
         User.role.is_(None),
         User.is_admin.is_(False),

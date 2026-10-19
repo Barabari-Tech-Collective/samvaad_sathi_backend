@@ -11,6 +11,8 @@ from src.models.schemas.teams_v2 import TeamCreate, TeamMemberCreate, TeamMember
 from src.securities.hashing.password import pwd_generator
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
 from src.api.dependencies.admin import is_admin_user, is_super_admin_user
+from src.config.manager import settings
+from src.services.central_identity_access import resolve_existing_identity
 
 
 class TeamDeleteStatus(str, enum.Enum):
@@ -169,6 +171,9 @@ class TeamCRUDRepository(BaseCRUDRepository):
 
         # 2. Check if user exists by email
         email_clean = member_data.email.strip().lower()
+        central_id = await resolve_existing_identity(email_clean)
+        if settings.CENTRAL_IDENTITY_CHECK_ENABLED and member_data.password:
+            raise ValueError("Passwords are managed by central authentication, not a team membership.")
         stmt = select(User).where(func.lower(User.email) == email_clean)
         result = await self.async_session.execute(stmt)
         user = result.scalar_one_or_none()
@@ -191,6 +196,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
 
             user = User(
                 email=email_clean,
+                central_identity_id=central_id,
                 name=member_data.name.strip(),
                 password_hash=hashed_pw,
                 role=None,
@@ -210,6 +216,11 @@ class TeamCRUDRepository(BaseCRUDRepository):
                     user.password_hash = pwd_generator.generate_hashed_password(
                         hash_salt="", new_password=member_data.password.strip()
                     )
+
+        if central_id:
+            if user.central_identity_id not in (None, central_id):
+                raise ValueError("This account is bound to another central identity; administrator review is required.")
+            user.central_identity_id = central_id
 
         # 5. Create or reactivate TeamMember record
         if existing_member:
@@ -348,6 +359,8 @@ class TeamCRUDRepository(BaseCRUDRepository):
             if member_data.name:
                 user.name = member_data.name
             if member_data.password and member_data.password.strip():
+                if settings.CENTRAL_IDENTITY_CHECK_ENABLED:
+                    raise ValueError("Passwords are managed by central authentication.")
                 # Permission check: resetting credentials via team endpoints requires administrator privileges (fail-closed)
                 if caller_user is None or not is_admin_user(caller_user):
                     raise ValueError("Administrator access required to reset member credentials.")

@@ -10,6 +10,30 @@ from src.utilities.exceptions.password import PasswordDoesNotMatch
 
 
 class UserCRUDRepository(BaseCRUDRepository):
+    async def get_user_by_central_identity(self, central_id: str) -> User:
+        result = await self.async_session.execute(sqlalchemy.select(User).where(User.central_identity_id == central_id))
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise EntityDoesNotExist("Central identity is not bound")
+        return user
+
+    async def bind_central_identity(self, user: User, central_id: str) -> User:
+        from sqlalchemy.exc import IntegrityError
+        if user.central_identity_id not in (None, central_id):
+            raise EntityAlreadyExists("This local account is bound to another central identity")
+        if user.central_identity_id == central_id:
+            return user
+        try:
+            result = await self.async_session.execute(sqlalchemy.update(User).where(User.id == user.id, User.central_identity_id.is_(None)).values(central_identity_id=central_id))
+            if result.rowcount != 1:
+                raise EntityAlreadyExists("Identity binding changed; sign in again")
+            await self.async_session.commit()
+            await self.async_session.refresh(user)
+            return user
+        except IntegrityError:
+            await self.async_session.rollback()
+            raise EntityAlreadyExists("Central identity is already bound")
+
     async def get_user_by_id(self, *, user_id: int) -> User:
         stmt = sqlalchemy.select(User).where(User.id == user_id)
         query = await self.async_session.execute(statement=stmt)

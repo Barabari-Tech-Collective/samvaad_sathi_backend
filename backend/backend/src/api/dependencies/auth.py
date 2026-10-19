@@ -28,8 +28,12 @@ async def get_current_user(
     # falls back to the legacy verifier below so sessions minted before this migration (and
     # not yet re-authenticated through Sampark Saathi) keep working until they expire.
     claims = None
+    token_source = "local"
     try:
         claims = decode_sso_access_token(token)
+        token_source = "central_sso"
+        from src.services.central_identity_access import current_identity
+        claims = await current_identity(claims, token=token)
         email = claims.get("sub")
         if not email:
             raise SsoTokenError("Missing sub claim")
@@ -66,8 +70,16 @@ async def get_current_user(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+    if settings.CENTRAL_IDENTITY_CHECK_ENABLED and token_source != "central_sso":
+        raise fastapi.HTTPException(401, "Sign in through central authentication.")
     try:
-        user = await user_repo.get_user_by_email(email=email)
+        if settings.CENTRAL_IDENTITY_CHECK_ENABLED:
+            try:
+                user = await user_repo.get_user_by_central_identity(claims["userUniqueId"])
+            except EntityDoesNotExist:
+                user = await user_repo.get_user_by_email(email=email)
+        else:
+            user = await user_repo.get_user_by_email(email=email)
     except EntityDoesNotExist:
         # First time this SSO-verified identity hits the Samvaad backend. Mirror
         # what auth_sso.py does on the /authorize callback: create a local row so
@@ -87,6 +99,18 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    if settings.CENTRAL_IDENTITY_CHECK_ENABLED:
+        if user.central_identity_id is None:
+            central_role = str(claims.get("role", "")).replace("_", " ").upper().strip()
+            if ((user.is_super_admin and central_role != "SUPER ADMIN") or
+                (user.is_admin and central_role not in {"ADMIN", "SUPER ADMIN"})):
+                raise fastapi.HTTPException(409, "Privileged legacy account binding requires administrator review.")
+        try:
+            user = await user_repo.bind_central_identity(user, claims["userUniqueId"])
+        except EntityAlreadyExists:
+            raise fastapi.HTTPException(409, "Central account binding needs administrator review.")
+    setattr(user, "_token_source", token_source)
+
     # Attach token claims and synchronize role metadata on non-persistent attributes
     if claims:
         raw_role = str(claims.get("role") or "").strip().upper()
@@ -94,7 +118,7 @@ async def get_current_user(
         setattr(user, "_token_claims", claims)
         setattr(user, "_token_role", raw_role)
 
-        if norm_role == "SUPER ADMIN":
+        if token_source == "central_sso" and norm_role == "SUPER ADMIN":
             # Only set _token_is_super_admin if the user is not an explicit standard admin in DB
             if not (
                 getattr(user, "is_admin", False)
@@ -102,7 +126,7 @@ async def get_current_user(
             ):
                 setattr(user, "_token_is_super_admin", True)
             setattr(user, "_token_is_admin", True)
-        elif norm_role == "ADMIN":
+        elif token_source == "central_sso" and norm_role == "ADMIN":
             setattr(user, "_token_is_admin", True)
 
     return user

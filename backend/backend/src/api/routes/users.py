@@ -1,3 +1,4 @@
+from src.services.staff_roles import unpack_membership
 import datetime
 import fastapi
 import pydantic
@@ -143,7 +144,7 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
     )
 
     extra_claims = {
-        "role": role_claim,
+        "role": "STAFF" if memberships and not is_admin_flag else role_claim,
         "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else ""),
     }
 
@@ -171,6 +172,7 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
         "role_claim": role_claim,
         "extra_claims": extra_claims,
         "team_name": team_name,
+        "membership_roles": sorted({str(getattr(unpack_membership(item)[0], "access_role", "")) for item in memberships}),
     }
 
 
@@ -235,6 +237,7 @@ async def login_user(
             can_edit=claims_data["can_edit"],
             is_view_only=claims_data["is_view_only"],
             team_name=claims_data["team_name"],
+            membership_roles=claims_data["membership_roles"],
             can_use_bulk_ats=is_bulk_ats_user(user),
             degree=None,
             university=None,
@@ -365,6 +368,7 @@ async def get_me(
             can_edit=claims_data["can_edit"],
             is_view_only=claims_data["is_view_only"],
             team_name=claims_data["team_name"],
+            membership_roles=claims_data["membership_roles"],
             can_use_bulk_ats=is_bulk_ats_user(current_user),
             degree=current_user.degree,
             university=current_user.university,

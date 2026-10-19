@@ -212,7 +212,7 @@ async def test_roster_query_limits_consent_enrollment_evidence_and_pagination():
     rows.all.return_value = []
     session.execute.side_effect = [count, rows]
     grant = CourseGrant(frozenset({"development"}), frozenset({"college a"}))
-    member = SimpleNamespace(access_role="facilitator")
+    member = SimpleNamespace(access_role="facilitator", course_ids=["development"], colleges=["College A"])
     with (
         patch(
             "src.api.routes.course_workspace.grants_for",
