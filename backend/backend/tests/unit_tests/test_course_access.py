@@ -207,7 +207,7 @@ async def test_legacy_aggregations_are_not_a_scope_bypass():
 async def test_roster_query_limits_consent_enrollment_evidence_and_pagination():
     session = AsyncMock()
     count = MagicMock()
-    count.scalar_one.return_value = 0
+    count.one.return_value = SimpleNamespace(students=0, practised=0, rounds=0)
     rows = MagicMock()
     rows.all.return_value = []
     session.execute.side_effect = [count, rows]

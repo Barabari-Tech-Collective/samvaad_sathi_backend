@@ -3,7 +3,7 @@ from fastapi import HTTPException
 
 CATALOGUE = {
     "interview_authoring": {"label": "Interview templates and question banks", "operations": ["read", "create", "update", "delete", "publish", "generate"]},
-    "course_workspace": {"label": "Course workspace", "operations": ["read", "update"]},
+    "course_workspace": {"label": "Course workspace", "operations": ["read", "update", "export"]},
     "analytics": {"label": "Reports and analytics", "operations": ["read"]},
     "practice_coaching": {"label": "Practice coaching", "operations": ["read", "create", "update", "delete"]},
     "bulk_ats": {"label": "Bulk ATS", "operations": ["read", "create", "update", "delete"]},
@@ -43,6 +43,8 @@ def require_permission(policy, feature, operation):
 
 
 def route_operation(method, path):
+    if path.rstrip("/").endswith("/export"):
+        return "export"
     if method in {"GET", "HEAD", "OPTIONS"}:
         return "read"
     if "/questions/generate" in path or "/regenerate" in path or "/extract-skills" in path:

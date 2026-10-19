@@ -8,6 +8,7 @@ data. Legacy untagged interviews remain invisible to scoped staff.
 from __future__ import annotations
 
 import datetime
+from typing import Annotated
 
 import fastapi
 import sqlalchemy as sa
@@ -27,6 +28,12 @@ from src.models.db.user import User
 from src.services.course_access import grants_for, require_course, student_predicate, membership_grants
 from src.api.dependencies.admin import get_user_active_memberships
 from src.api.routes.practice_dashboard import resolve_dashboard_role
+
+from src.services.course_reporting import (
+    Activity, RosterFilters, RosterExport, EXPORT_LIMIT,
+    completed_practice_count, roster_predicate, roster_rows, roster_csv,
+)
+from src.services.feature_access import permits, require_permission
 
 router = fastapi.APIRouter(prefix="/v2/course-workspace", tags=["course-workspace"])
 
@@ -159,40 +166,46 @@ async def course_students(
     limit: int = fastapi.Query(25, ge=1, le=100),
     current_user: User = fastapi.Depends(get_current_admin_user),
     session=fastapi.Depends(get_async_session),
+    q: Annotated[str, fastapi.Query(max_length=100)] = "",
+    activity: Activity = "all",
+    response: fastapi.Response = None,
 ):
-    predicate = await _shared_student_predicate(course_id, current_user, session)
-    total = (
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
+    filters = RosterFilters(q=q, activity=activity)
+    authorized = await _shared_student_predicate(course_id, current_user, session)
+    completed = completed_practice_count(course_id)
+    predicate = roster_predicate(authorized, completed, filters)
+    summary = (
         await session.execute(
-            sa.select(sa.func.count()).select_from(User).where(predicate)
+            sa.select(
+                sa.func.count(User.id).label("students"),
+                sa.func.count(User.id).filter(completed > 0).label("practised"),
+                sa.func.coalesce(sa.func.sum(completed), 0).label("rounds"),
+            ).where(predicate)
         )
-    ).scalar_one()
-    # Only interviews explicitly bound to this course count, even when a student
-    # is enrolled in several courses or changed their target role.
-    completed = (
-        sa.select(sa.func.count(Interview.id))
-        .where(
-            Interview.user_id == User.id,
-            Interview.course_id == course_id,
-            Interview.interview_mode == "practice",
-            Interview.status == "completed",
+    ).one()
+    rows = (
+        await session.execute(
+            roster_rows(predicate, completed).offset((page - 1) * limit).limit(limit)
         )
-        .correlate(User)
-        .scalar_subquery()
-    )
-    result = await session.execute(
-        sa.select(
-            User.id, User.name, User.university, completed.label("completed_practice")
-        )
-        .where(predicate)
-        .order_by(User.id)
-        .offset((page - 1) * limit)
-        .limit(limit)
-    )
+    ).all()
     return {
         "course_id": course_id,
         "page": page,
         "limit": limit,
-        "total": total,
+        "filters": filters.model_dump(),
+        "total": summary.students,
+        "summary": {
+            "practised_students": summary.practised,
+            "not_started_students": summary.students - summary.practised,
+            "completed_practice_rounds": summary.rounds,
+        },
+        "can_export": is_admin_user(current_user)
+        or (
+            isinstance(current_user.feature_permissions, dict)
+            and permits(current_user.feature_permissions, "course_workspace", "export")
+        ),
         "items": [
             {
                 "id": row.id,
@@ -200,10 +213,68 @@ async def course_students(
                 "college": row.university,
                 "completed_practice": row.completed_practice,
             }
-            for row in result.all()
+            for row in rows
         ],
-        "notice": "Current coaching consent and course scope required. Untagged legacy work is excluded.",
+        "notice": "Counts and results cover matching shared students in this course only. Sharing, enrollment freshness and course/college access apply. Untagged legacy work is excluded.",
     }
+
+
+@router.post("/courses/{course_id}/students/export")
+async def export_course_students(
+    course_id: str,
+    body: RosterExport,
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    # Keep this check in the handler as well as the router feature gate so an
+    # alternate router mount cannot accidentally make export equivalent to read.
+    if not is_admin_user(current_user):
+        if not isinstance(current_user.feature_permissions, dict):
+            raise fastapi.HTTPException(
+                403,
+                "An administrator must explicitly enable course export for your account.",
+            )
+        require_permission(
+            current_user.feature_permissions, "course_workspace", "export"
+        )
+    authorized = await _shared_student_predicate(course_id, current_user, session)
+    completed = completed_practice_count(course_id)
+    predicate = roster_predicate(authorized, completed, body)
+    rows = (
+        await session.execute(roster_rows(predicate, completed).limit(EXPORT_LIMIT + 1))
+    ).all()
+    if len(rows) > EXPORT_LIMIT:
+        raise fastapi.HTTPException(
+            413,
+            "Export is limited to 1,000 matching students. Narrow your search or activity filter.",
+        )
+    content = roster_csv(rows)
+    session.add(
+        PracticeDashboardAuditEvent(
+            actor_id=current_user.id,
+            action="course_roster_exported",
+            purpose="course_reporting",
+            target_type="course",
+            target_id=course_id,
+            reason=body.reason,
+            event_metadata={
+                "rows": len(rows),
+                "activity": body.activity,
+                "search_applied": bool(body.q),
+            },
+        )
+    )
+    # Do not disclose the file if the audit commit fails.
+    await session.commit()
+    return fastapi.Response(
+        content,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": 'attachment; filename="course-practice.csv"',
+        },
+    )
 
 
 @router.get("/courses/{course_id}/students/{student_id}/practice")
