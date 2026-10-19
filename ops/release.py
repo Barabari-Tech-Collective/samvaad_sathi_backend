@@ -3,14 +3,22 @@
 Run only from release.yml. Configuration belongs to GitHub environments, not source.
 """
 
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import time
-import urllib.error
-import urllib.request
+from pathlib import Path
 from urllib.parse import quote
+
+# Load only the sibling file from this tested checkout. This supports both direct
+# script execution and test imports without depending on the caller's sys.path.
+_probe_spec = importlib.util.spec_from_file_location(
+    "samvaad_public_smoke", Path(__file__).with_name("staging_smoke.py")
+)
+public_smoke = importlib.util.module_from_spec(_probe_spec)
+_probe_spec.loader.exec_module(public_smoke)
 
 
 def required(name):
@@ -194,27 +202,25 @@ def verify_database_backup_reference():
 
 
 def smoke():
-    url = required("HEALTH_URL")
-    if not url.startswith("https://"):
-        raise RuntimeError("Hosted health checks require HTTPS")
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "Samvaad-Release-Health-Check/1.0",
-        },
-    )
+    origin, path = public_smoke.validate_health_url(os.environ.get("HEALTH_URL", ""))
+    last_error = "health_not_verified"
     for attempt in range(6):
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                if response.status == 200:
-                    return
-        except (OSError, urllib.error.URLError):
-            pass
+            health = public_smoke.fetch_json(
+                origin,
+                path,
+                timeout=30,
+                max_bytes=64 * 1024,
+                user_agent="Samvaad-Release-Health-Check/1.0",
+            )
+            public_smoke.validate_health(health)
+            return
+        except public_smoke.SmokeError as error:
+            last_error = str(error)
         if attempt < 5:
             time.sleep(10)
     raise RuntimeError(
-        "Hosted smoke check failed; keep the release blocked and inspect rollback"
+        f"Hosted smoke check failed ({last_error}); keep the release blocked and inspect rollback"
     )
 
 
@@ -226,6 +232,8 @@ def main():
         raise RuntimeError(
             "Provide a meaningful test record including tester, date, and results"
         )
+    # Reject an unsafe or malformed target before AWS calls or deployment writes.
+    public_smoke.validate_health_url(os.environ.get("HEALTH_URL", ""))
     backup_reference = None
     if required("PRODUCTION_PROVIDER") == "ec2":
         backup_reference = verify_database_backup_reference()

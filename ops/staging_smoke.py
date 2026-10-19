@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import http.client
 import json
 from pathlib import Path
 import sys
@@ -67,31 +68,72 @@ def validate_prefix(value: str) -> str:
     return value
 
 
-def fetch_json(origin: str, path: str) -> object:
+def validate_health_url(value: str) -> tuple[str, str]:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        if (
+            parsed.query
+            or parsed.fragment
+            or "?" in value
+            or "#" in value
+            or not parsed.path.endswith("/health")
+            or any(c.isspace() or ord(c) < 32 or c == "\\" for c in value)
+        ):
+            raise ValueError
+        origin = validate_origin(f"{parsed.scheme}://{parsed.netloc}")
+        validate_prefix(parsed.path[: -len("/health")])
+    except (ValueError, SmokeError):
+        raise SmokeError("invalid_https_health_url") from None
+    return origin, parsed.path
+
+
+def validate_health(health: object) -> None:
+    if (
+        not isinstance(health, dict)
+        or health.get("status") != "healthy"
+        or health.get("service") != "samvaad-sathi-backend"
+    ):
+        raise SmokeError("health_contract_failed")
+
+
+def fetch_json(
+    origin: str,
+    path: str,
+    *,
+    timeout: int = 15,
+    max_bytes: int = MAX_RESPONSE_BYTES,
+    user_agent: str = "Samvaad-Public-Contract-Smoke/2.0",
+) -> object:
     request = urllib.request.Request(
         origin + path,
         headers={
             "Accept": "application/json",
-            "User-Agent": "Samvaad-Public-Contract-Smoke/2.0",
+            "User-Agent": user_agent,
         },
     )
     try:
         with urllib.request.build_opener(NoRedirect()).open(
-            request, timeout=15
+            request, timeout=timeout
         ) as response:
             if response.status != 200:
                 raise SmokeError("unexpected_http_status")
             if response.headers.get_content_type() != "application/json":
                 raise SmokeError("unexpected_content_type")
-            payload = response.read(MAX_RESPONSE_BYTES + 1)
-            if len(payload) > MAX_RESPONSE_BYTES:
+            payload = response.read(max_bytes + 1)
+            if len(payload) > max_bytes:
                 raise SmokeError("response_too_large")
             return json.loads(payload)
     except SmokeError:
         raise
     except urllib.error.HTTPError as error:
         raise SmokeError(f"http_{error.code}") from None
-    except (OSError, ValueError, urllib.error.URLError):
+    except (
+        OSError,
+        ValueError,
+        urllib.error.URLError,
+        http.client.HTTPException,
+        RecursionError,
+    ):
         raise SmokeError("network_or_invalid_json") from None
 
 
@@ -99,12 +141,7 @@ def run(origin: str, prefix: str) -> dict:
     origin = validate_origin(origin)
     prefix = validate_prefix(prefix)
     health = fetch_json(origin, prefix + "/health")
-    if (
-        not isinstance(health, dict)
-        or health.get("status") != "healthy"
-        or health.get("service") != "samvaad-sathi-backend"
-    ):
-        raise SmokeError("health_contract_failed")
+    validate_health(health)
     schema = fetch_json(origin, "/openapi.json")
     if (
         not isinstance(schema, dict)

@@ -82,8 +82,12 @@ def test_hosted_smoke_check_identifies_itself_to_edge_security(monkeypatch):
     monkeypatch.setenv("HEALTH_URL", "https://backend.example.test/api/health")
     captured = {}
 
+    from email.message import Message
+
     class HealthyResponse:
         status = 200
+        headers = Message()
+        headers["Content-Type"] = "application/json"
 
         def __enter__(self):
             return self
@@ -91,12 +95,19 @@ def test_hosted_smoke_check_identifies_itself_to_edge_security(monkeypatch):
         def __exit__(self, *_args):
             return False
 
-    def urlopen(request, *, timeout):
-        captured["request"] = request
-        captured["timeout"] = timeout
-        return HealthyResponse()
+        def read(self, size):
+            assert size == 64 * 1024 + 1
+            return b'{"status":"healthy","service":"samvaad-sathi-backend"}'
 
-    monkeypatch.setattr(release.urllib.request, "urlopen", urlopen)
+    class Opener:
+        def open(self, request, *, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return HealthyResponse()
+
+    monkeypatch.setattr(
+        release.public_smoke.urllib.request, "build_opener", lambda *_: Opener()
+    )
 
     release.smoke()
 
@@ -131,7 +142,9 @@ def test_ec2_release_has_a_local_health_gate_and_application_rollback():
     assert "Database downgrade is intentionally NOT automatic" in script
 
 
-@pytest.mark.parametrize("expected,actual", [("222222222222", "111111111111"), ("invalid", "222222222222")])
+@pytest.mark.parametrize(
+    "expected,actual", [("222222222222", "111111111111"), ("invalid", "222222222222")]
+)
 def test_release_rejects_wrong_or_malformed_destination(monkeypatch, expected, actual):
     release = load_release_module()
     monkeypatch.setenv("AWS_EXPECTED_ACCOUNT_ID", expected)
@@ -144,8 +157,10 @@ def test_release_rejects_wrong_or_malformed_destination(monkeypatch, expected, a
 def test_release_rejects_unconfigured_destination_before_aws_call(monkeypatch):
     release = load_release_module()
     monkeypatch.delenv("AWS_EXPECTED_ACCOUNT_ID", raising=False)
+
     def no_call(*args):
         raise AssertionError("No AWS call should occur before configuration validation")
+
     monkeypatch.setattr(release, "command", no_call)
     with pytest.raises(RuntimeError, match="AWS_EXPECTED_ACCOUNT_ID"):
         release.verify_aws_destination()
@@ -156,9 +171,292 @@ def test_release_accepts_only_the_explicit_destination(monkeypatch):
     monkeypatch.setenv("AWS_EXPECTED_ACCOUNT_ID", "222222222222")
     monkeypatch.setenv("AWS_REGION", "eu-west-1")
     calls = []
+
     def command(*args):
         calls.append(args)
         return {"Account": "222222222222"}
+
     monkeypatch.setattr(release, "command", command)
     assert release.verify_aws_destination() == "222222222222"
-    assert calls == [("aws", "sts", "get-caller-identity", "--region", "eu-west-1", "--output", "json")]
+    assert calls == [
+        (
+            "aws",
+            "sts",
+            "get-caller-identity",
+            "--region",
+            "eu-west-1",
+            "--output",
+            "json",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://backend.test/api/health",
+        "https://user:secret@backend.test/api/health",
+        "https://backend.test/api/health?token=secret",
+        "https://backend.test/api/health#x",
+        "https://backend.test/api/health?",
+        "https://backend.test/api/health/",
+        "https://backend.test/api/../health",
+        "https://backend.test//health",
+        "https://backend.test:0/api/health",
+        "https://backend.test:bad/api/health",
+        "https://backend.test/api/health\n",
+        "https://backend.test/api\\other/health",
+    ],
+)
+def test_hosted_smoke_rejects_bad_target_before_network_or_retry(monkeypatch, url):
+    release = load_release_module()
+    monkeypatch.setenv("HEALTH_URL", url)
+    monkeypatch.setattr(
+        release.public_smoke,
+        "fetch_json",
+        lambda *_a, **_k: pytest.fail("network must not run"),
+    )
+    monkeypatch.setattr(
+        release.time,
+        "sleep",
+        lambda *_: pytest.fail("invalid configuration must not retry"),
+    )
+    with pytest.raises(RuntimeError, match="invalid_https_health_url") as error:
+        release.smoke()
+    assert "secret" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://backend.test/health",
+        "https://backend.test/v2/api/health",
+        "https://backend.test:8443/api/health",
+    ],
+)
+def test_hosted_health_accepts_explicit_deployment_prefix(monkeypatch, url):
+    release = load_release_module()
+    monkeypatch.setenv("HEALTH_URL", url)
+    calls = []
+
+    def fetch(origin, path, **kwargs):
+        calls.append(origin + path)
+        return {"status": "healthy", "service": "samvaad-sathi-backend"}
+
+    monkeypatch.setattr(release.public_smoke, "fetch_json", fetch)
+    release.smoke()
+    assert calls == [url]  # No OpenAPI or authenticated endpoint requirement.
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {},
+        [],
+        {"status": "unhealthy", "service": "samvaad-sathi-backend"},
+        {"status": "healthy", "service": "other-private-service"},
+    ],
+)
+def test_hosted_health_contract_failure_exhausts_bounded_retries(monkeypatch, result):
+    release = load_release_module()
+    monkeypatch.setenv("HEALTH_URL", "https://backend.test/api/health")
+    calls, sleeps = [], []
+
+    def fetch(*_args, **kwargs):
+        calls.append(kwargs)
+        return result
+
+    monkeypatch.setattr(release.public_smoke, "fetch_json", fetch)
+    monkeypatch.setattr(release.time, "sleep", sleeps.append)
+    with pytest.raises(RuntimeError, match="health_contract_failed") as error:
+        release.smoke()
+    assert len(calls) == 6
+    assert sleeps == [10] * 5
+    assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "initial",
+    [
+        "network_or_invalid_json",
+        "http_503",
+        "redirect_rejected",
+        "response_too_large",
+        "unexpected_content_type",
+    ],
+)
+def test_hosted_health_recovers_after_transient_failure(monkeypatch, initial):
+    release = load_release_module()
+    monkeypatch.setenv("HEALTH_URL", "https://backend.test/api/health")
+    calls, sleeps = [], []
+
+    def fetch(*_args, **_kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise release.public_smoke.SmokeError(initial)
+        return {"status": "healthy", "service": "samvaad-sathi-backend"}
+
+    monkeypatch.setattr(release.public_smoke, "fetch_json", fetch)
+    monkeypatch.setattr(release.time, "sleep", sleeps.append)
+    release.smoke()
+    assert len(calls) == 2
+    assert sleeps == [10]
+
+
+def configure_main(monkeypatch, release):
+    import json
+
+    for name, value in {
+        "GITHUB_SHA": "a" * 40,
+        "GITHUB_REPOSITORY": "example/backend",
+        "TEST_EVIDENCE": "tester, date, acceptance results and approval link",
+        "PRODUCTION_PROVIDER": "ec2",
+        "DATABASE_BACKUP_REFERENCE": "verified-backup-2026-10-20",
+        "HEALTH_URL": "https://backend.test/api/health",
+    }.items():
+        monkeypatch.setenv(name, value)
+    events = []
+    monkeypatch.setattr(
+        release, "verify_aws_destination", lambda: events.append("aws-validated")
+    )
+    monkeypatch.setattr(
+        release,
+        "verify_production_source",
+        lambda *_: events.append("source-validated"),
+    )
+    monkeypatch.setattr(
+        release.subprocess,
+        "check_output",
+        lambda *_a, **_k: (
+            events.append("deployment-created") or json.dumps({"id": 123})
+        ),
+    )
+
+    def command(*args):
+        events.append(
+            next(arg for arg in args if arg.startswith("state=")).split("=", 1)[1]
+        )
+        return {}
+
+    monkeypatch.setattr(release, "command", command)
+    monkeypatch.setattr(release, "ec2_deploy", lambda *_: events.append("deployed"))
+    monkeypatch.setattr(release.time, "sleep", lambda *_: None)
+    return events
+
+
+def test_main_rejects_health_configuration_before_aws_or_deployment(monkeypatch):
+    release = load_release_module()
+    events = configure_main(monkeypatch, release)
+    monkeypatch.setenv("HEALTH_URL", "https://user:secret@backend.test/api/health")
+    with pytest.raises(RuntimeError, match="invalid_https_health_url"):
+        release.main()
+    assert events == []
+
+
+@pytest.mark.parametrize("healthy", [True, False])
+def test_main_only_marks_success_after_verified_health(monkeypatch, healthy):
+    release = load_release_module()
+    events = configure_main(monkeypatch, release)
+
+    def fetch(*_a, **_k):
+        events.append("health-request")
+        return (
+            {"status": "healthy", "service": "samvaad-sathi-backend"}
+            if healthy
+            else {"status": "healthy", "service": "unrelated"}
+        )
+
+    monkeypatch.setattr(release.public_smoke, "fetch_json", fetch)
+    if healthy:
+        release.main()
+        assert events[-2:] == ["health-request", "success"]
+        assert events.count("health-request") == 1
+    else:
+        with pytest.raises(RuntimeError, match="Hosted smoke check failed"):
+            release.main()
+        assert events[-1] == "failure"
+        assert "success" not in events
+        assert events.count("health-request") == 6
+    assert events.index("deployed") < events.index("health-request")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "html",
+        "invalid_json",
+        "too_large",
+        "non_200",
+        "timeout",
+        "truncated",
+        "redirect",
+    ],
+)
+def test_hosted_transport_failures_never_pass_release(monkeypatch, case):
+    from email.message import Message
+    import http.client
+
+    release = load_release_module()
+    monkeypatch.setenv("HEALTH_URL", "https://backend.test/api/health")
+    requests, sleeps = [], []
+
+    class Response:
+        status = 503 if case == "non_200" else 200
+        headers = Message()
+        headers["Content-Type"] = "text/html" if case == "html" else "application/json"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, size):
+            assert size == 64 * 1024 + 1
+            if case == "truncated":
+                raise http.client.IncompleteRead(b"private body", 30)
+            return b"x" * size if case == "too_large" else b"private invalid JSON"
+
+    class Opener:
+        def __init__(self, handler):
+            self.handler = handler
+
+        def open(self, request, *, timeout):
+            requests.append(request)
+            if case == "timeout":
+                raise TimeoutError("private network diagnostic")
+            if case == "redirect":
+                return self.handler.redirect_request(
+                    request,
+                    None,
+                    302,
+                    "private diagnostic",
+                    {},
+                    "https://other.test/private",
+                )
+            return Response()
+
+    monkeypatch.setattr(release.public_smoke.urllib.request, "build_opener", Opener)
+    monkeypatch.setattr(release.time, "sleep", sleeps.append)
+    with pytest.raises(RuntimeError, match="Hosted smoke check failed") as error:
+        release.smoke()
+    assert len(requests) == 6
+    assert sleeps == [10] * 5
+    assert "private" not in str(error.value)
+
+
+def test_hosted_fetch_failure_on_final_attempt_does_not_sleep_again(monkeypatch):
+    release = load_release_module()
+    monkeypatch.setenv("HEALTH_URL", "https://backend.test/api/health")
+    calls, sleeps = [], []
+
+    def fetch(*_a, **_k):
+        calls.append(True)
+        raise release.public_smoke.SmokeError("http_503")
+
+    monkeypatch.setattr(release.public_smoke, "fetch_json", fetch)
+    monkeypatch.setattr(release.time, "sleep", sleeps.append)
+    with pytest.raises(RuntimeError, match="http_503"):
+        release.smoke()
+    assert len(calls) == 6
+    assert len(sleeps) == 5
