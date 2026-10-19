@@ -10,7 +10,7 @@ from src.models.db.interview import Interview
 from src.models.db.question_attempt import QuestionAttempt
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
-from src.repository.crud.question import QuestionAttemptCRUDRepository
+from src.repository.crud.question import ProcessingGuard, QuestionAttemptCRUDRepository
 from src.services.llm import _is_near_empty_answer, generate_follow_up_question
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,9 @@ class FollowUpService:
         )
         self._interview_repo = InterviewCRUDRepository(async_session=async_session)
 
-    async def _resolve_follow_up(self, *, attempt, disposition: str) -> None:
+    async def _resolve_follow_up(
+        self, *, attempt, disposition: str, processing_guard: ProcessingGuard | None = None
+    ) -> None:
         """Persist Gate 2 state only for a real stored attempt."""
         attempt_id = getattr(attempt, "id", None)
         resolver = getattr(self._question_attempt_repo, "resolve_follow_up", None)
@@ -38,10 +40,15 @@ class FollowUpService:
         await resolver(
             question_attempt_id=attempt_id,
             disposition=disposition,
+            **(
+                {"processing_guard": processing_guard}
+                if processing_guard is not None
+                else {}
+            ),
         )
 
     async def handle_transcription_saved(
-        self, question_attempt_id: int
+        self, question_attempt_id: int, *, processing_guard: ProcessingGuard | None = None
     ) -> dict[str, Any] | None:
         start_time = time.perf_counter()
 
@@ -60,16 +67,22 @@ class FollowUpService:
             attempt.interview_id if attempt else None,
             attempt.question_id if attempt else None,
         )
+        if processing_guard is not None and not self._matches_processing(
+            attempt, processing_guard
+        ):
+            return None
         if not attempt or not attempt.question_id:
             return None
         logger.info(
             "Proceeding to follow-up generation | QuestionAttempt=%s",
             question_attempt_id,
         )
-        return await self._maybe_generate_follow_up(attempt=attempt)
+        return await self._maybe_generate_follow_up(
+            attempt=attempt, processing_guard=processing_guard
+        )
 
     async def _maybe_generate_follow_up(
-        self, attempt: QuestionAttempt
+        self, attempt: QuestionAttempt, *, processing_guard: ProcessingGuard | None = None
     ) -> dict[str, Any] | None:
         generation_start = time.perf_counter()
 
@@ -108,6 +121,7 @@ class FollowUpService:
         if existing:
             await self._resolve_follow_up(
                 attempt=attempt,
+                processing_guard=processing_guard,
                 disposition="generated",
             )
             return None
@@ -125,6 +139,7 @@ class FollowUpService:
             )
             await self._resolve_follow_up(
                 attempt=attempt,
+                processing_guard=processing_guard,
                 disposition="not_generated",
             )
             return None
@@ -142,16 +157,20 @@ class FollowUpService:
             )
             await self._resolve_follow_up(
                 attempt=attempt,
+                processing_guard=processing_guard,
                 disposition="not_generated",
             )
             return None
 
-        interview = await self._interview_repo.get_by_id(
-            interview_id=attempt.interview_id
-        )
+        interview = await self._interview_repo.get_by_id(interview_id=attempt.interview_id)
         from src.services.interview_question_plan import planned_count
+
         if interview is not None and planned_count(interview) is not None:
-            await self._resolve_follow_up(attempt=attempt, disposition="not_applicable")
+            await self._resolve_follow_up(
+                attempt=attempt,
+                disposition="not_applicable",
+                processing_guard=processing_guard,
+            )
             return None
 
         track = interview.track if interview else "general"
@@ -165,10 +184,8 @@ class FollowUpService:
         )
         # Enforce strict question count for Full Stack Developer mode
         if track == "Full Stack Developer":
-            unasked_qs = (
-                await self._interview_question_repo.get_questions_without_attempts(
-                    interview_id=attempt.interview_id
-                )
+            unasked_qs = await self._interview_question_repo.get_questions_without_attempts(
+                interview_id=attempt.interview_id
             )
             unasked_base_qs = [
                 q for q in unasked_qs if not getattr(q, "is_follow_up", False)
@@ -179,6 +196,7 @@ class FollowUpService:
                 )
                 await self._resolve_follow_up(
                     attempt=attempt,
+                    processing_guard=processing_guard,
                     disposition="not_generated",
                 )
                 return None
@@ -215,6 +233,7 @@ class FollowUpService:
             )
             await self._resolve_follow_up(
                 attempt=attempt,
+                processing_guard=processing_guard,
                 disposition="not_generated",
             )
             return None
@@ -222,12 +241,28 @@ class FollowUpService:
         # "continue without follow-up" while it runs, so check the locked row
         # again immediately before publishing anything.
         attempt_id = getattr(attempt, "id", None)
+        if processing_guard is not None:
+            # Match the upload/navigation lock order: interview, then answer.
+            # Follow-up insertion also locks the interview; taking its lock
+            # after the answer would deadlock against a concurrent upload.
+            parent = await self._async_session.get(
+                Interview,
+                attempt.interview_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
+            if parent is None:
+                await self._async_session.rollback()
+                return None
         latest_attempt = (
             await self._question_attempt_repo.lock_by_id(question_attempt_id=attempt_id)
             if attempt_id is not None
             else attempt
         )
-        if latest_attempt is None:
+        if latest_attempt is None or (
+            processing_guard is not None
+            and not self._matches_processing(latest_attempt, processing_guard)
+        ):
             await self._async_session.rollback()
             return None
         if getattr(latest_attempt, "follow_up_disposition", None) == "skipped":
@@ -252,19 +287,18 @@ class FollowUpService:
             )
             await self._resolve_follow_up(
                 attempt=attempt,
+                processing_guard=processing_guard,
                 disposition="generated",
             )
             return None
         db_start = time.perf_counter()
-        follow_up_question = (
-            await self._interview_question_repo.create_follow_up_question(
-                interview_id=attempt.interview_id,
-                parent_question_id=question.id,
-                text=follow_up_text,
-                topic=question.topic,
-                category=question.category,
-                strategy=question.follow_up_strategy,
-            )
+        follow_up_question = await self._interview_question_repo.create_follow_up_question(
+            interview_id=attempt.interview_id,
+            parent_question_id=question.id,
+            text=follow_up_text,
+            topic=question.topic,
+            category=question.category,
+            strategy=question.follow_up_strategy,
         )
         logger.info(
             "Follow-up question saved | Question=%s | NewQuestion=%s | Time=%.2fs",
@@ -309,6 +343,7 @@ class FollowUpService:
         )
         await self._resolve_follow_up(
             attempt=attempt,
+            processing_guard=processing_guard,
             disposition="generated",
         )
         logger.info(
@@ -324,6 +359,19 @@ class FollowUpService:
             time.perf_counter() - generation_start,
         )
         return metadata
+
+    @staticmethod
+    def _matches_processing(attempt, guard: ProcessingGuard):
+        return (
+            attempt is not None
+            and (
+                attempt.answer_checksum,
+                attempt.answer_version,
+                attempt.transcription_updated_at,
+            )
+            == guard
+            and attempt.transcription_status == "processing"
+        )
 
     def _extract_answer_chunk(
         self,

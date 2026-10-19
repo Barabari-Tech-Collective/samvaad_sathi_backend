@@ -221,10 +221,16 @@ async def transcribe_audio_answer(
         and question_attempt.answer_kind == "audio"
     )
     from src.services.interview_question_plan import planned_count
-    fixed_plan = parent_interview is not None and planned_count(parent_interview) is not None
+
+    fixed_plan = (
+        parent_interview is not None and planned_count(parent_interview) is not None
+    )
     immutable = fixed_plan and parent_interview.interview_mode == "assessment"
     if immutable and question_attempt.answer_saved_at is not None and not same_answer:
-        raise fastapi.HTTPException(409, "This assessment answer is already committed. Continue with the saved answer.")
+        raise fastapi.HTTPException(
+            409,
+            "This assessment answer is already committed. Continue with the saved answer.",
+        )
     if same_answer:
         stored_attempt = question_attempt
         audio_url = str(question_attempt.audio_url)
@@ -261,12 +267,19 @@ async def transcribe_audio_answer(
                 question_attempt_id=question_attempt_id_int,
                 audio_url=audio_url,
                 checksum=checksum,
-                **({"immutable": immutable, "follow_up_expected": False} if fixed_plan else {}),
+                **(
+                    {"immutable": immutable, "follow_up_expected": False}
+                    if fixed_plan
+                    else {}
+                ),
             )
         except ValueError as exc:
             await question_repo.async_session.rollback()
             if str(exc) == "ASSESSMENT_ANSWER_COMMITTED":
-                raise fastapi.HTTPException(409, "This assessment answer is already committed. Reload the saved checkpoint.") from exc
+                raise fastapi.HTTPException(
+                    409,
+                    "This assessment answer is already committed. Reload the saved checkpoint.",
+                ) from exc
             saved_attempt = None
         except Exception:
             await question_repo.async_session.rollback()
@@ -313,24 +326,26 @@ async def transcribe_audio_answer(
             transcription_status="transcribed",
         )
 
-    # A failed job is explicitly retried by resubmitting the same answer. A
-    # pending answer is also safe to re-enqueue: the worker claims it with a
-    # compare-and-set transition, so duplicate browser requests cannot trigger
-    # duplicate model calls.
-    should_enqueue = not same_answer or current_status in {
-        TranscriptionStatus.PENDING.value,
-        TranscriptionStatus.FAILED.value,
-    }
+    # A same-audio retry must reserve the observed failure, not reset a worker
+    # which may already have started since the browser's ownership read.
+    should_enqueue = (
+        not same_answer or current_status == TranscriptionStatus.PENDING.value
+    )
     if current_status == TranscriptionStatus.FAILED.value:
-        reset_attempt = await question_repo.mark_transcription_pending(
+        reset_attempt = await question_repo.reserve_transcription_retry(
             question_attempt_id=question_attempt_id_int,
+            user_id=current_user.id,
             checksum=checksum,
+            answer_version=stored_attempt.answer_version,
+            expected_status=stored_attempt.transcription_status,
+            expected_updated_at=stored_attempt.transcription_updated_at,
         )
+        should_enqueue = reset_attempt is not None
         if reset_attempt is not None:
             stored_attempt = reset_attempt
-            current_status = TranscriptionStatus.PENDING.value
 
     if should_enqueue:
+        reserved_at = stored_attempt.transcription_updated_at
         job_id = await enqueue_job(
             "process_answer_transcription_task",
             question_attempt_id=question_attempt_id_int,
@@ -340,9 +355,10 @@ async def transcribe_audio_answer(
         )
         if not job_id:
             try:
-                failed_attempt = await question_repo.mark_transcription_failed(
+                await question_repo.fail_transcription_retry_reservation(
                     question_attempt_id=question_attempt_id_int,
                     checksum=checksum,
+                    reserved_at=reserved_at,
                     error=(
                         "Your answer is saved, but speech feedback could not be started. "
                         "Select Retry speech feedback."
@@ -350,18 +366,31 @@ async def transcribe_audio_answer(
                 )
             except Exception:
                 await question_repo.async_session.rollback()
-                failed_attempt = None
-            if failed_attempt is not None:
-                stored_attempt = failed_attempt
-            current_status = TranscriptionStatus.FAILED.value
-        else:
-            current_status = TranscriptionStatus.PENDING.value
+
+    # Queue submission may race a worker or a replacement answer. Report the
+    # current durable state rather than guessing pending/failed from enqueue.
+    stored_attempt = await question_repo.get_by_id_and_user(
+        question_attempt_id=question_attempt_id_int, user_id=current_user.id
+    )
+    if stored_attempt is None:
+        raise fastapi.HTTPException(404, "Saved answer is no longer available.")
+    if stored_attempt.answer_checksum != checksum:
+        raise fastapi.HTTPException(
+            409, "A newer recording is already saved. Reload the saved checkpoint."
+        )
+    current_status = (
+        stored_attempt.transcription_status or TranscriptionStatus.PENDING.value
+    )
 
     final_saved = stored_attempt is not None and bool(stored_attempt.audio_url)
     message = (
-        "Answer saved. Speech feedback is being prepared."
-        if current_status != TranscriptionStatus.FAILED.value
-        else "Answer saved. Speech feedback could not be started; you can retry it."
+        "Answer saved. Speech feedback is ready."
+        if current_status == "transcribed"
+        else (
+            "Answer saved. Speech feedback is being prepared."
+            if current_status != TranscriptionStatus.FAILED.value
+            else "Answer saved. Speech feedback could not be started; you can retry it."
+        )
     )
     logger.info(
         "Audio answer accepted | QuestionAttempt=%s | TotalTime=%.2fs | Saved=%s | Status=%s",

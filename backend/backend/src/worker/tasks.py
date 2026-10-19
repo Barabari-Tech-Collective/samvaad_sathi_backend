@@ -327,7 +327,7 @@ async def process_answer_transcription_task(
 ) -> dict:
     """Transcribe one already-durable answer and publish its follow-up safely.
 
-    The checksum is the answer-version guard.  If a student records a newer
+    The checksum, answer version and claim timestamp fence all worker writes.  If a student records a newer
     answer while this job is queued, every write becomes a no-op rather than
     attaching stale text or feedback to the replacement recording.
     """
@@ -341,6 +341,7 @@ async def process_answer_transcription_task(
     from src.worker.database import get_session
 
     job_try = max(1, int(ctx.get("job_try", 1)))
+    processing_guard = None
 
     async def fail_or_retry(
         *, internal_reason: str, student_message: str, retryable: bool = True
@@ -349,12 +350,18 @@ async def process_answer_transcription_task(
             session = get_session()
             try:
                 repo = QuestionAttemptCRUDRepository(async_session=session)
-                await repo.mark_transcription_pending(
+                updated = await repo.mark_transcription_pending(
                     question_attempt_id=question_attempt_id,
                     checksum=checksum,
+                    processing_guard=processing_guard,
                 )
             finally:
                 await session.close()
+            if updated is None:
+                return {
+                    "status": "superseded",
+                    "question_attempt_id": question_attempt_id,
+                }
             logger.warning(
                 "Answer transcription retry | Attempt=%s | Try=%s | %s",
                 question_attempt_id,
@@ -366,13 +373,16 @@ async def process_answer_transcription_task(
         session = get_session()
         try:
             repo = QuestionAttemptCRUDRepository(async_session=session)
-            await repo.mark_transcription_failed(
+            updated = await repo.mark_transcription_failed(
                 question_attempt_id=question_attempt_id,
                 checksum=checksum,
                 error=student_message,
+                processing_guard=processing_guard,
             )
         finally:
             await session.close()
+        if updated is None:
+            return {"status": "superseded", "question_attempt_id": question_attempt_id}
         logger.error(
             "Answer transcription exhausted retries | Attempt=%s | %s",
             question_attempt_id,
@@ -396,22 +406,25 @@ async def process_answer_transcription_task(
                 "status": "already_transcribed",
                 "question_attempt_id": question_attempt_id,
             }
-        object_key = attempt.audio_url
-        existing_transcription = attempt.transcription
-        # A retry may inherit `processing` when the previous worker was killed
-        # after claiming the row. First attempts still require the atomic
-        # pending -> processing transition, which prevents duplicate browser
-        # uploads from making duplicate provider calls.
-        claimed = (
-            attempt
-            if attempt.transcription_status == "processing" and job_try > 1
-            else await repo.mark_transcription_processing(
-                question_attempt_id=question_attempt_id,
-                checksum=checksum,
-            )
+        # Every execution, including ARQ redelivery, must win a new claim.
+        # A killed worker's claim is recovered by the stale-work sweep, never
+        # inherited based only on the queue retry counter.
+        claimed = await repo.mark_transcription_processing(
+            question_attempt_id=question_attempt_id,
+            checksum=checksum,
+            answer_version=attempt.answer_version,
         )
         if claimed is None:
             return {"status": "superseded", "question_attempt_id": question_attempt_id}
+        processing_guard = (
+            checksum,
+            claimed.answer_version,
+            claimed.transcription_updated_at,
+        )
+        object_key = claimed.audio_url
+        existing_transcription = (
+            claimed.transcription if isinstance(claimed.transcription, dict) else None
+        )
     finally:
         await session.close()
 
@@ -472,6 +485,7 @@ async def process_answer_transcription_task(
                 transcription=transcription,
                 checksum=checksum,
                 finalize=False,
+                processing_guard=processing_guard,
             )
             if saved is None:
                 return {
@@ -499,12 +513,18 @@ async def process_answer_transcription_task(
     try:
         repo = QuestionAttemptCRUDRepository(async_session=session)
         current = await repo.get_by_id(question_attempt_id=question_attempt_id)
-        if current is None or current.answer_checksum != checksum:
+        if (
+            current is None
+            or current.answer_checksum != checksum
+            or current.answer_version != processing_guard[1]
+            or current.transcription_status != "processing"
+            or current.transcription_updated_at != processing_guard[2]
+        ):
             return {"status": "superseded", "question_attempt_id": question_attempt_id}
         try:
             follow_up_generated = bool(
                 await FollowUpService(async_session=session).handle_transcription_saved(
-                    question_attempt_id
+                    question_attempt_id, processing_guard=processing_guard
                 )
             )
         except Exception:  # noqa: BLE001
@@ -515,6 +535,7 @@ async def process_answer_transcription_task(
         completed = await repo.mark_transcription_complete(
             question_attempt_id=question_attempt_id,
             checksum=checksum,
+            processing_guard=processing_guard,
         )
         if completed is None:
             return {"status": "superseded", "question_attempt_id": question_attempt_id}

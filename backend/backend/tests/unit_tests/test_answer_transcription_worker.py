@@ -1,5 +1,6 @@
 """Background speech processing never changes or loses a newer answer."""
 
+import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,7 +22,9 @@ def worker_dependencies(monkeypatch):
         answer_kind="audio",
         audio_url="answers/42.webm",
         transcription=None,
-        transcription_status="pending",
+        transcription_status="processing",
+        answer_version=1,
+        transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
     )
     repo = SimpleNamespace(
         get_by_id=AsyncMock(return_value=attempt),
@@ -114,8 +117,11 @@ async def test_worker_transcribes_saved_audio_and_publishes_after_follow_up(
         },
         checksum=deps.checksum,
         finalize=False,
+        processing_guard=(deps.checksum, 1, deps.attempt.transcription_updated_at),
     )
-    deps.follow_up.assert_awaited_once_with(42)
+    deps.follow_up.assert_awaited_once_with(
+        42, processing_guard=(deps.checksum, 1, deps.attempt.transcription_updated_at)
+    )
     deps.repo.mark_transcription_complete.assert_awaited_once()
     assert all(session.close.await_count == 1 for session in deps.sessions)
 
