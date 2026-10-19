@@ -1105,6 +1105,28 @@ async def report_proctoring_violation(
     )
 
 
+def history_percentages(reports):
+    """Malformed historical scores must not hide an otherwise readable sitting."""
+    payload = getattr(reports[0], "report_json", None) if reports else None
+    if not isinstance(payload, dict):
+        return None, None
+    modern = payload.get("scoreSummary")
+    legacy = payload.get("metrics")
+
+    def read(container, key, field):
+        dimension = container.get(key) if isinstance(container, dict) else None
+        value = dimension.get(field) if isinstance(dimension, dict) else None
+        return value if type(value) in (int, float) and 0 <= value <= 100 else None
+
+    if isinstance(modern, dict):
+        return read(modern, "knowledgeCompetence", "percentage"), read(
+            modern, "speechAndStructure", "percentage"
+        )
+    return read(legacy, "knowledgeCompetence", "averagePct"), read(
+        legacy, "speechStructure", "averagePct"
+    )
+
+
 @router.get(
     path="/interviews",
     name="interviews:list",
@@ -1131,41 +1153,23 @@ async def list_my_interviews(
 
     items = []
     for interview, summary_reports, resume_used in rows:
-        # Count attempts (summary reports)
         attempts_count = len(summary_reports)
-
-        # Extract percentages from the latest report (first in the list since it's ordered by created_at desc)
-        knowledge_percentage = None
-        speech_fluency_percentage = None
-
-        if summary_reports:
-            latest_report = summary_reports[0]
-            if latest_report.report_json:
-                # Try new format first (scoreSummary)
-                if "scoreSummary" in latest_report.report_json:
-                    score_summary = latest_report.report_json["scoreSummary"]
-                    knowledge_percentage = score_summary.get(
-                        "knowledgeCompetence", {}
-                    ).get("percentage")
-                    speech_fluency_percentage = score_summary.get(
-                        "speechAndStructure", {}
-                    ).get("percentage")
-                # Fall back to old format (metrics)
-                elif "metrics" in latest_report.report_json:
-                    metrics = latest_report.report_json.get("metrics", {})
-                    knowledge_competence = metrics.get("knowledgeCompetence", {})
-                    speech_structure_fluency = metrics.get("speechStructure", {})
-
-                    knowledge_percentage = knowledge_competence.get("averagePct")
-                    speech_fluency_percentage = speech_structure_fluency.get(
-                        "averagePct"
-                    )
+        knowledge_percentage, speech_fluency_percentage = history_percentages(
+            summary_reports
+        )
 
         item = InterviewItem(
             interview_id=interview.id,
             track=interview.track,
             difficulty=interview.difficulty,
             status=interview.status,
+            interview_mode=(
+                interview.interview_mode
+                if interview.interview_mode in {"practice", "assessment"}
+                else None
+            ),
+            expires_at=interview.expires_at,
+            summary_report_available=bool(summary_reports),
             created_at=interview.created_at,
             knowledge_percentage=knowledge_percentage,
             speech_fluency_percentage=speech_fluency_percentage,

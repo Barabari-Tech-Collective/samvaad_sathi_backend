@@ -221,6 +221,9 @@ class InterviewItem(BaseSchemaModel):
     track: str
     difficulty: str
     status: str
+    interview_mode: Literal["practice", "assessment"] | None = None
+    expires_at: datetime.datetime | None = None
+    summary_report_available: bool = False
     created_at: datetime.datetime
     knowledge_percentage: float | None = pydantic.Field(
         default=None,

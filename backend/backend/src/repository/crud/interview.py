@@ -420,8 +420,10 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         # Determine next cursor
         next_cursor: int | None = None
         if len(interviews) > limit:
-            next_cursor = interviews[-1].id
             interviews = interviews[:limit]
+            # The cursor is the last returned row, not the look-ahead row.
+            # Queries use id < cursor, so using look-ahead would omit it.
+            next_cursor = interviews[-1].id
 
         # Get all summary reports for these interviews
         interview_ids = [interview.id for interview in interviews]
@@ -504,8 +506,10 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         # Determine next cursor
         next_cursor: int | None = None
         if len(interviews) > limit:
-            next_cursor = interviews[-1].id
             interviews = interviews[:limit]
+            # The cursor is the last returned row, not the look-ahead row.
+            # Queries use id < cursor, so using look-ahead would omit it.
+            next_cursor = interviews[-1].id
 
         # Get all summary reports for these interviews
         interview_ids = [interview.id for interview in interviews]
