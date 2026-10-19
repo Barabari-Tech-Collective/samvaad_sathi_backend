@@ -248,6 +248,49 @@ async def student_course_practice(
     }
 
 
+@router.get("/courses/{course_id}/students/{student_id}/practice/{interview_id}/review")
+async def review_course_practice(
+    course_id: str,
+    student_id: int,
+    interview_id: int,
+    response: fastapi.Response,
+    current_user: User = fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Release only derived feedback after current scope and consent checks."""
+    from src.models.db.summary_report import SummaryReport
+    from src.services.coaching_review import review_fields
+
+    response.headers["Cache-Control"] = "no-store"
+    predicate = await _shared_student_predicate(course_id, current_user, session)
+    student = (await session.execute(
+        sa.select(User.id).where(predicate, User.id == student_id)
+    )).scalar_one_or_none()
+    if student is None:
+        raise fastapi.HTTPException(404, "Shared practice review not found.")
+    row = (await session.execute(
+        sa.select(Interview.id, SummaryReport.report_json)
+        .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
+        .where(Interview.id == interview_id, Interview.user_id == student_id,
+               Interview.course_id == course_id, Interview.interview_mode == "practice",
+               Interview.status == "completed")
+    )).one_or_none()
+    if row is None:
+        raise fastapi.HTTPException(404, "Shared practice review not found.")
+    fields = review_fields(row.report_json)
+    session.add(PracticeDashboardAuditEvent(
+        actor_id=current_user.id, action="course_practice_reviewed",
+        purpose="course_review", target_type="interview", target_id=str(interview_id),
+        reason="Staff opened shared course practice feedback.",
+        event_metadata={"course_id": course_id, "student_id": student_id,
+                        "feedback_state": fields["state"]},
+    ))
+    # A failed audit write prevents disclosure of the feedback.
+    await session.commit()
+    return {"course_id": course_id, "student_id": student_id,
+            "interview_id": interview_id, **fields}
+
+
 @router.put("/members/{member_id}/courses")
 async def assign_member_courses(
     member_id: int,
