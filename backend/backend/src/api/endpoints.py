@@ -75,3 +75,6 @@ router.include_router(router=coaching_assignments_router)
 
 from src.api.routes.course_shortlists import router as course_shortlists_router
 router.include_router(router=course_shortlists_router)
+
+from src.api.routes.human_interviews import router as human_interviews_router
+router.include_router(router=human_interviews_router)

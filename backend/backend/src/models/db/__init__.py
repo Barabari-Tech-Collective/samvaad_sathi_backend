@@ -35,3 +35,5 @@ from .user import User  # noqa: F401
 from .user_resume import UserResume  # noqa: F401
 
 from .coaching_assignment import CoachingAssignment  # noqa: F401
+
+from .human_interview import HumanInterview  # noqa: F401

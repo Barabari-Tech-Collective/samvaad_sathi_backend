@@ -173,6 +173,7 @@ async def course_students(
     if response is not None:
         response.headers["Cache-Control"] = "no-store"
     from src.services.course_shortlists import can_open
+    from src.services.human_interviews import permitted as human_permitted
     from src.services.course_support import can_open as support_can_open
     filters = RosterFilters(q=q, activity=activity)
     authorized = await _shared_student_predicate(course_id, current_user, session)
@@ -196,6 +197,7 @@ async def course_students(
         "course_id": course_id,
         "page": page,
         "limit": limit,
+        "can_open_human_interviews": human_permitted(current_user, "read"),
         "can_open_support": await support_can_open(current_user, course_id, session),
         "can_open_shortlists": await can_open(current_user, course_id, session),
         "filters": filters.model_dump(),
