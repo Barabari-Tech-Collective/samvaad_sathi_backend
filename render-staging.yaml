@@ -9,10 +9,10 @@ services:
     buildCommand: pip install -r requirements.txt
     preDeployCommand: alembic upgrade head
     startCommand: uvicorn src.main:backend_app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /health
+    healthCheckPath: /api/health
     envVars:
       - key: ENVIRONMENT
-        value: STAGING
+        value: STAGE
       - key: PYTHON_VERSION
         value: 3.12.0
       - key: BACKEND_SERVER_HOST
@@ -57,8 +57,26 @@ services:
         sync: false
       - key: SUPABASE_JWT_SECRET
         sync: false
-      - key: BARABARI_AUTH_SERVICE_URL
+      - key: AUTH_SERVICE_BASE_URL
         sync: false
+      - key: SSO_REDIRECT_URI
+        sync: false
+      - key: CENTRAL_IDENTITY_CHECK_ENABLED
+        value: 'True'
+      - key: PRODUCT_IDENTITY_API_KEY
+        sync: false
+      - key: CENTRAL_PROFILE_API_KEY
+        sync: false
+      - key: SAMPARK_ENROLLMENT_SYNC_ENABLED
+        value: 'True'
+      - key: SAMPARK_ENROLLMENT_SYNC_URL
+        sync: false
+      - key: SAMPARK_ENROLLMENT_SYNC_KEY
+        sync: false
+      - key: EXPOSE_ERROR_DETAIL
+        value: 'False'
+      - key: EXPOSE_API_DOCS
+        value: 'True'
       - key: REDIS_URL
         sync: false
       - key: OPENAI_API_KEY
@@ -72,4 +90,28 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: AUTH_SERVICE_JWT_SECRET
+        sync: false
+      - key: AUTH_TOKEN
+        sync: false
+      - key: HASHING_ALGORITHM_LAYER_1
+        sync: false
+      - key: HASHING_ALGORITHM_LAYER_2
+        sync: false
+      - key: HASHING_SALT
+        sync: false
+      - key: IS_ALLOWED_CREDENTIALS
+        sync: false
+      - key: JWT_ALGORITHM
+        sync: false
+      - key: JWT_DAY
+        sync: false
+      - key: JWT_HOUR
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: JWT_SUBJECT
+        sync: false
+      - key: JWT_TOKEN_PREFIX
+        sync: false
+      - key: SESSION_SECRET_KEY
         sync: false

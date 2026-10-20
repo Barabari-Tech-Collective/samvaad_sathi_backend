@@ -68,7 +68,7 @@ jobs:
       - name: Check release runner syntax
         run: >-
           bash -n ops/ec2-release.sh &&
-          python -m py_compile ops/release.py ops/check_migration_safety.py ops/staging_smoke.py ops/local_health.py ops/staff_acceptance.py
+          python -m py_compile ops/release.py ops/check_migration_safety.py ops/staging_smoke.py ops/local_health.py ops/staff_acceptance.py ops/acceptance/run_local.py ops/acceptance/product_fixture.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
