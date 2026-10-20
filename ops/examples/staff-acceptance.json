@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "environment": "isolated_staging",
+  "origin": "https://replace-with-approved-staging.invalid",
+  "actors": [
+    {
+      "label": "facilitator-a",
+      "token_env": "SAMVAAD_ACCEPTANCE_FACILITATOR_A_TOKEN",
+      "user_id": 101,
+      "course_ids": ["replace-with-assigned-course-id"],
+      "forbidden_course_ids": ["replace-with-unassigned-course-id"],
+      "permissions": {"course_workspace": ["read"]}
+    }
+  ]
+}

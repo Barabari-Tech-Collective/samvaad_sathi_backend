@@ -104,6 +104,7 @@ def fetch_json(
     max_bytes: int = MAX_RESPONSE_BYTES,
     user_agent: str = "Samvaad-Public-Contract-Smoke/2.0",
     use_proxy: bool = True,
+    bearer_token: str | None = None,
 ) -> object:
     request = urllib.request.Request(
         origin + path,
@@ -112,6 +113,8 @@ def fetch_json(
             "User-Agent": user_agent,
         },
     )
+    if bearer_token is not None:
+        request.add_header("Authorization", "Bearer " + bearer_token)
     handlers = [NoRedirect()]
     if not use_proxy:
         handlers.append(urllib.request.ProxyHandler({}))
@@ -130,7 +133,9 @@ def fetch_json(
     except SmokeError:
         raise
     except urllib.error.HTTPError as error:
-        raise SmokeError(f"http_{error.code}") from None
+        code = error.code
+        error.close()
+        raise SmokeError(f"http_{code}") from None
     except (
         OSError,
         ValueError,
