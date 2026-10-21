@@ -139,6 +139,36 @@ async def test_fullscreen_exit_records_without_ending_assessment(app, database):
     assert response.json()["eventCount"] == 1
 
 
+async def test_signal_id_cannot_be_reused_for_different_evidence(app, database):
+    interview_id = await _create_interview(database, interview_mode="assessment")
+    payload = {
+        "interviewId": interview_id,
+        "reason": "tab_switch",
+        "eventId": "signal-retry-0001",
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        first = await client.post(VIOLATION_PATH, json=payload)
+        replay = await client.post(VIOLATION_PATH, json=payload)
+        conflict = await client.post(
+            VIOLATION_PATH, json={**payload, "reason": "fullscreen_exit"}
+        )
+    assert first.status_code == replay.status_code == 200
+    assert replay.json()["eventCount"] == 1
+    assert conflict.status_code == 409
+    from src.models.db.interview import Interview
+
+    factory = async_sessionmaker(database, expire_on_commit=False)
+    async with factory() as session:
+        interview = await session.get(Interview, interview_id)
+        event = interview.integrity_events[0]
+        assert event["verdict"] is None
+        assert event["automaticPenalty"] is False
+        assert event["evidenceClass"] == "unverified_client_observation"
+        assert interview.status == "active"
+
+
 async def test_a_practice_interview_is_never_terminated(app, database):
     """The decision this whole feature rests on: practice stays low-stakes."""
     interview_id = await _create_interview(database, interview_mode="practice")

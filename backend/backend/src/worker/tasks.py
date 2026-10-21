@@ -712,7 +712,7 @@ async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> di
                 preferred_skills=preferred_skills,
                 experience_mode=batch.experience_mode,
                 weight_overrides=batch.weight_overrides,
-                jev_provider=get_jev_provider(),
+                jev_provider=get_jev_provider(cohort_key=f"batch:{batch.id}"),
             )
         except Exception as exc:
             logger.exception(

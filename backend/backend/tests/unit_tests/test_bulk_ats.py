@@ -525,9 +525,18 @@ async def test_stub_jev_provider_forces_manual_review():
 @pytest.mark.asyncio
 async def test_real_jev_provider_calls_system_one_and_maps_answers(monkeypatch):
     response = SimpleNamespace(
-        scores={"skills_score": SimpleNamespace(score=3.0, confidence=0.8)},
-        choices={"education_quality": SimpleNamespace(choice="Strong", confidence=0.9)},
-        nouls={"needs_manual_review": SimpleNamespace(noul=0.2)},
+        scores={
+            key: SimpleNamespace(score=3.0, confidence=0.8)
+            for key in jev_client.SCORE_LEVELS
+        },
+        choices={
+            "education_quality": SimpleNamespace(choice="Strong", confidence=0.9),
+            "project_tier": SimpleNamespace(choice="Good", confidence=0.8),
+        },
+        nouls={
+            "needs_manual_review": SimpleNamespace(noul=0.2),
+            "experience_mode_mismatch": SimpleNamespace(noul=0.1),
+        },
     )
     system_one = AsyncMock(return_value=response)
 
@@ -898,9 +907,7 @@ def test_candidate_link_normalization_rejects_contact_and_malformed_urls():
 
     assert validator._normalize_candidate_url("mailto:candidate@example.test") == ""
     assert (
-        validator._normalize_candidate_url(
-            "https://mailto:candidate@example.test"
-        )
+        validator._normalize_candidate_url("https://mailto:candidate@example.test")
         == ""
     )
     assert validator._normalize_candidate_url("candidate@example.test") == ""
@@ -1222,11 +1229,7 @@ def test_feedback_states_turn_stale_jobs_into_terminal_failures():
     ).isoformat()
 
     assert _feedback_states(
-        {
-            "shareableFeedback": {
-                "student": {"status": "generating", "startedAt": stale}
-            }
-        }
+        {"shareableFeedback": {"student": {"status": "generating", "startedAt": stale}}}
     ) == {"student": "failed", "team": None}
 
 

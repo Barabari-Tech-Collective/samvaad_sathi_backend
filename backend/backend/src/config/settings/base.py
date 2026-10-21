@@ -320,6 +320,11 @@ class BackendBaseSettings(BaseSettings):
     JEV_API_BASE_URL: str = decouple.config("JEV_API_BASE_URL", cast=str, default="")  # type: ignore
     JEV_MODEL: str = decouple.config("JEV_MODEL", cast=str, default="")  # type: ignore
     JEV_TIMEOUT_SECONDS: float = decouple.config("JEV_TIMEOUT_SECONDS", cast=float, default=60.0)  # type: ignore
+    # A key alone does not approve processing. Pin reviewed offline evidence and
+    # explicitly admit a stable batch cohort; 0 is the immediate kill switch.
+    JEV_BULK_ATS_ROLLOUT_PERCENT: int = decouple.config("JEV_BULK_ATS_ROLLOUT_PERCENT", cast=int, default=0)  # type: ignore
+    JEV_BULK_ATS_EVALUATION_PATH: str = decouple.config("JEV_BULK_ATS_EVALUATION_PATH", cast=str, default="")  # type: ignore
+    JEV_BULK_ATS_EVALUATION_SHA256: str = decouple.config("JEV_BULK_ATS_EVALUATION_SHA256", cast=str, default="")  # type: ignore
 
     # Bulk ATS ingestion limits.
     BULK_ATS_MAX_FILES_PER_BATCH: int = decouple.config("BULK_ATS_MAX_FILES_PER_BATCH", cast=int, default=100)  # type: ignore

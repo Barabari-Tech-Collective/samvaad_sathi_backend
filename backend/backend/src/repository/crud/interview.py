@@ -152,9 +152,16 @@ class InterviewCRUDRepository(BaseCRUDRepository):
             import fastapi
             from src.models.db.user import User
 
-            student = await self.async_session.get(User, user_id, populate_existing=True, with_for_update=True)
+            student = await self.async_session.get(
+                User, user_id, populate_existing=True, with_for_update=True
+            )
             from src.services.sampark_enrollment_sync import fresh
-            if student is None or not fresh(student) or course_id not in (student.enrolled_course_ids or []):
+
+            if (
+                student is None
+                or not fresh(student)
+                or course_id not in (student.enrolled_course_ids or [])
+            ):
                 raise fastapi.HTTPException(
                     403, "Current enrollment in this course is required."
                 )
@@ -346,9 +353,12 @@ class InterviewCRUDRepository(BaseCRUDRepository):
                 409, "Browser events require an active or finished assessment."
             )
         events = list(interview.integrity_events or [])
-        if interview.status == "active" and not any(
-            e["eventId"] == event_id for e in events
-        ):
+        existing = next((e for e in events if e.get("eventId") == event_id), None)
+        if existing is not None and existing.get("reason") != reason:
+            raise fastapi.HTTPException(
+                409, "This event ID already records a different signal."
+            )
+        if interview.status == "active" and existing is None:
             # Preserve the first 100 events. A client cannot grow an unbounded JSON row.
             if len(events) < 100:
                 events.append(
@@ -359,47 +369,13 @@ class InterviewCRUDRepository(BaseCRUDRepository):
                             datetime.timezone.utc
                         ).isoformat(),
                         "source": "browser_signal",
+                        "policyVersion": "integrity-observation-v1",
+                        "evidenceClass": "unverified_client_observation",
+                        "automaticPenalty": False,
                         "verdict": None,
                     }
                 )
                 interview.integrity_events = events
-        await self.async_session.commit()
-        await self.async_session.refresh(interview)
-        return interview
-
-    async def mark_terminated_for_proctoring(
-        self, *, interview_id: int, reason: str
-    ) -> Interview | None:
-        """End an interview early because the student left the tab or fullscreen.
-
-        Mirrors mark_completed's duration calculation - a terminated sitting
-        can still have real answered questions worth timing - but status is
-        "terminated", never "completed", so nothing downstream can mistake an
-        ended attempt for a finished one.
-        """
-        stmt = sqlalchemy.select(Interview).where(Interview.id == interview_id)
-        query = await self.async_session.execute(statement=stmt)
-        interview: Interview | None = query.scalar()  # type: ignore
-        if not interview:
-            return None
-
-        duration_stmt = sqlalchemy.select(
-            sqlalchemy.func.min(QuestionAttempt.created_at).label("start_at"),
-            sqlalchemy.func.max(QuestionAttempt.created_at).label("end_at"),
-        ).where(QuestionAttempt.interview_id == interview_id)
-        duration_row = (await self.async_session.execute(duration_stmt)).one()
-        start_at = duration_row.start_at
-        end_at = duration_row.end_at
-
-        duration_seconds: int | None = None
-        if start_at is not None and end_at is not None:
-            duration_seconds = max(0, int((end_at - start_at).total_seconds()))
-
-        interview.status = "terminated"
-        interview.completed_at = datetime.datetime.now(datetime.timezone.utc)
-        interview.duration_seconds = duration_seconds
-        interview.proctoring_terminated = True
-        interview.proctoring_violation_reason = reason
         await self.async_session.commit()
         await self.async_session.refresh(interview)
         return interview
