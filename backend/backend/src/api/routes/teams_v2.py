@@ -23,6 +23,7 @@ from src.models.schemas.teams_v2 import (
 from src.repository.crud.team_v2 import TeamCRUDRepository, TeamDeleteStatus
 from src.models.db.user import User
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
+from src.services.central_auth_service import CentralAuthProvisioningError, CentralAuthReconciliationError
 
 router = fastapi.APIRouter(prefix="/v2/teams", tags=["teams-v2"])
 
@@ -174,6 +175,10 @@ async def add_member(
         raise fastapi.HTTPException(status_code=404, detail="Team not found")
     except EntityAlreadyExists:
         raise fastapi.HTTPException(status_code=400, detail="User is already an active member of this team.")
+    except CentralAuthReconciliationError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_409_CONFLICT, detail=str(e))
+    except CentralAuthProvisioningError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_502_BAD_GATEWAY, detail=str(e))
     except ValueError as e:
         raise fastapi.HTTPException(status_code=400, detail=str(e))
     except IntegrityError as e:
