@@ -40,6 +40,15 @@ from src.utilities.exceptions.password import PasswordDoesNotMatch
 from src.securities.hashing.password import pwd_generator
 
 
+@pytest.fixture(autouse=True)
+def _mock_default_central_provisioning():
+    with patch(
+        "src.repository.crud.team_v2.provision_or_invite_staff",
+        new=AsyncMock(return_value="mock-central-user-uuid"),
+    ) as mock_prov:
+        yield mock_prov
+
+
 def _make_user(
     user_id: int,
     email: str = "",

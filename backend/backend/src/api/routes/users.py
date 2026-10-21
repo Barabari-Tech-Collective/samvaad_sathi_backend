@@ -148,8 +148,15 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
     }
 
     team_name = getattr(primary_team, "name", None) if primary_team else None
-    display_role = access_role or getattr(user, "role", None) or (str(effective_role).lower() if effective_role else "student")
-    display_access_role = access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None)
+    if is_super_admin_flag:
+        display_role = "super admin"
+        display_access_role = access_role or "super admin"
+    elif is_admin_flag:
+        display_role = "admin"
+        display_access_role = access_role or "admin"
+    else:
+        display_role = access_role or getattr(user, "role", None) or (str(effective_role).lower() if effective_role else "student")
+        display_access_role = access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None)
 
     return {
         "member": member,

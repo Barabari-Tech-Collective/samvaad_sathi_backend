@@ -11,6 +11,11 @@ from src.models.schemas.teams_v2 import TeamCreate, TeamMemberCreate, TeamMember
 from src.securities.hashing.password import pwd_generator
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
 from src.api.dependencies.admin import is_admin_user, is_super_admin_user
+from src.services.central_auth_service import (
+    provision_or_invite_staff,
+    CentralAuthProvisioningError,
+    CentralAuthReconciliationError,
+)
 
 
 class TeamDeleteStatus(str, enum.Enum):
@@ -181,17 +186,44 @@ class TeamCRUDRepository(BaseCRUDRepository):
             if existing_member and existing_member.status == "active":
                 raise EntityAlreadyExists("User is already an active member of this team.")
 
-        # 4. Handle user creation or credential initialization (never overwrite established credentials)
-        if not user:
-            if member_data.password and member_data.password.strip():
-                hashed_pw = pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
-            else:
-                # Password optional: accounts utilizing Central SSO authentication do not require a local password
-                hashed_pw = ""
+        # 4. Handle Central Auth provisioning (Central Auth is source of truth for credentials)
+        # Any failure in Central Auth provisioning raises CentralAuthProvisioningError and aborts
+        # before any local user or team membership mutations occur.
+        central_user_id = await provision_or_invite_staff(
+            email=email_clean,
+            name=member_data.name.strip(),
+            role="STAFF",
+            send_invite_email=True,
+        )
 
+        # 5. Reconcile existing local user binding with central_user_id BEFORE mutating membership.
+        # If the local user already has a student_id that conflicts with central_user_id, abort immediately.
+        if user:
+            if user.student_id and user.student_id != central_user_id:
+                raise CentralAuthReconciliationError(
+                    f"User with email '{email_clean}' is already linked to Central Auth ID '{user.student_id}', "
+                    f"which does not match provisioned ID '{central_user_id}'. Manual reconciliation required."
+                )
+            if not user.student_id:
+                user.student_id = central_user_id
+
+            # If user has no password yet and an initial password was provided, initialize it
+            if member_data.password and member_data.password.strip():
+                is_uninitialized = not user.password_hash or user.password_hash.strip() == ""
+                if is_uninitialized and not (is_admin_user(user) or is_super_admin_user(user)):
+                    user.password_hash = pwd_generator.generate_hashed_password(
+                        hash_salt="", new_password=member_data.password.strip()
+                    )
+        else:
+            hashed_pw = (
+                pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
+                if (member_data.password and member_data.password.strip())
+                else ""
+            )
             user = User(
                 email=email_clean,
                 name=member_data.name.strip(),
+                student_id=central_user_id,
                 password_hash=hashed_pw,
                 role=None,
                 is_onboarded=False,
@@ -200,16 +232,6 @@ class TeamCRUDRepository(BaseCRUDRepository):
             )
             self.async_session.add(user)
             await self.async_session.flush()
-        else:
-            # Security Note: Never overwrite established passwords of existing users when adding them to a team!
-            # Only initialize credentials if the user has an empty/uninitialized password (e.g., from SSO)
-            # and is not an administrative account.
-            if member_data.password and member_data.password.strip():
-                is_uninitialized = not user.password_hash or user.password_hash.strip() == ""
-                if is_uninitialized and not (is_admin_user(user) or is_super_admin_user(user)):
-                    user.password_hash = pwd_generator.generate_hashed_password(
-                        hash_salt="", new_password=member_data.password.strip()
-                    )
 
         # 5. Create or reactivate TeamMember record
         if existing_member:
