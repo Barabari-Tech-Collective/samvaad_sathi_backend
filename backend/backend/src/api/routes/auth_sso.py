@@ -132,7 +132,7 @@ async def sso_callback(
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 profile_resp = await client.get(
-                    f"{settings.AUTH_SERVICE_BASE_URL}/barabari-auth/api/auth/internal/v1/students/{central_user_id}/profile",
+                    f"{settings.AUTH_SERVICE_BASE_URL}/barabari-auth/api/auth/internal/v1/users/{central_user_id}/profile",
                     headers={
                         "X-Internal-Api-Key": settings.CENTRAL_PROFILE_API_KEY,
                         "X-Product-Unique-Id": settings.SAMPARK_PRODUCT_UNIQUE_ID,
