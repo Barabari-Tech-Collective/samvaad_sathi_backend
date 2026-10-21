@@ -13,7 +13,7 @@ Integrity records now identify their policy and unverified browser provenance, e
 ## Verification
 
 - Full backend regression: 1,340 passed, 614 warnings, with fresh isolated local PostgreSQL 15.17 databases. Production/CI use Python 3.12 and PostgreSQL 17; this Mac used Python 3.14.8.
-- Final focused Jev/ATS regression: 99 passed, 127 warnings, including the additional domain gate and CLI checksum/overwrite tests. GitHub tests the final commit on the supported runtime.
+- Final focused Jev/ATS regression: 99 passed, 127 warnings, including the additional domain gate and CLI checksum/overwrite tests. Exact backend commit da95bc8 passed GitHub CI on Python 3.12/PostgreSQL 17: 1,342 tests, 611 warnings. The final two additional domain-gate cases explain the difference from the earlier full local count.
 - Includes real SQL/HTTP browser-signal retry/conflict and non-punitive state assertions, SDK transport/schema failures, score sanitization, cohort stability, model/digest/task/time mismatches, subgroup regression, missing labels and failed prediction coverage.
 - Early local migration runs failed due to disposable role/schema ownership setup; aligning the disposable role to CI resolved those setup errors. No production database was accessed.
 
