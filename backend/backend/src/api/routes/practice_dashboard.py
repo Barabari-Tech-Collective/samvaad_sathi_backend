@@ -60,7 +60,7 @@ _FACILITATOR_ROLES = {
     "lead",
     "team lead",
 }
-_PLACEMENT_ROLES = {"recruiter", "placement staff", "placement com"}
+_PLACEMENT_ROLES = {"recruiter", "placement staff", "placement com", "partnership staff"}
 _CONTROL_KEYS = {"practice_new_starts", "question_generation", "report_generation"}
 
 
@@ -124,15 +124,15 @@ def resolve_dashboard_role(user: User, memberships: list[Any]) -> DashboardRole 
     token_role = normalize_role(
         getattr(user, "_token_role", "") or getattr(user, "role", "")
     )
-    if token_role in _PLACEMENT_ROLES or is_bulk_ats_user(user):
+    if not memberships and getattr(user, "_token_source", None) is None and (token_role in _PLACEMENT_ROLES or is_bulk_ats_user(user)):
         return "placements"
-    if token_role in _FACILITATOR_ROLES:
+    if not memberships and getattr(user, "_token_source", None) is None and token_role in _FACILITATOR_ROLES:
         return "facilitator"
     for item in memberships:
         member, team = _membership_parts(item)
         team_name = (getattr(team, "name", "") or "").casefold()
         role = normalize_role(getattr(member, "access_role", ""))
-        if any(word in team_name for word in ("placement", "partnership")):
+        if role in _PLACEMENT_ROLES or any(word in team_name for word in ("placement", "partnership")):
             return "placements"
         if role in _FACILITATOR_ROLES:
             return "facilitator"
@@ -148,6 +148,11 @@ async def _context(
         raise fastapi.HTTPException(
             status_code=403, detail="Practice staff access required"
         )
+    # These older aggregations do not bind evidence to a course. Course-limited
+    # staff must use the course workspace until each workflow is migrated.
+    from src.services.course_access import require_global_legacy_analytics
+
+    await require_global_legacy_analytics(user)
     permissions = calculate_user_permissions(user, memberships)
     colleges = permissions.get("colleges")
     return role, (

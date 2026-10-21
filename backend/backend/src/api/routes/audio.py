@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import fastapi
+from src.services.interview_course_access import require_interview_course_access
 from fastapi import File, Form, UploadFile
 
 from src.api.dependencies.auth import get_current_user
@@ -48,7 +49,7 @@ async def _require_active_interview(
     lease_token: str | None = None,
     user_id: int | None = None,
     lock: bool = False,
-) -> None:
+) -> object | None:
     if lock and user_id is not None and hasattr(interview_repo, "lock_by_id_and_user"):
         parent_interview = await interview_repo.lock_by_id_and_user(
             interview_id=question_attempt.interview_id, user_id=user_id
@@ -74,6 +75,10 @@ async def _require_active_interview(
             status_code=fastapi.status.HTTP_409_CONFLICT,
             detail="This interview is paused or has ended and cannot accept answers.",
         )
+    if parent_interview is not None:
+        await require_interview_course_access(getattr(interview_repo, "async_session", None), parent_interview)
+        from src.services.fixed_interview_lifecycle import require_answer_window
+        require_answer_window(parent_interview, attempt=question_attempt)
     if (
         parent_interview is not None
         and getattr(parent_interview, "interview_mode", None) == "practice"
@@ -95,6 +100,7 @@ async def _require_active_interview(
                     "message": "Reconnect before saving this answer.",
                 },
             )
+    return parent_interview
 
 
 @router.post(
@@ -174,7 +180,7 @@ async def transcribe_audio_answer(
     # question attempt that was already created before it ended - otherwise a
     # proctoring termination only locks the student out of *starting* new
     # questions, not from finishing the one they were on when they left.
-    await _require_active_interview(
+    parent_interview = await _require_active_interview(
         question_attempt,
         interview_repo,
         lease_token=session_lease_token,
@@ -214,6 +220,17 @@ async def transcribe_audio_answer(
         and question_attempt.audio_url
         and question_attempt.answer_kind == "audio"
     )
+    from src.services.interview_question_plan import planned_count
+
+    fixed_plan = (
+        parent_interview is not None and planned_count(parent_interview) is not None
+    )
+    immutable = fixed_plan and parent_interview.interview_mode == "assessment"
+    if immutable and question_attempt.answer_saved_at is not None and not same_answer:
+        raise fastapi.HTTPException(
+            409,
+            "This assessment answer is already committed. Continue with the saved answer.",
+        )
     if same_answer:
         stored_attempt = question_attempt
         audio_url = str(question_attempt.audio_url)
@@ -250,7 +267,20 @@ async def transcribe_audio_answer(
                 question_attempt_id=question_attempt_id_int,
                 audio_url=audio_url,
                 checksum=checksum,
+                **(
+                    {"immutable": immutable, "follow_up_expected": False}
+                    if fixed_plan
+                    else {}
+                ),
             )
+        except ValueError as exc:
+            await question_repo.async_session.rollback()
+            if str(exc) == "ASSESSMENT_ANSWER_COMMITTED":
+                raise fastapi.HTTPException(
+                    409,
+                    "This assessment answer is already committed. Reload the saved checkpoint.",
+                ) from exc
+            saved_attempt = None
         except Exception:
             await question_repo.async_session.rollback()
             saved_attempt = None
@@ -296,24 +326,26 @@ async def transcribe_audio_answer(
             transcription_status="transcribed",
         )
 
-    # A failed job is explicitly retried by resubmitting the same answer. A
-    # pending answer is also safe to re-enqueue: the worker claims it with a
-    # compare-and-set transition, so duplicate browser requests cannot trigger
-    # duplicate model calls.
-    should_enqueue = not same_answer or current_status in {
-        TranscriptionStatus.PENDING.value,
-        TranscriptionStatus.FAILED.value,
-    }
+    # A same-audio retry must reserve the observed failure, not reset a worker
+    # which may already have started since the browser's ownership read.
+    should_enqueue = (
+        not same_answer or current_status == TranscriptionStatus.PENDING.value
+    )
     if current_status == TranscriptionStatus.FAILED.value:
-        reset_attempt = await question_repo.mark_transcription_pending(
+        reset_attempt = await question_repo.reserve_transcription_retry(
             question_attempt_id=question_attempt_id_int,
+            user_id=current_user.id,
             checksum=checksum,
+            answer_version=stored_attempt.answer_version,
+            expected_status=stored_attempt.transcription_status,
+            expected_updated_at=stored_attempt.transcription_updated_at,
         )
+        should_enqueue = reset_attempt is not None
         if reset_attempt is not None:
             stored_attempt = reset_attempt
-            current_status = TranscriptionStatus.PENDING.value
 
     if should_enqueue:
+        reserved_at = stored_attempt.transcription_updated_at
         job_id = await enqueue_job(
             "process_answer_transcription_task",
             question_attempt_id=question_attempt_id_int,
@@ -323,9 +355,10 @@ async def transcribe_audio_answer(
         )
         if not job_id:
             try:
-                failed_attempt = await question_repo.mark_transcription_failed(
+                await question_repo.fail_transcription_retry_reservation(
                     question_attempt_id=question_attempt_id_int,
                     checksum=checksum,
+                    reserved_at=reserved_at,
                     error=(
                         "Your answer is saved, but speech feedback could not be started. "
                         "Select Retry speech feedback."
@@ -333,18 +366,31 @@ async def transcribe_audio_answer(
                 )
             except Exception:
                 await question_repo.async_session.rollback()
-                failed_attempt = None
-            if failed_attempt is not None:
-                stored_attempt = failed_attempt
-            current_status = TranscriptionStatus.FAILED.value
-        else:
-            current_status = TranscriptionStatus.PENDING.value
+
+    # Queue submission may race a worker or a replacement answer. Report the
+    # current durable state rather than guessing pending/failed from enqueue.
+    stored_attempt = await question_repo.get_by_id_and_user(
+        question_attempt_id=question_attempt_id_int, user_id=current_user.id
+    )
+    if stored_attempt is None:
+        raise fastapi.HTTPException(404, "Saved answer is no longer available.")
+    if stored_attempt.answer_checksum != checksum:
+        raise fastapi.HTTPException(
+            409, "A newer recording is already saved. Reload the saved checkpoint."
+        )
+    current_status = (
+        stored_attempt.transcription_status or TranscriptionStatus.PENDING.value
+    )
 
     final_saved = stored_attempt is not None and bool(stored_attempt.audio_url)
     message = (
-        "Answer saved. Speech feedback is being prepared."
-        if current_status != TranscriptionStatus.FAILED.value
-        else "Answer saved. Speech feedback could not be started; you can retry it."
+        "Answer saved. Speech feedback is ready."
+        if current_status == "transcribed"
+        else (
+            "Answer saved. Speech feedback is being prepared."
+            if current_status != TranscriptionStatus.FAILED.value
+            else "Answer saved. Speech feedback could not be started; you can retry it."
+        )
     )
     logger.info(
         "Audio answer accepted | QuestionAttempt=%s | TotalTime=%.2fs | Saved=%s | Status=%s",
@@ -435,7 +481,7 @@ async def get_transcription_status(
         )
 
     status = attempt.transcription_status or TranscriptionStatus.PENDING.value
-    transcription = attempt.transcription
+    transcription = attempt.transcription if isinstance(attempt.transcription, dict) else None
     evidence = (
         transcription.get("evidence")
         if isinstance(transcription, dict) and isinstance(transcription.get("evidence"), dict)
@@ -527,61 +573,59 @@ async def retry_transcription(
             ),
         )
 
-    # Do not duplicate an active model call. A processing row becomes eligible
-    # for recovery only after the worker's five-minute timeout window, covering
-    # a killed worker without charging for two simultaneous transcriptions.
-    processing_updated_at = attempt.transcription_updated_at
-    if (
-        attempt.transcription_status == TranscriptionStatus.PROCESSING.value
-        and processing_updated_at is not None
-        and datetime.datetime.now(datetime.timezone.utc) - processing_updated_at
-        < datetime.timedelta(minutes=5)
-    ):
+    # Reserve the exact observed answer/state atomically. Fresh pending work is
+    # not re-enqueued, and stale reads cannot reset a newer worker claim.
+    checksum = attempt.answer_checksum
+    pending = await question_repo.reserve_transcription_retry(
+        question_attempt_id=attempt.id,
+        user_id=current_user.id,
+        checksum=checksum,
+        answer_version=attempt.answer_version or 0,
+        expected_status=attempt.transcription_status,
+        expected_updated_at=attempt.transcription_updated_at,
+    )
+    if pending is None:
         return await get_transcription_status(
             question_attempt_id=question_attempt_id,
             current_user=current_user,
             question_repo=question_repo,
         )
-
-    pending = await question_repo.mark_transcription_pending(
-        question_attempt_id=attempt.id,
-        checksum=attempt.answer_checksum,
+    reserved_at = pending.transcription_updated_at
+    transcription = (
+        pending.transcription if isinstance(pending.transcription, dict) else {}
     )
-    if pending is None:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_409_CONFLICT,
-            detail="This answer changed while speech feedback was being retried.",
-        )
+    language = transcription.get("language", "en")
+    if language not in {"en", "hi"}:
+        language = "en"
     job_id = await enqueue_job(
         "process_answer_transcription_task",
-        question_attempt_id=attempt.id,
-        checksum=attempt.answer_checksum,
-        language=(attempt.transcription or {}).get("language", "en"),
-        filename=f"answer-{attempt.id}{Path(attempt.audio_url).suffix or '.wav'}",
+        question_attempt_id=pending.id,
+        checksum=checksum,
+        language=language,
+        filename=f"answer-{pending.id}{Path(pending.audio_url).suffix or '.wav'}",
     )
     if not job_id:
-        await question_repo.mark_transcription_failed(
-            question_attempt_id=attempt.id,
-            checksum=attempt.answer_checksum,
-            error=(
-                "Your answer is saved, but speech feedback could not be started. "
-                "Select Retry speech feedback."
-            ),
+        failed = await question_repo.fail_transcription_retry_reservation(
+            question_attempt_id=pending.id,
+            checksum=checksum,
+            reserved_at=reserved_at,
+            error="Your answer is saved, but speech feedback could not be started. Select Retry speech feedback.",
         )
+        if failed is None:
+            # A worker/new answer won while queue submission was in flight.
+            return await get_transcription_status(
+                question_attempt_id=question_attempt_id,
+                current_user=current_user,
+                question_repo=question_repo,
+            )
         raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            status_code=503,
             detail="Your answer is saved, but speech feedback could not be started. Try again.",
             headers={"Retry-After": "3"},
         )
-    return TranscriptionStatusResponse(
-        question_attempt_id=pending.id,
-        status=TranscriptionStatus.PENDING.value,
-        is_terminal=False,
-        saved=True,
-        answer_version=max(0, pending.answer_version or 0),
-        updated_at=(
-            pending.transcription_updated_at.isoformat()
-            if pending.transcription_updated_at
-            else None
-        ),
+    # A worker can already have progressed beyond pending; report current state.
+    return await get_transcription_status(
+        question_attempt_id=question_attempt_id,
+        current_user=current_user,
+        question_repo=question_repo,
     )

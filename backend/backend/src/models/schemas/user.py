@@ -84,6 +84,7 @@ class UserWithToken(BaseSchemaModel):
     can_create_roles: bool = False
     can_access_ats: bool = False
     team_name: str | None = None
+    membership_roles: list[str] = pydantic.Field(default_factory=list)
     can_edit: bool = False
     is_view_only: bool = False
     # company removed from response

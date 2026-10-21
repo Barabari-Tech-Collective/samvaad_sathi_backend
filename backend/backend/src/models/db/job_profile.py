@@ -49,6 +49,18 @@ class JobProfile(Base):
     interview_mode: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=16), nullable=False, server_default="assessment", index=True
     )
+    # Null identifies a legacy template. New authoring explicitly sets a count.
+    questions_per_interview: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.Integer, nullable=True
+    )
+    authoring_mode: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(16), nullable=True)
+    content_revision: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(sqlalchemy.Integer, nullable=False, default=0, server_default="0")
+    published_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True), nullable=True)
+    publication_snapshot: SQLAlchemyMapped[dict | None] = sqlalchemy_mapped_column(JSONB, nullable=True)
+    parent_profile_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(sqlalchemy.ForeignKey("job_profile.id"), nullable=True)
+    generation_token: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(64), nullable=True)
+    generation_result_count: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(sqlalchemy.Integer, nullable=True)
+    generation_state: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(32), nullable=True)
     admin_comment: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
     submitted_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True), nullable=True)
     

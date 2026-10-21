@@ -8,25 +8,21 @@ import boto3
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from botocore.exceptions import ClientError
+from src.services.aws_storage_config import load_storage_configuration
 
 logger = logging.getLogger(__name__)
 
-# Initialize boto3 client lazily or handle missing creds gracefully
+# Explicit bucket selection prevents an incomplete new-account deployment
+# from silently reading/writing the old staging bucket.
 try:
-    # Explicitly pass credentials from .env via config()
-    s3_client = boto3.client(
-        "s3",
-        aws_access_key_id=config("AWS_ACCESS_KEY_ID", default=None),
-        aws_secret_access_key=config("AWS_SECRET_ACCESS_KEY", default=None),
-        region_name=config("AWS_REGION", default="ap-south-1"),
-    )
-    BUCKET_NAME = config(
-        "AWS_S3_BUCKET_NAME", default="barabari-edtech-service-staging"
-    )
+    STORAGE_CONFIGURATION = load_storage_configuration()
+    s3_client = boto3.client("s3", **STORAGE_CONFIGURATION.client_options)
+    BUCKET_NAME = STORAGE_CONFIGURATION.bucket
 except Exception as e:
-    logger.warning(f"Could not initialize S3 client: {e}")
+    logger.warning("S3 is unavailable; check explicit storage configuration (%s).", type(e).__name__)
     s3_client = None
     BUCKET_NAME = None
+    STORAGE_CONFIGURATION = None
 
 
 def tts_audio_s3_key(question_id: int) -> str:
@@ -46,6 +42,13 @@ def tts_audio_s3_key(question_id: int) -> str:
 
     voice_tag = hashlib.md5(settings.ELEVENLABS_VOICE_ID.encode()).hexdigest()[:8]
     return f"Samvaad-Saathi/tts-audio/question_{question_id}_{voice_tag}.mp3"
+
+
+def tts_audio_public_url(question_id: int) -> str | None:
+    """Only synthesized question audio uses this origin; personal files do not."""
+    if STORAGE_CONFIGURATION is None:
+        return None
+    return f"{STORAGE_CONFIGURATION.public_base_url}/{tts_audio_s3_key(question_id)}"
 
 
 def upload_audio_to_s3(audio_bytes: bytes, question_id: int) -> Optional[str]:
@@ -75,9 +78,7 @@ def upload_audio_to_s3(audio_bytes: bytes, question_id: int) -> Optional[str]:
             ContentType="audio/mpeg",
         )
 
-        region = config("AWS_REGION", default="ap-south-1")
-        # Construct the public URL
-        public_url = f"https://{BUCKET_NAME}.s3.{region}.amazonaws.com/{s3_file_path}"
+        public_url = tts_audio_public_url(question_id)
         logger.info(f"Successfully uploaded TTS audio to S3: {public_url}")
 
         return public_url

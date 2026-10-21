@@ -3,6 +3,8 @@ import json
 import logging
 
 import fastapi
+from src.services.interview_course_access import require_interview_course_access
+from src.services.interview_question_plan import planned_count, snapshotted_questions
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -119,6 +121,7 @@ async def complete_practice_drill(
         payload=payload,
     )
     return CompletePracticeDrillResponse(
+        assignment_id=payload.assignment_id,
         completion_id=completion.id,
         created=created,
         completed_at=completion.completed_at,
@@ -170,7 +173,10 @@ def _require_session_lease(interview, lease_token: str | None) -> None:
 async def _lock_owned_interview(interview_repo, *, interview_id: int, user_id: int):
     lock = getattr(interview_repo, "lock_by_id_and_user", None)
     if callable(lock):
-        return await lock(interview_id=interview_id, user_id=user_id)
+        interview = await lock(interview_id=interview_id, user_id=user_id)
+        if interview is not None:
+            await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
+        return interview
     get_owned = getattr(interview_repo, "get_by_id_and_user", None)
     if callable(get_owned):
         return await get_owned(interview_id, user_id)
@@ -292,9 +298,36 @@ async def create_or_resume_interview(
         get_repository(repo_type=InterviewCRUDRepository)
     ),
 ) -> InterviewInResponse:
+    if payload.course_id is not None and payload.course_id not in (
+        getattr(current_user, "enrolled_course_ids", None) or []
+    ):
+        raise fastapi.HTTPException(
+            403, "Current enrollment in this course is required."
+        )
+    if (
+        payload.question_count is not None
+        and payload.client_contract != "fixed-round-v1"
+    ):
+        raise fastapi.HTTPException(
+            409, "Refresh to the current app before starting a fixed-length round."
+        )
+    if payload.job_profile_id is not None:
+        raise fastapi.HTTPException(
+            409, "Use the V2 interview entry point for a creator's published role."
+        )
     # Check if the user has an active session; if so, resume instead of creating a new one
     active = await interview_repo.get_resumable_by_user(user_id=current_user.id)
-    if active is not None and active.track == payload.track:
+    if (
+        active is not None
+        and active.track == payload.track
+        and getattr(active, "course_id", None) == payload.course_id
+        and active.job_profile_id is None
+        and (
+            payload.question_count is None
+            or planned_count(active) == payload.question_count
+        )
+    ):
+        await require_interview_course_access(getattr(interview_repo, "async_session", None), active)
         return InterviewInResponse(
             interview_id=active.id,
             track=active.track,
@@ -303,6 +336,7 @@ async def create_or_resume_interview(
             created_at=active.created_at,
             resumed=True,
             interview_mode=active.interview_mode,
+            planned_question_count=planned_count(active),
             paused_at=getattr(active, "paused_at", None),
             expires_at=getattr(active, "expires_at", None),
         )
@@ -313,7 +347,11 @@ async def create_or_resume_interview(
     if difficulty not in ("easy", "medium", "hard", "expert"):
         difficulty = "medium"
     interview = await interview_repo.create_interview(
-        user_id=current_user.id, track=payload.track, difficulty=difficulty
+        user_id=current_user.id,
+        track=payload.track,
+        difficulty=difficulty,
+        course_id=payload.course_id,
+        question_count=payload.question_count,
     )
     await track_analytics_event(
         interview_repo.async_session,
@@ -341,6 +379,7 @@ async def create_or_resume_interview(
         created_at=interview.created_at,
         resumed=False,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
         paused_at=getattr(interview, "paused_at", None),
         expires_at=getattr(interview, "expires_at", None),
     )
@@ -587,6 +626,8 @@ async def generate_questions(
                 detail="No active interview to generate questions for",
             )
 
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
+
     # This endpoint has no job-profile awareness: it goes straight to the
     # syllabus and the LLM. Serving a curated interview from here would assess a
     # student against a facilitator's role on questions the facilitator never
@@ -671,7 +712,9 @@ async def generate_questions(
 
         # For easy difficulty, use static pre-defined questions instead of LLM generation
         if interview.difficulty == "easy":
-            static_items = get_static_questions(role=role, count=5, ratio=ratio)
+            static_items = get_static_questions(
+                role=role, count=planned_count(interview) or 5, ratio=ratio
+            )
             questions = [item["text"] for item in static_items]
             llm_error = None
             latency_ms = 0
@@ -683,7 +726,7 @@ async def generate_questions(
                 await generate_interview_questions_with_llm(
                     track=interview.track,
                     context_text=resume_context,
-                    count=5,
+                    count=planned_count(interview) or 5,
                     difficulty=interview.difficulty,
                     syllabus_topics=topics,
                     ratio=ratio,
@@ -756,6 +799,7 @@ async def generate_questions(
         llm_latency_ms=qs.get("latency_ms"),  # type: ignore[union-attr]
         llm_error=qs.get("llm_error"),  # type: ignore[union-attr]
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
     logger.info(
         "POST /interviews/generate-questions FULL RESPONSE PAYLOAD | Interview=%s | Cached=%s | Response=\n%s",
@@ -800,7 +844,7 @@ async def advance_interview_navigation(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
             detail="Interview not found",
         )
-    if interview.interview_mode != "practice":
+    if interview.interview_mode != "practice" and planned_count(interview) is None:
         raise _navigation_error(
             "PRACTICE_NAVIGATION_REQUIRED",
             "This navigation contract is available only for Practice interviews.",
@@ -865,6 +909,7 @@ async def advance_interview_navigation(
         question_repo=question_repo,
     )
     return AdvanceInterviewResponse(
+        planned_question_count=planned_count(interview),
         interview_id=interview.id,
         status=interview.status,
         state_version=result.state_version,
@@ -875,6 +920,48 @@ async def advance_interview_navigation(
         duplicate=result.duplicate,
         questions=question_items,
     )
+
+
+@router.post("/interviews/begin")
+async def begin_fixed_interview(
+    payload: ResumeInterviewRequest,
+    current_user=fastapi.Depends(get_current_user),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
+    question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewQuestionCRUDRepository)
+    ),
+):
+    from src.services.fixed_interview_lifecycle import begin
+
+    interview = await _lock_owned_interview(
+        interview_repo, interview_id=payload.interview_id, user_id=current_user.id
+    )
+    if interview is None:
+        raise fastapi.HTTPException(404, "Interview not found")
+    questions = await question_repo.list_by_interview(interview_id=interview.id)
+    result = begin(interview, questions)
+    await interview_repo.async_session.commit()
+    return result
+
+
+@router.get("/interviews/{interview_id}/receipt")
+async def get_submission_receipt(
+    interview_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
+):
+    interview = await interview_repo.get_by_id(interview_id=interview_id)
+    if interview is None or interview.user_id != current_user.id:
+        raise fastapi.HTTPException(404, "Interview not found")
+    return {
+        "receipt": getattr(interview, "submission_receipt", None),
+        "status": interview.status,
+        "interviewMode": interview.interview_mode,
+    }
 
 
 @router.post(
@@ -903,6 +990,7 @@ async def complete_interview(
             "id": interview.id,
             "status": interview.status,
             "message": "Interview already completed",
+            "receipt": getattr(interview, "submission_receipt", None),
         }
     _require_session_lease(interview, payload.session_lease_token)
     if interview.status == "expired" or (
@@ -918,8 +1006,31 @@ async def complete_interview(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
             detail="Only active interviews can be completed",
         )
+    deadline = getattr(interview, "answer_deadline_at", None)
+    from src.services.fixed_interview_lifecycle import utcnow
+
+    deadline_passed = deadline is not None and utcnow() > deadline
+    if planned_count(interview) is not None:
+        from src.services.fixed_interview_lifecycle import receipt
+        from src.repository.crud.interview_question import (
+            InterviewQuestionCRUDRepository,
+        )
+        from src.repository.crud.question import QuestionAttemptCRUDRepository
+
+        session = interview_repo.async_session
+        questions = await InterviewQuestionCRUDRepository(session).list_by_interview(
+            interview_id=interview.id
+        )
+        attempts = await QuestionAttemptCRUDRepository(session).list_by_interview(
+            interview_id=interview.id
+        )
+        interview.submission_receipt = receipt(interview, questions, attempts)
     if (
-        interview.interview_mode == "practice"
+        not deadline_passed
+        and (
+            interview.interview_mode == "practice"
+            or planned_count(interview) is not None
+        )
         and int(getattr(interview, "question_set_version", 0) or 0) > 0
         and getattr(interview, "current_question_id", None) is not None
     ):
@@ -945,6 +1056,7 @@ async def complete_interview(
     return {
         "id": updated.id if updated else None,
         "status": updated.status if updated else None,
+        "receipt": getattr(updated, "submission_receipt", None) if updated else None,
         "message": (
             "Interview marked as completed" if updated else "No update performed"
         ),
@@ -956,14 +1068,8 @@ async def complete_interview(
     name="interviews:report-proctoring-violation",
     response_model=ProctoringViolationResponse,
     status_code=fastapi.status.HTTP_200_OK,
-    summary="End an assessment interview early due to a proctoring violation",
-    description=(
-        "Ends the specified interview immediately because the student left the "
-        "tab/window or exited fullscreen during a proctored assessment. Only "
-        "valid for an interview_mode='assessment' interview - mode is read from "
-        "the interview's own stored snapshot, not trusted from the client, so a "
-        "client that fakes this call for a practice interview has no effect."
-    ),
+    summary="Record an assessment browser signal without ending the interview",
+    description="Tab/fullscreen events are review evidence, never an automatic cheating verdict. Practice is excluded.",
 )
 async def report_proctoring_violation(
     payload: ReportProctoringViolationRequest,
@@ -972,64 +1078,52 @@ async def report_proctoring_violation(
         get_repository(repo_type=InterviewCRUDRepository)
     ),
 ):
-    interview = await interview_repo.get_by_id(interview_id=payload.interview_id)
-    if interview is None or interview.user_id != current_user.id:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
-        )
+    import uuid
 
-    if interview.interview_mode != "assessment":
-        # Practice is deliberately low-stakes - leaving the tab must never end
-        # one. A client that sends this for a practice interview either has a
-        # bug or is lying about the mode; either way, nothing happens.
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_409_CONFLICT,
-            detail="Proctoring does not apply to a practice interview.",
-        )
-
-    if interview.status in ("terminated", "completed"):
-        # Idempotent: a retried request (flaky network, duplicate event) must
-        # not error, and must not downgrade an interview that finished
-        # normally into a terminated one.
-        return ProctoringViolationResponse(
-            interview_id=interview.id,
-            status=interview.status,
-            proctoring_terminated=interview.proctoring_terminated,
-            proctoring_violation_reason=interview.proctoring_violation_reason,
-        )
-
-    if interview.status != "active":
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-            detail="Only an active interview can be ended for a proctoring violation.",
-        )
-
-    updated = await interview_repo.mark_terminated_for_proctoring(
-        interview_id=interview.id, reason=payload.reason
-    )
-    if updated is None:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
-        )
-
-    await track_analytics_event(
-        interview_repo.async_session,
-        event_type="interview_proctoring_terminated",
+    event_id = payload.event_id or str(uuid.uuid4())
+    updated = await interview_repo.record_integrity_event(
+        interview_id=payload.interview_id,
         user_id=current_user.id,
-        interview_id=updated.id,
-        event_data={
-            "track": updated.track,
-            "difficulty": updated.difficulty,
-            "reason": payload.reason,
-            "api": "interviews.report_proctoring_violation",
-        },
+        reason=payload.reason,
+        event_id=event_id,
     )
-
     return ProctoringViolationResponse(
         interview_id=updated.id,
         status=updated.status,
         proctoring_terminated=updated.proctoring_terminated,
         proctoring_violation_reason=updated.proctoring_violation_reason,
+        event_count=len(updated.integrity_events or []),
+        action=(
+            "ignored_terminal"
+            if updated.status != "active"
+            else (
+                "recorded_for_review"
+                if any(e["eventId"] == event_id for e in updated.integrity_events or [])
+                else "journal_full"
+            )
+        ),
+    )
+
+
+def history_percentages(reports):
+    """Malformed historical scores must not hide an otherwise readable sitting."""
+    payload = getattr(reports[0], "report_json", None) if reports else None
+    if not isinstance(payload, dict):
+        return None, None
+    modern = payload.get("scoreSummary")
+    legacy = payload.get("metrics")
+
+    def read(container, key, field):
+        dimension = container.get(key) if isinstance(container, dict) else None
+        value = dimension.get(field) if isinstance(dimension, dict) else None
+        return value if type(value) in (int, float) and 0 <= value <= 100 else None
+
+    if isinstance(modern, dict):
+        return read(modern, "knowledgeCompetence", "percentage"), read(
+            modern, "speechAndStructure", "percentage"
+        )
+    return read(legacy, "knowledgeCompetence", "averagePct"), read(
+        legacy, "speechStructure", "averagePct"
     )
 
 
@@ -1059,41 +1153,23 @@ async def list_my_interviews(
 
     items = []
     for interview, summary_reports, resume_used in rows:
-        # Count attempts (summary reports)
         attempts_count = len(summary_reports)
-
-        # Extract percentages from the latest report (first in the list since it's ordered by created_at desc)
-        knowledge_percentage = None
-        speech_fluency_percentage = None
-
-        if summary_reports:
-            latest_report = summary_reports[0]
-            if latest_report.report_json:
-                # Try new format first (scoreSummary)
-                if "scoreSummary" in latest_report.report_json:
-                    score_summary = latest_report.report_json["scoreSummary"]
-                    knowledge_percentage = score_summary.get(
-                        "knowledgeCompetence", {}
-                    ).get("percentage")
-                    speech_fluency_percentage = score_summary.get(
-                        "speechAndStructure", {}
-                    ).get("percentage")
-                # Fall back to old format (metrics)
-                elif "metrics" in latest_report.report_json:
-                    metrics = latest_report.report_json.get("metrics", {})
-                    knowledge_competence = metrics.get("knowledgeCompetence", {})
-                    speech_structure_fluency = metrics.get("speechStructure", {})
-
-                    knowledge_percentage = knowledge_competence.get("averagePct")
-                    speech_fluency_percentage = speech_structure_fluency.get(
-                        "averagePct"
-                    )
+        knowledge_percentage, speech_fluency_percentage = history_percentages(
+            summary_reports
+        )
 
         item = InterviewItem(
             interview_id=interview.id,
             track=interview.track,
             difficulty=interview.difficulty,
             status=interview.status,
+            interview_mode=(
+                interview.interview_mode
+                if interview.interview_mode in {"practice", "assessment"}
+                else None
+            ),
+            expires_at=interview.expires_at,
+            summary_report_available=bool(summary_reports),
             created_at=interview.created_at,
             knowledge_percentage=knowledge_percentage,
             speech_fluency_percentage=speech_fluency_percentage,
@@ -1140,6 +1216,8 @@ async def list_interview_questions(
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
         )
+
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
 
     safe_limit = max(1, min(100, int(limit)))
     items, next_cursor = await question_repo.list_by_interview_cursor(
@@ -1315,8 +1393,14 @@ async def create_question_attempt(
             detail="This interview has ended and can no longer accept answers.",
         )
     _require_session_lease(locked_interview, payload.session_lease_token)
+    from src.services.fixed_interview_lifecycle import require_answer_window
+
+    require_answer_window(locked_interview)
     if (
-        getattr(locked_interview, "interview_mode", None) == "practice"
+        (
+            getattr(locked_interview, "interview_mode", None) == "practice"
+            or planned_count(locked_interview) is not None
+        )
         and int(getattr(locked_interview, "question_set_version", 0) or 0) > 0
         and locked_interview.current_question_id != question_id
     ):
@@ -1635,6 +1719,8 @@ async def resume_interview(
     )
 
     return ResumeInterviewResponse(
+        answer_deadline_at=getattr(interview, "answer_deadline_at", None),
+        started_at=getattr(interview, "started_at", None),
         interview_id=interview.id,
         track=interview.track,
         difficulty=interview.difficulty,
@@ -1653,6 +1739,7 @@ async def resume_interview(
         paused_at=getattr(interview, "paused_at", None),
         expires_at=getattr(interview, "expires_at", None),
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
 

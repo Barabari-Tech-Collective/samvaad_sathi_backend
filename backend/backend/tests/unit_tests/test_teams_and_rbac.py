@@ -19,6 +19,7 @@ import pytest
 from src.api.dependencies.admin import (
     check_team_permission,
     get_current_super_admin_user,
+    get_current_creator_user,
     is_admin_user,
     is_super_admin_user,
     is_team_authorized_user,
@@ -321,12 +322,12 @@ def test_team_member_create_requires_role_name_and_email():
     )
     assert member.name == "Alice Smith"
     assert member.email == "alice@college.edu"
-    assert member.access_role == "Facilitator"
+    assert member.access_role == "facilitator"
 
 
 def test_team_member_update_allows_partial_fields():
     update = TeamMemberUpdate(access_role="Lead")
-    assert update.access_role == "Lead"
+    assert update.access_role == "lead"
     assert update.name is None
     assert not hasattr(update, "email")
     assert update.password is None
@@ -1073,14 +1074,13 @@ def test_is_admin_user_from_token_role():
 
 
 @pytest.mark.asyncio
-async def test_get_current_creator_user_allows_creator_token_role():
-    from src.api.dependencies.admin import get_current_creator_user
-
-    user = _make_user(32, email="sso_creator@corp.org", is_admin=False)
+async def test_get_current_creator_user_rejects_creator_token_without_product_membership():
+    user = _make_user(7)
     setattr(user, "_token_role", "CREATOR")
-    session = AsyncMock()
-    result = await get_current_creator_user(current_user=user, session=session)
-    assert result is user
+    with patch("src.api.dependencies.admin.get_user_active_memberships", AsyncMock(return_value=[])):
+        with pytest.raises(fastapi.HTTPException) as error:
+            await get_current_creator_user(current_user=user, session=AsyncMock())
+    assert error.value.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -1093,7 +1093,7 @@ async def test_get_current_creator_user_denies_jr_facilitator_token_role():
     with pytest.raises(fastapi.HTTPException) as exc_info:
         await get_current_creator_user(current_user=user, session=session)
     assert exc_info.value.status_code == 403
-    assert "Junior Facilitators do not have permission" in exc_info.value.detail
+    assert "Creator Portal access required" in exc_info.value.detail
 
 
 @pytest.mark.asyncio
@@ -2071,7 +2071,7 @@ async def test_add_team_member_as_junior_facilitator_with_valid_colleges_succeed
         colleges=["  BITS Pilani  ", "IIT Delhi"],
     )
     res = await repo.add_team_member(team_id=1, member_data=member_data)
-    assert res["access_role"] == "Junior Facilitator"
+    assert res["access_role"] == "junior facilitator"
     assert res["colleges"] == ["BITS Pilani", "IIT Delhi"]
 
 
@@ -2226,6 +2226,6 @@ async def test_login_user_handles_senior_facilitator_with_row_memberships():
         )
 
         call_claims = mock_jwt.call_args[1].get("extra_claims", {})
-        assert call_claims.get("role") == "SENIOR FACILITATOR"
+        assert call_claims.get("role") == "STAFF"
         assert resp.authorized_user.access_role == "Senior Facilitator"
         assert resp.authorized_user.team_name == "Program Team"

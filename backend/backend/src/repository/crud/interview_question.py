@@ -76,6 +76,9 @@ class InterviewQuestionCRUDRepository(BaseCRUDRepository):
                 "The interview question snapshot is already frozen."
             )
 
+        from src.services.interview_question_plan import validate_initial_questions
+        questions_data = validate_initial_questions(interview, questions_data)
+
         created: list[InterviewQuestion] = []
         for i, q_data in enumerate(questions_data):
             question = InterviewQuestion(
@@ -295,6 +298,14 @@ class InterviewQuestionCRUDRepository(BaseCRUDRepository):
         strategy: str | None = None,
     ) -> InterviewQuestion:
         """Persist a follow-up question linked to a parent question."""
+        from src.services.interview_question_plan import planned_count
+        interview = (await self.async_session.execute(
+            sqlalchemy.select(Interview).where(Interview.id == interview_id).with_for_update()
+        )).scalar_one_or_none()
+        if interview is None:
+            raise ValueError("Interview not found")
+        if planned_count(interview) is not None:
+            raise ValueError("This fixed-length plan has no additional adaptive slots")
         order_stmt = sqlalchemy.select(
             sqlalchemy.func.max(InterviewQuestion.order)
         ).where(InterviewQuestion.interview_id == interview_id)

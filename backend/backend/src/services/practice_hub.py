@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Literal
 
 import sqlalchemy
+import fastapi
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.db.interview import Interview
@@ -263,32 +264,109 @@ async def build_practice_hub(
         .where(
             Interview.user_id == user_id,
             Interview.interview_mode == "practice",
-            Interview.status.in_(("active", "paused")),
+            Interview.status.in_(("active", "paused", "preparing")),
             sqlalchemy.or_(
                 Interview.expires_at.is_(None), Interview.expires_at > current_time
             ),
         )
-        .order_by(Interview.created_at.desc())
+        .order_by(Interview.created_at.desc(), Interview.id.desc())
         .limit(1)
+        .execution_options(populate_existing=True)
     )
     resumable = (await session.execute(resume_stmt)).scalar_one_or_none()
     resume_card: PracticeHubResumeCard | None = None
     if resumable is not None:
-        question_count_stmt = sqlalchemy.select(
-            sqlalchemy.func.count(InterviewQuestion.id)
-        ).where(InterviewQuestion.interview_id == resumable.id)
-        answered_count_stmt = sqlalchemy.select(
-            sqlalchemy.func.count(QuestionAttempt.id)
-        ).where(
-            QuestionAttempt.interview_id == resumable.id,
+        from src.services.interview_course_access import require_interview_course_access
+        from src.services.interview_question_plan import planned_count
+
+        # One statement gives a coherent count of persisted questions and their
+        # latest attempts. Detached or foreign-question attempts never join.
+        latest = (
+            sqlalchemy.select(
+                QuestionAttempt.question_id,
+                sqlalchemy.func.max(QuestionAttempt.id).label("attempt_id"),
+            )
+            .where(
+                QuestionAttempt.interview_id == resumable.id,
+                QuestionAttempt.question_id.is_not(None),
+            )
+            .group_by(QuestionAttempt.question_id)
+            .subquery()
+        )
+        durable = sqlalchemy.or_(
             QuestionAttempt.answer_saved_at.is_not(None),
+            sqlalchemy.and_(
+                QuestionAttempt.audio_url.is_not(None), QuestionAttempt.audio_url != ""
+            ),
+            sqlalchemy.and_(
+                QuestionAttempt.transcription.is_not(None),
+                QuestionAttempt.transcription != sqlalchemy.JSON.NULL,
+            ),
         )
-        total_questions = int(
-            (await session.execute(question_count_stmt)).scalar() or 0
-        )
-        answered_questions = int(
-            (await session.execute(answered_count_stmt)).scalar() or 0
-        )
+        counts = (
+            await session.execute(
+                sqlalchemy.select(
+                    sqlalchemy.func.count(InterviewQuestion.id),
+                    sqlalchemy.func.count(QuestionAttempt.id).filter(durable),
+                )
+                .select_from(InterviewQuestion)
+                .outerjoin(latest, latest.c.question_id == InterviewQuestion.id)
+                .outerjoin(QuestionAttempt, QuestionAttempt.id == latest.c.attempt_id)
+                .where(InterviewQuestion.interview_id == resumable.id)
+            )
+        ).one()
+        persisted_count, saved_count = map(int, counts)
+        total_questions = persisted_count
+        answered_questions = saved_count
+        readiness = "ready"
+        try:
+            if resumable.question_plan is not None and not isinstance(
+                resumable.question_plan, dict
+            ):
+                raise ValueError("Malformed plan")
+            declared_count = planned_count(resumable)
+            if declared_count is not None:
+                total_questions = declared_count
+                if persisted_count > declared_count:
+                    raise ValueError("Question snapshot exceeds the fixed plan")
+                if persisted_count < declared_count:
+                    readiness = "preparing"
+            if persisted_count == 0:
+                retained = (
+                    await session.execute(
+                        sqlalchemy.select(QuestionAttempt.id)
+                        .where(
+                            QuestionAttempt.interview_id == resumable.id,
+                            durable,
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if retained is not None:
+                    raise ValueError(
+                        "Retained evidence has no recoverable question snapshot"
+                    )
+            if persisted_count == 0 or resumable.status == "preparing":
+                readiness = "preparing"
+        except ValueError:
+            # No invented N or zero progress for a malformed/overfilled plan.
+            total_questions = answered_questions = None
+            readiness = "plan_unavailable"
+        try:
+            await require_interview_course_access(session, resumable)
+        except fastapi.HTTPException as error:
+            code = error.detail.get("code") if isinstance(error.detail, dict) else None
+            if error.status_code == 403 and code in {
+                "COURSE_ACCESS_REVOKED",
+                "COURSE_ACCESS_UNVERIFIED",
+            }:
+                readiness = (
+                    "enrollment_revoked"
+                    if code == "COURSE_ACCESS_REVOKED"
+                    else "enrollment_unverified"
+                )
+            else:
+                raise
         resume_card = PracticeHubResumeCard(
             interview_id=resumable.id,
             track=resumable.track,
@@ -297,6 +375,7 @@ async def build_practice_hub(
             answered_questions=answered_questions,
             total_questions=total_questions,
             expires_at=resumable.expires_at,
+            readiness=readiness,
         )
 
     recent_stmt = (

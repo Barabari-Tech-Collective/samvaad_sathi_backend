@@ -125,7 +125,17 @@ class QuestionSupplementOut(BaseSchemaModel):
 
 
 class InterviewCreate(BaseSchemaModel):
+    client_contract: Literal["fixed-round-v1"] | None = None
+    question_count: int | None = pydantic.Field(default=None, strict=True, ge=1, le=10)
+
+    @pydantic.model_validator(mode="after")
+    def creator_controls_curated_count(self):
+        if self.job_profile_id is not None and self.question_count is not None:
+            raise ValueError("The creator controls the question count for this role")
+        return self
+
     track: str
+    course_id: str | None = pydantic.Field(default=None, min_length=1, max_length=128)
     difficulty: str | None = None  # easy | medium | hard
     job_profile_id: int | None = None
 
@@ -142,12 +152,14 @@ class GenerateQuestionsRequest(BaseSchemaModel):
 
 
 class GenerateNonTechQuestionsRequest(BaseSchemaModel):
+    client_contract: Literal["fixed-round-v1"] | None = None
     job_profile_id: int
     difficulty: str | None = None
     use_resume: bool = True
 
 
 class InterviewInResponse(BaseSchemaModel):
+    planned_question_count: int | None = None
     interview_id: int = pydantic.Field(
         description="Unique identifier for the interview"
     )
@@ -168,6 +180,7 @@ class InterviewInResponse(BaseSchemaModel):
 
 
 class GeneratedQuestionsInResponse(BaseSchemaModel):
+    planned_question_count: int | None = None
     interview_id: int
     track: str
     count: int
@@ -208,6 +221,9 @@ class InterviewItem(BaseSchemaModel):
     track: str
     difficulty: str
     status: str
+    interview_mode: Literal["practice", "assessment"] | None = None
+    expires_at: datetime.datetime | None = None
+    summary_report_available: bool = False
     created_at: datetime.datetime
     knowledge_percentage: float | None = pydantic.Field(
         default=None,
@@ -282,15 +298,22 @@ class InterviewsListWithSummaryResponse(BaseSchemaModel):
 
 
 class PracticeHubResumeCard(BaseSchemaModel):
-    """The one Practice interview a student can safely continue."""
+    """Latest retained Practice sitting, with advisory participation readiness."""
 
     interview_id: int
     track: str
     difficulty: str
-    status: Literal["active", "paused"]
-    answered_questions: int = pydantic.Field(default=0, ge=0)
-    total_questions: int = pydantic.Field(default=0, ge=0)
+    status: Literal["active", "paused", "preparing"]
+    answered_questions: int | None = pydantic.Field(default=None, ge=0)
+    total_questions: int | None = pydantic.Field(default=None, ge=0)
     expires_at: datetime.datetime | None = None
+    readiness: Literal[
+        "ready",
+        "preparing",
+        "enrollment_revoked",
+        "enrollment_unverified",
+        "plan_unavailable",
+    ] = "ready"
 
 
 class PracticeHubFocus(BaseSchemaModel):
@@ -322,6 +345,7 @@ class PracticeHubResponse(BaseSchemaModel):
 class CompletePracticeDrillRequest(BaseSchemaModel):
     """Verifiable, idempotent completion evidence from a Practice skill builder."""
 
+    assignment_id: int | None = pydantic.Field(default=None, ge=1)
     module: Literal["pronunciation", "warm_up", "think_fast"]
     level: Literal["beginner", "intermediate", "advanced"]
     client_completion_id: str = pydantic.Field(
@@ -351,6 +375,7 @@ class CompletePracticeDrillRequest(BaseSchemaModel):
 
 
 class CompletePracticeDrillResponse(BaseSchemaModel):
+    assignment_id: int | None = None
     completion_id: int
     created: bool
     completed_at: datetime.datetime
@@ -409,6 +434,7 @@ class AdvanceInterviewRequest(BaseSchemaModel):
 
 
 class AdvanceInterviewResponse(BaseSchemaModel):
+    planned_question_count: int | None = None
     interview_id: int
     status: str
     state_version: int = pydantic.Field(ge=0)
@@ -460,11 +486,14 @@ ProctoringViolationReason = Literal["tab_switch", "fullscreen_exit"]
 
 
 class ReportProctoringViolationRequest(BaseSchemaModel):
+    event_id: str | None = pydantic.Field(default=None, min_length=1, max_length=64)
     interview_id: int
     reason: ProctoringViolationReason
 
 
 class ProctoringViolationResponse(BaseSchemaModel):
+    action: str = "recorded_for_review"
+    event_count: int = 0
     interview_id: int
     status: str
     proctoring_terminated: bool
@@ -476,6 +505,9 @@ class ResumeInterviewRequest(BaseSchemaModel):
 
 
 class ResumeInterviewResponse(BaseSchemaModel):
+    planned_question_count: int | None = None
+    answer_deadline_at: datetime.datetime | None = None
+    started_at: datetime.datetime | None = None
     interview_id: int = pydantic.Field(description="ID of the interview")
     track: str = pydantic.Field(description="Interview track")
     difficulty: str = pydantic.Field(description="Interview difficulty")

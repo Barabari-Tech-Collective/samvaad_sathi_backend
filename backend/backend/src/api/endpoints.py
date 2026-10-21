@@ -26,6 +26,10 @@ from src.api.routes.resume_builder import router as resume_builder_router
 from src.api.routes.bulk_ats import router as bulk_ats_router
 from src.api.routes.teams_v2 import router as teams_v2_router
 from src.api.routes.practice_dashboard import router as practice_dashboard_router
+from src.api.routes.course_workspace import router as course_workspace_router
+
+from src.api.dependencies.features import feature_gate
+from src.api.routes.feature_access import router as feature_access_router
 
 router = fastapi.APIRouter()
 
@@ -50,12 +54,27 @@ router.include_router(router=sso_router)
 router.include_router(router=internal_admin_router)
 router.include_router(router=tts_router)
 router.include_router(router=speech_pacing_router)
-router.include_router(router=job_profiles_v2_router)
-router.include_router(router=analytics_router)
-router.include_router(router=analytics_v2_router)
+router.include_router(router=job_profiles_v2_router, dependencies=[fastapi.Depends(feature_gate("interview_authoring"))])
+router.include_router(router=analytics_router, dependencies=[fastapi.Depends(feature_gate("analytics"))])
+router.include_router(router=analytics_v2_router, dependencies=[fastapi.Depends(feature_gate("analytics"))])
 router.include_router(router=ai_resume_router)
 router.include_router(router=resume_builder_router)
-router.include_router(router=bulk_ats_router)
-router.include_router(router=teams_v2_router)
-router.include_router(router=practice_dashboard_router)
+router.include_router(router=bulk_ats_router, dependencies=[fastapi.Depends(feature_gate("bulk_ats"))])
+router.include_router(router=teams_v2_router, dependencies=[fastapi.Depends(feature_gate("teams"))])
+router.include_router(router=practice_dashboard_router, dependencies=[fastapi.Depends(feature_gate("practice_coaching"))])
+router.include_router(router=course_workspace_router, dependencies=[fastapi.Depends(feature_gate("course_workspace"))])
 # //working on staging
+
+router.include_router(router=feature_access_router)
+
+from src.api.routes.staff_access import router as staff_access_router
+router.include_router(router=staff_access_router)
+
+from src.api.routes.coaching_assignments import router as coaching_assignments_router
+router.include_router(router=coaching_assignments_router)
+
+from src.api.routes.course_shortlists import router as course_shortlists_router
+router.include_router(router=course_shortlists_router)
+
+from src.api.routes.human_interviews import router as human_interviews_router
+router.include_router(router=human_interviews_router)

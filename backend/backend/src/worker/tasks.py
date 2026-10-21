@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 _RESUME_FETCH_MAX_BYTES = 10 * 1024 * 1024
 _TRANSCRIPTION_MAX_TRIES = 3
-_TRANSCRIPTION_STALL_AFTER = datetime.timedelta(minutes=5)
+_TRANSCRIPTION_STALL_AFTER = datetime.timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
@@ -223,6 +223,8 @@ async def generate_questions_task(
     job_profile_id: int,
     levels: list[dict],
     knowledge_reference_context: str | None = None,
+    generation_token: str | None = None,
+    expected_revision: int | None = None,
 ) -> dict:
     """Generate interview questions for a job profile and persist them to the DB.
 
@@ -241,6 +243,7 @@ async def generate_questions_task(
         if profile is None:
             raise ValueError(f"Job profile {job_profile_id} not found")
 
+        repo.require_unpublished(profile)
         track = profile.job_name
         context_text = profile.job_description
         skills_list = profile.skills or []
@@ -258,6 +261,7 @@ async def generate_questions_task(
             )
             for l in levels
         ]
+        await session.rollback()
         results = await asyncio.gather(*level_tasks)
 
         generated_questions_data = []
@@ -265,7 +269,7 @@ async def generate_questions_task(
             for level, difficulty, item in level_results:
                 generated_questions_data.append(
                     {
-                        "job_profile_id": profile.id,
+                        "job_profile_id": job_profile_id,
                         "question_text": item["text"],
                         "level": level,
                         "difficulty": difficulty,
@@ -278,7 +282,25 @@ async def generate_questions_task(
                     }
                 )
 
-        db_questions = await repo.create_job_profile_questions(generated_questions_data)
+        for level in levels:
+            if (
+                sum(1 for q in generated_questions_data if q["level"] == level["level"])
+                != level["count"]
+            ):
+                raise ValueError(
+                    "AI returned a short question bank; existing draft was preserved."
+                )
+        db_questions = await repo.create_job_profile_questions(
+            generated_questions_data,
+            **(
+                {
+                    "expected_revision": expected_revision,
+                    "generation_token": generation_token,
+                }
+                if generation_token is not None
+                else {}
+            ),
+        )
         await session.commit()
         logger.info(
             "generate_questions_task: saved %d questions for job profile %d",
@@ -288,6 +310,8 @@ async def generate_questions_task(
         return {"count": len(db_questions)}
     except Exception:
         await session.rollback()
+        if generation_token is not None:
+            await repo.finish_generation(job_profile_id, generation_token, "failed")
         raise
     finally:
         await session.close()
@@ -303,7 +327,7 @@ async def process_answer_transcription_task(
 ) -> dict:
     """Transcribe one already-durable answer and publish its follow-up safely.
 
-    The checksum is the answer-version guard.  If a student records a newer
+    The checksum, answer version and claim timestamp fence all worker writes.  If a student records a newer
     answer while this job is queued, every write becomes a no-op rather than
     attaching stale text or feedback to the replacement recording.
     """
@@ -317,6 +341,7 @@ async def process_answer_transcription_task(
     from src.worker.database import get_session
 
     job_try = max(1, int(ctx.get("job_try", 1)))
+    processing_guard = None
 
     async def fail_or_retry(
         *, internal_reason: str, student_message: str, retryable: bool = True
@@ -325,12 +350,18 @@ async def process_answer_transcription_task(
             session = get_session()
             try:
                 repo = QuestionAttemptCRUDRepository(async_session=session)
-                await repo.mark_transcription_pending(
+                updated = await repo.mark_transcription_pending(
                     question_attempt_id=question_attempt_id,
                     checksum=checksum,
+                    processing_guard=processing_guard,
                 )
             finally:
                 await session.close()
+            if updated is None:
+                return {
+                    "status": "superseded",
+                    "question_attempt_id": question_attempt_id,
+                }
             logger.warning(
                 "Answer transcription retry | Attempt=%s | Try=%s | %s",
                 question_attempt_id,
@@ -342,13 +373,16 @@ async def process_answer_transcription_task(
         session = get_session()
         try:
             repo = QuestionAttemptCRUDRepository(async_session=session)
-            await repo.mark_transcription_failed(
+            updated = await repo.mark_transcription_failed(
                 question_attempt_id=question_attempt_id,
                 checksum=checksum,
                 error=student_message,
+                processing_guard=processing_guard,
             )
         finally:
             await session.close()
+        if updated is None:
+            return {"status": "superseded", "question_attempt_id": question_attempt_id}
         logger.error(
             "Answer transcription exhausted retries | Attempt=%s | %s",
             question_attempt_id,
@@ -372,22 +406,25 @@ async def process_answer_transcription_task(
                 "status": "already_transcribed",
                 "question_attempt_id": question_attempt_id,
             }
-        object_key = attempt.audio_url
-        existing_transcription = attempt.transcription
-        # A retry may inherit `processing` when the previous worker was killed
-        # after claiming the row. First attempts still require the atomic
-        # pending -> processing transition, which prevents duplicate browser
-        # uploads from making duplicate provider calls.
-        claimed = (
-            attempt
-            if attempt.transcription_status == "processing" and job_try > 1
-            else await repo.mark_transcription_processing(
-                question_attempt_id=question_attempt_id,
-                checksum=checksum,
-            )
+        # Every execution, including ARQ redelivery, must win a new claim.
+        # A killed worker's claim is recovered by the stale-work sweep, never
+        # inherited based only on the queue retry counter.
+        claimed = await repo.mark_transcription_processing(
+            question_attempt_id=question_attempt_id,
+            checksum=checksum,
+            answer_version=attempt.answer_version,
         )
         if claimed is None:
             return {"status": "superseded", "question_attempt_id": question_attempt_id}
+        processing_guard = (
+            checksum,
+            claimed.answer_version,
+            claimed.transcription_updated_at,
+        )
+        object_key = claimed.audio_url
+        existing_transcription = (
+            claimed.transcription if isinstance(claimed.transcription, dict) else None
+        )
     finally:
         await session.close()
 
@@ -448,6 +485,7 @@ async def process_answer_transcription_task(
                 transcription=transcription,
                 checksum=checksum,
                 finalize=False,
+                processing_guard=processing_guard,
             )
             if saved is None:
                 return {
@@ -475,12 +513,18 @@ async def process_answer_transcription_task(
     try:
         repo = QuestionAttemptCRUDRepository(async_session=session)
         current = await repo.get_by_id(question_attempt_id=question_attempt_id)
-        if current is None or current.answer_checksum != checksum:
+        if (
+            current is None
+            or current.answer_checksum != checksum
+            or current.answer_version != processing_guard[1]
+            or current.transcription_status != "processing"
+            or current.transcription_updated_at != processing_guard[2]
+        ):
             return {"status": "superseded", "question_attempt_id": question_attempt_id}
         try:
             follow_up_generated = bool(
                 await FollowUpService(async_session=session).handle_transcription_saved(
-                    question_attempt_id
+                    question_attempt_id, processing_guard=processing_guard
                 )
             )
         except Exception:  # noqa: BLE001
@@ -491,6 +535,7 @@ async def process_answer_transcription_task(
         completed = await repo.mark_transcription_complete(
             question_attempt_id=question_attempt_id,
             checksum=checksum,
+            processing_guard=processing_guard,
         )
         if completed is None:
             return {"status": "superseded", "question_attempt_id": question_attempt_id}
@@ -667,7 +712,7 @@ async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> di
                 preferred_skills=preferred_skills,
                 experience_mode=batch.experience_mode,
                 weight_overrides=batch.weight_overrides,
-                jev_provider=get_jev_provider(),
+                jev_provider=get_jev_provider(cohort_key=f"batch:{batch.id}"),
             )
         except Exception as exc:
             logger.exception(
@@ -929,14 +974,16 @@ async def purge_expired_bulk_ats_batches_task(ctx: dict) -> dict:
 
 
 async def sweep_stalled_answer_transcriptions_task(ctx: dict) -> dict:
-    """Requeue answers left in ``processing`` by a killed worker.
+    """Reserve and requeue stale pending/processing saved answers.
 
     The compare-and-set claim in ``process_answer_transcription_task`` keeps
     normal retries idempotent. This sweep covers the gap where the worker dies
     after claiming the row but before arq can record a retry. It only touches
-    rows with a durable recording and a stale processing timestamp.
+    rows with a durable recording and stale pending/processing state.
     """
     from src.models.db.question_attempt import QuestionAttempt
+    from src.models.db.interview import Interview
+    from sqlalchemy import or_
     from src.repository.crud.question import QuestionAttemptCRUDRepository
     from src.repository.database import async_db
     from src.worker.queue import enqueue_job
@@ -944,43 +991,82 @@ async def sweep_stalled_answer_transcriptions_task(ctx: dict) -> dict:
     session = async_db.get_session()
     requeued = 0
     try:
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - _TRANSCRIPTION_STALL_AFTER
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc) - _TRANSCRIPTION_STALL_AFTER
+        )
         result = await session.execute(
-            select(QuestionAttempt).where(
+            select(QuestionAttempt, Interview.user_id)
+            .join(Interview, Interview.id == QuestionAttempt.interview_id)
+            .where(
                 QuestionAttempt.answer_kind == "audio",
                 QuestionAttempt.audio_url.is_not(None),
                 QuestionAttempt.answer_checksum.is_not(None),
-                QuestionAttempt.transcription_status == "processing",
-                QuestionAttempt.transcription_updated_at < cutoff,
-            ).limit(100)
+                QuestionAttempt.transcription_status.in_(["pending", "processing"]),
+                or_(
+                    QuestionAttempt.transcription_updated_at.is_(None),
+                    QuestionAttempt.transcription_updated_at < cutoff,
+                ),
+            )
+            .order_by(
+                QuestionAttempt.transcription_updated_at.asc().nullsfirst(),
+                QuestionAttempt.id.asc(),
+            )
+            .limit(100)
         )
-        stale_attempts = list(result.scalars().all())
-        for attempt in stale_attempts:
+        stale_attempts = list(result.all())
+        for attempt, user_id in stale_attempts:
             repo = QuestionAttemptCRUDRepository(async_session=session)
-            pending = await repo.mark_transcription_pending(
+            checksum = attempt.answer_checksum
+            pending = await repo.reserve_transcription_retry(
                 question_attempt_id=attempt.id,
-                checksum=attempt.answer_checksum,
+                user_id=user_id,
+                checksum=checksum,
+                answer_version=attempt.answer_version or 0,
+                expected_status=attempt.transcription_status,
+                expected_updated_at=attempt.transcription_updated_at,
             )
             if pending is None:
                 continue
+            reserved_at = pending.transcription_updated_at
+            transcript = (
+                pending.transcription if isinstance(pending.transcription, dict) else {}
+            )
+            language = transcript.get("language", "en")
+            if language not in {"en", "hi"}:
+                language = "en"
             job_id = await enqueue_job(
                 "process_answer_transcription_task",
                 question_attempt_id=attempt.id,
-                checksum=attempt.answer_checksum,
-                language=(attempt.transcription or {}).get("language", "en"),
+                checksum=checksum,
+                language=language,
                 filename=f"answer-{attempt.id}",
             )
             if job_id:
                 requeued += 1
             else:
-                await repo.mark_transcription_failed(
+                await repo.fail_transcription_retry_reservation(
                     question_attempt_id=attempt.id,
-                    checksum=attempt.answer_checksum,
+                    checksum=checksum,
+                    reserved_at=reserved_at,
                     error=(
                         "Your answer is saved, but speech feedback could not be restarted. "
                         "Select Retry speech feedback."
                     ),
                 )
         return {"scanned": len(stale_attempts), "requeued": requeued}
+    finally:
+        await session.close()
+
+
+async def synchronize_sampark_enrollments_task(ctx: dict):
+    from src.repository.database import async_db
+    from src.services.sampark_enrollment_sync import synchronize
+
+    session = async_db.get_session()
+    try:
+        return await synchronize(session)
+    except Exception:
+        await session.rollback()
+        raise
     finally:
         await session.close()

@@ -2,6 +2,7 @@ import datetime
 from typing import List, Optional, Tuple
 
 import sqlalchemy
+from src.services.interview_course_access import require_interview_course_access
 
 from src.models.db.interview import Interview
 from src.models.db.question_attempt import QuestionAttempt
@@ -50,6 +51,7 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         if interview_has_expired(interview):
             return interview, "expired", None
 
+        await require_interview_course_access(self.async_session, interview)
         now = datetime.datetime.now(datetime.timezone.utc)
         if force:
             token = new_session_lease_token()
@@ -95,6 +97,7 @@ class InterviewCRUDRepository(BaseCRUDRepository):
             or not session_lease_matches(interview, lease_token)
         ):
             return None
+        await require_interview_course_access(self.async_session, interview)
         interview.session_lease_expires_at = (
             datetime.datetime.now(datetime.timezone.utc) + SESSION_LEASE_TTL
         )
@@ -141,25 +144,87 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         track: str,
         difficulty: str = "medium",
         job_profile_id: int | None = None,
+        course_id: str | None = None,
+        question_count: int | None = None,
+        fixed_length: bool = False,
     ) -> Interview:
+        if course_id is not None:
+            import fastapi
+            from src.models.db.user import User
+
+            student = await self.async_session.get(
+                User, user_id, populate_existing=True, with_for_update=True
+            )
+            from src.services.sampark_enrollment_sync import fresh
+
+            if (
+                student is None
+                or not fresh(student)
+                or course_id not in (student.enrolled_course_ids or [])
+            ):
+                raise fastapi.HTTPException(
+                    403, "Current enrollment in this course is required."
+                )
         # Derived here, not accepted as a parameter, so every caller - v1, v2,
         # the non-tech flow - gets a correct snapshot without each having to
         # remember to look it up and pass it through themselves.
         interview_mode = "practice"
+        question_plan = None
+        from src.services.interview_question_plan import (
+            configured_count,
+            make_curated_plan,
+        )
+
+        configured_count(question_count)
         if job_profile_id is not None:
             from src.models.db.job_profile import JobProfile
 
             profile = await self.async_session.get(JobProfile, job_profile_id)
             if profile is not None:
                 interview_mode = profile.interview_mode
+                if question_count is not None:
+                    raise ValueError("The creator controls a curated interview's count")
+                if (
+                    getattr(profile, "questions_per_interview", None) is not None
+                    or fixed_length
+                ):
+                    from src.services.interview_eligibility import unavailable_reason
+                    import fastapi
+
+                    refusal = unavailable_reason(profile, difficulty)
+                    if refusal:
+                        raise fastapi.HTTPException(409, refusal)
+                    count = await self.count_user_interviews_by_profile_and_difficulty(
+                        user_id=user_id,
+                        job_profile_id=job_profile_id,
+                        difficulty=difficulty,
+                        current_interview_id=0,
+                    )
+                    total = profile.questions_per_interview or 5
+                    question_plan = make_curated_plan(
+                        profile,
+                        difficulty=difficulty,
+                        offset=count * total,
+                        default_count=5,
+                    )
+        elif question_count is not None:
+            question_plan = {
+                "version": 1,
+                "total": question_count,
+                "adaptive_slots": 0,
+                "interviewer_mode": "ai",
+                "duration_seconds": question_count * 180,
+            }
 
         new_interview = Interview(
             user_id=user_id,
+            course_id=course_id,
             track=track,
             difficulty=difficulty,
             status="active",
             job_profile_id=job_profile_id,
             interview_mode=interview_mode,
+            question_plan=question_plan,
             expires_at=(
                 datetime.datetime.now(datetime.timezone.utc) + PRACTICE_SESSION_TTL
                 if interview_mode == "practice"
@@ -265,39 +330,52 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(interview)
         return interview
 
-    async def mark_terminated_for_proctoring(
-        self, *, interview_id: int, reason: str
-    ) -> Interview | None:
-        """End an interview early because the student left the tab or fullscreen.
+    async def record_integrity_event(
+        self, *, interview_id: int, user_id: int, reason: str, event_id: str
+    ):
+        import fastapi
 
-        Mirrors mark_completed's duration calculation - a terminated sitting
-        can still have real answered questions worth timing - but status is
-        "terminated", never "completed", so nothing downstream can mistake an
-        ended attempt for a finished one.
-        """
-        stmt = sqlalchemy.select(Interview).where(Interview.id == interview_id)
-        query = await self.async_session.execute(statement=stmt)
-        interview: Interview | None = query.scalar()  # type: ignore
-        if not interview:
-            return None
-
-        duration_stmt = sqlalchemy.select(
-            sqlalchemy.func.min(QuestionAttempt.created_at).label("start_at"),
-            sqlalchemy.func.max(QuestionAttempt.created_at).label("end_at"),
-        ).where(QuestionAttempt.interview_id == interview_id)
-        duration_row = (await self.async_session.execute(duration_stmt)).one()
-        start_at = duration_row.start_at
-        end_at = duration_row.end_at
-
-        duration_seconds: int | None = None
-        if start_at is not None and end_at is not None:
-            duration_seconds = max(0, int((end_at - start_at).total_seconds()))
-
-        interview.status = "terminated"
-        interview.completed_at = datetime.datetime.now(datetime.timezone.utc)
-        interview.duration_seconds = duration_seconds
-        interview.proctoring_terminated = True
-        interview.proctoring_violation_reason = reason
+        stmt = (
+            sqlalchemy.select(Interview)
+            .where(Interview.id == interview_id, Interview.user_id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        interview = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        if interview is None:
+            raise fastapi.HTTPException(404, "Interview not found")
+        if interview.interview_mode != "assessment":
+            raise fastapi.HTTPException(
+                409, "Browser integrity events do not apply to practice."
+            )
+        if interview.status not in ("active", "completed", "terminated"):
+            raise fastapi.HTTPException(
+                409, "Browser events require an active or finished assessment."
+            )
+        events = list(interview.integrity_events or [])
+        existing = next((e for e in events if e.get("eventId") == event_id), None)
+        if existing is not None and existing.get("reason") != reason:
+            raise fastapi.HTTPException(
+                409, "This event ID already records a different signal."
+            )
+        if interview.status == "active" and existing is None:
+            # Preserve the first 100 events. A client cannot grow an unbounded JSON row.
+            if len(events) < 100:
+                events.append(
+                    {
+                        "eventId": event_id,
+                        "reason": reason,
+                        "recordedAt": datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                        "source": "browser_signal",
+                        "policyVersion": "integrity-observation-v1",
+                        "evidenceClass": "unverified_client_observation",
+                        "automaticPenalty": False,
+                        "verdict": None,
+                    }
+                )
+                interview.integrity_events = events
         await self.async_session.commit()
         await self.async_session.refresh(interview)
         return interview
@@ -318,8 +396,10 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         # Determine next cursor
         next_cursor: int | None = None
         if len(interviews) > limit:
-            next_cursor = interviews[-1].id
             interviews = interviews[:limit]
+            # The cursor is the last returned row, not the look-ahead row.
+            # Queries use id < cursor, so using look-ahead would omit it.
+            next_cursor = interviews[-1].id
 
         # Get all summary reports for these interviews
         interview_ids = [interview.id for interview in interviews]
@@ -402,8 +482,10 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         # Determine next cursor
         next_cursor: int | None = None
         if len(interviews) > limit:
-            next_cursor = interviews[-1].id
             interviews = interviews[:limit]
+            # The cursor is the last returned row, not the look-ahead row.
+            # Queries use id < cursor, so using look-ahead would omit it.
+            next_cursor = interviews[-1].id
 
         # Get all summary reports for these interviews
         interview_ids = [interview.id for interview in interviews]

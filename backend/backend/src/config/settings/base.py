@@ -320,6 +320,11 @@ class BackendBaseSettings(BaseSettings):
     JEV_API_BASE_URL: str = decouple.config("JEV_API_BASE_URL", cast=str, default="")  # type: ignore
     JEV_MODEL: str = decouple.config("JEV_MODEL", cast=str, default="")  # type: ignore
     JEV_TIMEOUT_SECONDS: float = decouple.config("JEV_TIMEOUT_SECONDS", cast=float, default=60.0)  # type: ignore
+    # A key alone does not approve processing. Pin reviewed offline evidence and
+    # explicitly admit a stable batch cohort; 0 is the immediate kill switch.
+    JEV_BULK_ATS_ROLLOUT_PERCENT: int = decouple.config("JEV_BULK_ATS_ROLLOUT_PERCENT", cast=int, default=0)  # type: ignore
+    JEV_BULK_ATS_EVALUATION_PATH: str = decouple.config("JEV_BULK_ATS_EVALUATION_PATH", cast=str, default="")  # type: ignore
+    JEV_BULK_ATS_EVALUATION_SHA256: str = decouple.config("JEV_BULK_ATS_EVALUATION_SHA256", cast=str, default="")  # type: ignore
 
     # Bulk ATS ingestion limits.
     BULK_ATS_MAX_FILES_PER_BATCH: int = decouple.config("BULK_ATS_MAX_FILES_PER_BATCH", cast=int, default=100)  # type: ignore
@@ -378,10 +383,17 @@ class BackendBaseSettings(BaseSettings):
     MOCK_TTS: bool = decouple.config("MOCK_TTS", cast=bool, default=False)  # type: ignore
 
     # Barabari Sampark Saathi resume-round callback
+    # Explicit opt-in until both local/staging migrations and source mapping are verified.
+    SAMPARK_ENROLLMENT_SYNC_ENABLED: bool = decouple.config("SAMPARK_ENROLLMENT_SYNC_ENABLED", cast=bool, default=False)
+    SAMPARK_ENROLLMENT_SYNC_URL: str = decouple.config("SAMPARK_ENROLLMENT_SYNC_URL", default="")
+    SAMPARK_ENROLLMENT_SYNC_KEY: str = decouple.config("SAMPARK_ENROLLMENT_SYNC_KEY", default="")
+    SAMPARK_ENROLLMENT_MAX_AGE_SECONDS: int = decouple.config("SAMPARK_ENROLLMENT_MAX_AGE_SECONDS", cast=int, default=900)
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
     # Auth-service Central Student Registry. Product backends use this server-side key to
     # hydrate common profile fields; it must match auth-service CENTRAL_PROFILE_API_KEY.
+    CENTRAL_IDENTITY_CHECK_ENABLED: bool = decouple.config("CENTRAL_IDENTITY_CHECK_ENABLED", cast=bool, default=False)  # type: ignore
+    PRODUCT_IDENTITY_API_KEY: str = decouple.config("PRODUCT_IDENTITY_API_KEY", cast=str, default="")  # type: ignore
     CENTRAL_PROFILE_API_KEY: str = decouple.config("CENTRAL_PROFILE_API_KEY", cast=str, default="")  # type: ignore
 
     # Super-admin plan, Phase 12: shared secret for the *inbound* direction (auth-service's

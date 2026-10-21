@@ -41,6 +41,8 @@ jobs:
         run: python ops/release.py
         env:
           TEST_EVIDENCE: ${{ inputs.test_evidence }}
+          AWS_EXPECTED_ACCOUNT_ID: ${{ vars.AWS_EXPECTED_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
           DATABASE_BACKUP_REFERENCE: ${{ inputs.database_backup_reference }}
           GH_TOKEN: ${{ github.token }}
           HEALTH_URL: ${{ vars.HEALTH_URL }}

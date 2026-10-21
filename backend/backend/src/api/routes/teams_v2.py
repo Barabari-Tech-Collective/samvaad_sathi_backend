@@ -35,7 +35,7 @@ router = fastapi.APIRouter(prefix="/v2/teams", tags=["teams-v2"])
 )
 async def get_all_teams(
     status: str = fastapi.Query("active", description="Status of the team (active/deleted)"),
-    current_user: User = fastapi.Depends(get_current_user),
+    current_user: User = fastapi.Depends(get_current_admin_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ) -> List[TeamResponse]:
     # Prevent query-parameter status bypass: non-super-admins cannot inspect deleted teams
