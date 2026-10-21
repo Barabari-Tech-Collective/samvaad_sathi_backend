@@ -35,6 +35,8 @@ def main():
             raise ValueError("Input must be an array of paired case objects")
         report = evaluate_cases(cases, model=args.model, dataset_id=args.dataset_id)
         output = (json.dumps(report, indent=2, allow_nan=False) + "\n").encode()
+        if len(output) > 65536:
+            raise ValueError("Report exceeds the runtime artifact limit")
         # Never replace a previously reviewed evidence file accidentally.
         with args.output.open("xb") as target:
             target.write(output)

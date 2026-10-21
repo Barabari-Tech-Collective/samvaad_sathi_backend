@@ -151,6 +151,20 @@ def test_false_negatives_and_subgroup_regression_block_promotion():
     assert not report["passed"]
 
 
+def test_genuinely_unscorable_cases_need_no_invented_gold_score():
+    rows = cases()
+    for row in rows:
+        if row["expectedReview"]:
+            row["expectedScore"] = row["predictedScore"] = None
+    report = evaluate_cases(rows, model="test", dataset_id="synthetic")
+    assert report["passed"]
+    assert report["overall"]["scoreLabelCount"] == 30
+    assert report["overall"]["predictionCoverage"] == 1
+    rows[0]["expectedReview"] = False
+    with pytest.raises(ValueError):
+        evaluate_cases(rows, model="test", dataset_id="synthetic")
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

@@ -34,6 +34,18 @@ def evaluate_cases(cases: list[dict], *, model: str, dataset_id: str, now=None):
     seen = set()
     groups = {}
     for case in cases:
+        if (
+            not {
+                "id",
+                "segment",
+                "expectedReview",
+                "predictedReview",
+                "expectedScore",
+                "predictedScore",
+            }
+            <= case.keys()
+        ):
+            raise ValueError("Every paired case must include all required fields")
         case_id, segment = case.get("id"), case.get("segment")
         if not isinstance(case_id, str) or not case_id.strip() or case_id in seen:
             raise ValueError("Cases require unique nonempty opaque ids")
@@ -44,8 +56,11 @@ def evaluate_cases(cases: list[dict], *, model: str, dataset_id: str, now=None):
             if type(case.get(key)) is not bool:
                 raise ValueError(f"{key} must be a boolean")
         expected, predicted = case.get("expectedScore"), case.get("predictedScore")
-        if not finite_number(expected) or not 0 <= expected <= 100:
-            raise ValueError("Expected scores must be finite percentages")
+        if expected is None:
+            if not case["expectedReview"]:
+                raise ValueError("Unscorable cases must require human review")
+        elif not finite_number(expected) or not 0 <= expected <= 100:
+            raise ValueError("Expected scores must be finite percentages or unscorable")
         if predicted is not None and (
             not finite_number(predicted) or not 0 <= predicted <= 100
         ):
@@ -55,9 +70,10 @@ def evaluate_cases(cases: list[dict], *, model: str, dataset_id: str, now=None):
     def metrics(rows):
         positives = sum(row["expectedReview"] for row in rows)
         negatives = len(rows) - positives
+        scored_rows = [row for row in rows if row["expectedScore"] is not None]
         errors = [
             abs(row["predictedScore"] - row["expectedScore"])
-            for row in rows
+            for row in scored_rows
             if row["predictedScore"] is not None
         ]
         missed = sum(
@@ -70,10 +86,11 @@ def evaluate_cases(cases: list[dict], *, model: str, dataset_id: str, now=None):
             "count": len(rows),
             "reviewPositiveCount": positives,
             "reviewNegativeCount": negatives,
+            "scoreLabelCount": len(scored_rows),
             "reviewRecall": 1 - missed / positives if positives else None,
             "falseReviewRate": false_alarms / negatives if negatives else None,
             "scoreMAE": sum(errors) / len(errors) if errors else None,
-            "predictionCoverage": len(errors) / len(rows),
+            "predictionCoverage": len(errors) / len(scored_rows) if scored_rows else 0,
         }
 
     overall = metrics(cases)
@@ -84,6 +101,8 @@ def evaluate_cases(cases: list[dict], *, model: str, dataset_id: str, now=None):
             failures.append(f"{name}:insufficient_cases")
         if result["reviewPositiveCount"] < 10 or result["reviewNegativeCount"] < 10:
             failures.append(f"{name}:insufficient_review_labels")
+        if result["scoreLabelCount"] < (20 if name == "overall" else 10):
+            failures.append(f"{name}:insufficient_score_labels")
         for key, threshold, direction in [
             ("reviewRecall", 0.95, "min"),
             ("falseReviewRate", 0.20, "max"),
@@ -163,6 +182,7 @@ def rollout_allowed(
                 "count",
                 "reviewPositiveCount",
                 "reviewNegativeCount",
+                "scoreLabelCount",
                 "reviewRecall",
                 "falseReviewRate",
                 "scoreMAE",
@@ -174,6 +194,9 @@ def rollout_allowed(
                 result["count"] < (50 if index == 0 else 20)
                 or result["reviewPositiveCount"] < 10
                 or result["reviewNegativeCount"] < 10
+                or not (20 if index == 0 else 10)
+                <= result["scoreLabelCount"]
+                <= result["count"]
                 or not 0.95 <= result["reviewRecall"] <= 1
                 or not 0 <= result["falseReviewRate"] <= 0.20
                 or not 0 <= result["scoreMAE"] <= 12.5
