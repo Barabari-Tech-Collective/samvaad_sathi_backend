@@ -97,9 +97,16 @@ async def test_provision_or_invite_staff_success(monkeypatch):
         "data": {"centralUserId": "central-uuid-999", "isNewUser": True},
     }
 
-    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_resp)):
-        cid = await provision_or_invite_staff(email="test@barabari.org", name="Test User")
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_resp)) as mock_post:
+        cid = await provision_or_invite_staff(
+            email="test@barabari.org",
+            name="Test User",
+            password="TestPassword123",
+        )
         assert cid == "central-uuid-999"
+        mock_post.assert_awaited_once()
+        _, kwargs = mock_post.await_args
+        assert kwargs["json"]["password"] == "TestPassword123"
 
 
 # ---------------------------------------------------------------------------

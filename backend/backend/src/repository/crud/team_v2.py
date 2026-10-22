@@ -189,11 +189,16 @@ class TeamCRUDRepository(BaseCRUDRepository):
         # 4. Handle Central Auth provisioning (Central Auth is source of truth for credentials)
         # Any failure in Central Auth provisioning raises CentralAuthProvisioningError and aborts
         # before any local user or team membership mutations occur.
+        central_role = (
+            "FACILITATOR" if member_data.access_role and "facilitator" in member_data.access_role.lower()
+            else "STAFF"
+        )
         central_user_id = await provision_or_invite_staff(
             email=email_clean,
             name=member_data.name.strip(),
-            role="STAFF",
+            role=central_role,
             send_invite_email=True,
+            password=member_data.password.strip() if (member_data.password and member_data.password.strip()) else None,
         )
 
         # 5. Reconcile existing local user binding with central_user_id BEFORE mutating membership.
@@ -374,6 +379,16 @@ class TeamCRUDRepository(BaseCRUDRepository):
                 user.password_hash = pwd_generator.generate_hashed_password(
                     hash_salt="", new_password=member_data.password.strip()
                 )
+                try:
+                    await provision_or_invite_staff(
+                        email=user.email,
+                        name=user.name or "",
+                        role="STAFF",
+                        send_invite_email=False,
+                        password=member_data.password.strip(),
+                    )
+                except Exception as exc:
+                    logger.warning(f"[central-auth] Could not sync password reset to Central Auth for {user.email}: {exc}")
             
         await self.async_session.commit()
         await self.async_session.refresh(member)

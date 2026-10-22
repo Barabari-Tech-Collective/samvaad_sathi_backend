@@ -20,6 +20,7 @@ async def provision_or_invite_staff(
     name: str,
     role: str = "STAFF",
     send_invite_email: bool = True,
+    password: str | None = None,
 ) -> str:
     """
     Calls Central Auth (barabari-auth-service) to provision or link a staff user identity.
@@ -51,6 +52,8 @@ async def provision_or_invite_staff(
         "role": role.strip().upper() if role else "STAFF",
         "sendInviteEmail": send_invite_email,
     }
+    if password and password.strip():
+        payload["password"] = password.strip()
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
