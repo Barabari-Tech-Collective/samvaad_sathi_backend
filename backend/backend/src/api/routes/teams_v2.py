@@ -260,6 +260,10 @@ async def update_member(
         if not updated_member:
             raise fastapi.HTTPException(status_code=404, detail="Member not found")
         return TeamMemberResponse(**updated_member)
+    except CentralAuthReconciliationError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_409_CONFLICT, detail=str(e))
+    except CentralAuthProvisioningError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_502_BAD_GATEWAY, detail=str(e))
     except ValueError as e:
         raise fastapi.HTTPException(status_code=400, detail=str(e))
     except IntegrityError as e:

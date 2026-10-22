@@ -15,16 +15,40 @@ class CentralAuthReconciliationError(Exception):
     pass
 
 
+class ProvisionResult(str):
+    """
+    Subclasses str to preserve backward compatibility with str expectations
+    while providing structured metadata like is_new_user for saga compensation.
+    """
+    central_user_id: str
+    is_new_user: bool
+
+    def __new__(cls, central_user_id: str, is_new_user: bool = False):
+        instance = super().__new__(cls, central_user_id)
+        instance.central_user_id = str(central_user_id)
+        instance.is_new_user = bool(is_new_user)
+        return instance
+
+
+def derive_central_role(access_role: str | None) -> str:
+    """
+    Derives canonical Central Auth role ('FACILITATOR' or 'STAFF') from team member access_role.
+    """
+    if access_role and "facilitator" in access_role.lower():
+        return "FACILITATOR"
+    return "STAFF"
+
+
 async def provision_or_invite_staff(
     email: str,
     name: str,
     role: str = "STAFF",
     send_invite_email: bool = True,
     password: str | None = None,
-) -> str:
+) -> ProvisionResult:
     """
     Calls Central Auth (barabari-auth-service) to provision or link a staff user identity.
-    Returns the centralUserId (UUID) on success.
+    Returns ProvisionResult (UUID str subclass with is_new_user) on success.
     Raises CentralAuthProvisioningError if Central Auth is unconfigured, unreachable, or rejects the call.
     """
     base_url = (settings.AUTH_SERVICE_BASE_URL or "").strip()
@@ -83,8 +107,56 @@ async def provision_or_invite_staff(
             "Central Auth provisioning response succeeded but did not return a centralUserId."
         )
 
+    is_new_user = bool(data.get("isNewUser", False))
     logger.info(
-        f"[central-auth] Successfully provisioned/linked user {email} (isNewUser={data.get('isNewUser')}) -> centralUserId={central_user_id}"
+        f"[central-auth] Successfully provisioned/linked user {email} (isNewUser={is_new_user}) -> centralUserId={central_user_id}"
     )
-    return str(central_user_id)
+    return ProvisionResult(central_user_id=str(central_user_id), is_new_user=is_new_user)
+
+
+async def revoke_provisioning(
+    email: str,
+    is_new_user: bool = False,
+    central_user_id: str | None = None,
+) -> bool:
+    """
+    Calls Central Auth to perform compensating revocation for a provisioned user or product entitlement.
+    Executed as part of a saga rollback when subsequent local database operations fail.
+    """
+    base_url = (settings.AUTH_SERVICE_BASE_URL or "").strip()
+    api_key = (settings.CENTRAL_PROFILE_API_KEY or "").strip()
+
+    if not base_url or not api_key:
+        logger.warning(
+            "[central-auth] Cannot execute compensating revocation: Central Auth bridge is unconfigured."
+        )
+        return False
+
+    url = f"{base_url.rstrip('/')}/barabari-auth/api/auth/internal/v1/users/revoke-provisioning"
+    headers = {
+        "X-Internal-Api-Key": api_key,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "email": email.strip().lower(),
+        "productUniqueId": settings.SAMPARK_PRODUCT_UNIQUE_ID,
+        "isNewUser": is_new_user,
+    }
+    if central_user_id:
+        payload["centralUserId"] = str(central_user_id).strip()
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+    except Exception as exc:
+        logger.error(f"[central-auth] Compensating revocation HTTP error for {email}: {exc}")
+        return False
+
+    body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+    if resp.status_code not in (200, 204) or not body.get("isSuccess", True):
+        logger.error(f"[central-auth] Compensating revocation failed for {email}: {body}")
+        return False
+
+    logger.info(f"[central-auth] Compensating revocation succeeded for {email}")
+    return True
 

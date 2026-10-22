@@ -228,3 +228,157 @@ async def test_add_team_member_binds_unbound_existing_user():
     assert existing_unbound_user.student_id == "newly-bound-central-id"
     assert res["email"] == "unbound@barabari.org"
     assert mock_session.commit.call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_add_team_member_compensating_revocation_on_local_commit_failure():
+    """Verify saga compensation: if local commit fails after central provisioning, revoke_provisioning is called."""
+    mock_session = AsyncMock()
+    team = Team(id=1, name="Core", status="active")
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "from team" in stmt_str or "team.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = team
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    mock_session.commit.side_effect = RuntimeError("Database disk full / transaction aborted")
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    member_data = TeamMemberCreate(name="Orphan Candidate", email="orphan@barabari.org", access_role="creator")
+
+    from src.services.central_auth_service import ProvisionResult
+    provision_res = ProvisionResult(central_user_id="central-orphan-123", is_new_user=True)
+
+    with patch("src.repository.crud.team_v2.provision_or_invite_staff", new=AsyncMock(return_value=provision_res)), \
+         patch("src.repository.crud.team_v2.revoke_provisioning", new=AsyncMock(return_value=True)) as mock_revoke:
+        with pytest.raises(RuntimeError, match="Database disk full"):
+            await repo.add_team_member(team_id=1, member_data=member_data)
+
+        # Verify rollback was called and compensating revocation was executed
+        assert mock_session.rollback.call_count >= 1
+        mock_revoke.assert_awaited_once_with(
+            email="orphan@barabari.org",
+            is_new_user=True,
+            central_user_id="central-orphan-123",
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_team_member_resets_password_with_canonical_role():
+    """Verify that password reset derives canonical role from access_role (FACILITATOR for facilitator roles)."""
+    from src.models.schemas.teams_v2 import TeamMemberUpdate
+    mock_session = AsyncMock()
+    member = TeamMember(id=5, team_id=1, user_id=10, access_role="junior_facilitator", status="active")
+    user = User(id=10, email="fac@barabari.org", name="Facilitator", password_hash="oldhash", is_admin=False, is_super_admin=False)
+    admin_caller = User(id=1, email="admin@barabari.org", is_admin=True, is_super_admin=False)
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = member
+        elif 'from "user"' in stmt_str or "user.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    update_data = TeamMemberUpdate(password="NewSecurePassword123!")
+
+    with patch("src.repository.crud.team_v2.provision_or_invite_staff", new=AsyncMock()) as mock_prov:
+        await repo.update_team_member(team_id=1, member_id=5, member_data=update_data, caller_user=admin_caller)
+
+        mock_prov.assert_awaited_once_with(
+            email="fac@barabari.org",
+            name="Facilitator",
+            role="FACILITATOR",
+            send_invite_email=False,
+            password="NewSecurePassword123!",
+        )
+        assert mock_session.commit.call_count >= 1
+        assert user.password_hash != "oldhash"
+
+
+@pytest.mark.asyncio
+async def test_update_team_member_password_reset_aborts_on_central_failure_preventing_split_brain():
+    """Verify fail-closed behavior: Central Auth outage prevents local password_hash commit."""
+    from src.models.schemas.teams_v2 import TeamMemberUpdate
+    mock_session = AsyncMock()
+    member = TeamMember(id=5, team_id=1, user_id=10, access_role="member", status="active")
+    user = User(id=10, email="member@barabari.org", name="Member", password_hash="original_hash", is_admin=False, is_super_admin=False)
+    admin_caller = User(id=1, email="admin@barabari.org", is_admin=True, is_super_admin=False)
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = member
+        elif 'from "user"' in stmt_str or "user.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    update_data = TeamMemberUpdate(password="AttemptedNewPassword")
+
+    with patch(
+        "src.repository.crud.team_v2.provision_or_invite_staff",
+        new=AsyncMock(side_effect=CentralAuthProvisioningError("Central Auth 503 Outage")),
+    ):
+        with pytest.raises(CentralAuthProvisioningError, match="Central Auth 503 Outage"):
+            await repo.update_team_member(team_id=1, member_id=5, member_data=update_data, caller_user=admin_caller)
+
+    # Local password hash must remain untouched, and transaction must not be committed
+    assert user.password_hash == "original_hash"
+    assert mock_session.commit.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_update_team_member_role_change_syncs_to_central_auth():
+    """Verify that updating access_role (without password) syncs the new canonical role to Central Auth."""
+    from src.models.schemas.teams_v2 import TeamMemberUpdate
+    mock_session = AsyncMock()
+    member = TeamMember(id=7, team_id=1, user_id=12, access_role="member", status="active")
+    user = User(id=12, email="staff_to_fac@barabari.org", name="Promoted User", password_hash="existinghash", is_admin=False, is_super_admin=False)
+    admin_caller = User(id=1, email="admin@barabari.org", is_admin=True, is_super_admin=False)
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = member
+        elif 'from "user"' in stmt_str or "user.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = user
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    update_data = TeamMemberUpdate(access_role="junior_facilitator", colleges=["Engineering College"])
+
+    with patch("src.repository.crud.team_v2.provision_or_invite_staff", new=AsyncMock()) as mock_prov:
+        await repo.update_team_member(team_id=1, member_id=7, member_data=update_data, caller_user=admin_caller)
+
+        mock_prov.assert_awaited_once_with(
+            email="staff_to_fac@barabari.org",
+            name="Promoted User",
+            role="FACILITATOR",
+            send_invite_email=False,
+            password=None,
+        )
+        assert mock_session.commit.call_count >= 1
+
+

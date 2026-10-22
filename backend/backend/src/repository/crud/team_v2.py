@@ -1,5 +1,6 @@
 import datetime
 import enum
+import logging
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
 
@@ -13,9 +14,13 @@ from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyE
 from src.api.dependencies.admin import is_admin_user, is_super_admin_user
 from src.services.central_auth_service import (
     provision_or_invite_staff,
+    revoke_provisioning,
+    derive_central_role,
     CentralAuthProvisioningError,
     CentralAuthReconciliationError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TeamDeleteStatus(str, enum.Enum):
@@ -189,79 +194,98 @@ class TeamCRUDRepository(BaseCRUDRepository):
         # 4. Handle Central Auth provisioning (Central Auth is source of truth for credentials)
         # Any failure in Central Auth provisioning raises CentralAuthProvisioningError and aborts
         # before any local user or team membership mutations occur.
-        central_role = (
-            "FACILITATOR" if member_data.access_role and "facilitator" in member_data.access_role.lower()
-            else "STAFF"
-        )
-        central_user_id = await provision_or_invite_staff(
+        central_role = derive_central_role(member_data.access_role)
+        provision_res = await provision_or_invite_staff(
             email=email_clean,
             name=member_data.name.strip(),
             role=central_role,
             send_invite_email=True,
             password=member_data.password.strip() if (member_data.password and member_data.password.strip()) else None,
         )
+        central_user_id = str(provision_res)
+        is_new_user = getattr(provision_res, "is_new_user", False)
 
-        # 5. Reconcile existing local user binding with central_user_id BEFORE mutating membership.
-        # If the local user already has a student_id that conflicts with central_user_id, abort immediately.
-        if user:
-            if user.student_id and user.student_id != central_user_id:
-                raise CentralAuthReconciliationError(
-                    f"User with email '{email_clean}' is already linked to Central Auth ID '{user.student_id}', "
-                    f"which does not match provisioned ID '{central_user_id}'. Manual reconciliation required."
-                )
-            if not user.student_id:
-                user.student_id = central_user_id
-
-            # If user has no password yet and an initial password was provided, initialize it
-            if member_data.password and member_data.password.strip():
-                is_uninitialized = not user.password_hash or user.password_hash.strip() == ""
-                if is_uninitialized and not (is_admin_user(user) or is_super_admin_user(user)):
-                    user.password_hash = pwd_generator.generate_hashed_password(
-                        hash_salt="", new_password=member_data.password.strip()
+        try:
+            # 5. Reconcile existing local user binding with central_user_id BEFORE mutating membership.
+            # If the local user already has a student_id that conflicts with central_user_id, abort immediately.
+            if user:
+                if user.student_id and user.student_id != central_user_id:
+                    raise CentralAuthReconciliationError(
+                        f"User with email '{email_clean}' is already linked to Central Auth ID '{user.student_id}', "
+                        f"which does not match provisioned ID '{central_user_id}'. Manual reconciliation required."
                     )
-        else:
-            hashed_pw = (
-                pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
-                if (member_data.password and member_data.password.strip())
-                else ""
-            )
-            user = User(
-                email=email_clean,
-                name=member_data.name.strip(),
-                student_id=central_user_id,
-                password_hash=hashed_pw,
-                role=None,
-                is_onboarded=False,
-                is_admin=False,
-                is_super_admin=False,
-            )
-            self.async_session.add(user)
-            await self.async_session.flush()
+                if not user.student_id:
+                    user.student_id = central_user_id
 
-        # 5. Create or reactivate TeamMember record
-        if existing_member:
-            # Reactivate soft-deleted member
-            existing_member.status = "active"
-            existing_member.removed_date = None
-            existing_member.access_role = member_data.access_role
-            existing_member.purposes = member_data.purposes
-            existing_member.domain = member_data.domain
-            existing_member.colleges = assigned_colleges
-            new_member = existing_member
-        else:
-            new_member = TeamMember(
-                team_id=team_id,
-                user_id=user.id,
-                access_role=member_data.access_role,
-                purposes=member_data.purposes,
-                domain=member_data.domain,
-                colleges=assigned_colleges,
-                status='active'
-            )
-            self.async_session.add(new_member)
+                # If user has no password yet and an initial password was provided, initialize it
+                if member_data.password and member_data.password.strip():
+                    is_uninitialized = not user.password_hash or user.password_hash.strip() == ""
+                    if is_uninitialized and not (is_admin_user(user) or is_super_admin_user(user)):
+                        user.password_hash = pwd_generator.generate_hashed_password(
+                            hash_salt="", new_password=member_data.password.strip()
+                        )
+            else:
+                hashed_pw = (
+                    pwd_generator.generate_hashed_password(hash_salt="", new_password=member_data.password.strip())
+                    if (member_data.password and member_data.password.strip())
+                    else ""
+                )
+                user = User(
+                    email=email_clean,
+                    name=member_data.name.strip(),
+                    student_id=central_user_id,
+                    password_hash=hashed_pw,
+                    role=None,
+                    is_onboarded=False,
+                    is_admin=False,
+                    is_super_admin=False,
+                )
+                self.async_session.add(user)
+                await self.async_session.flush()
 
-        await self.async_session.commit()
-        await self.async_session.refresh(new_member)
+            # 6. Create or reactivate TeamMember record
+            if existing_member:
+                # Reactivate soft-deleted member
+                existing_member.status = "active"
+                existing_member.removed_date = None
+                existing_member.access_role = member_data.access_role
+                existing_member.purposes = member_data.purposes
+                existing_member.domain = member_data.domain
+                existing_member.colleges = assigned_colleges
+                new_member = existing_member
+            else:
+                new_member = TeamMember(
+                    team_id=team_id,
+                    user_id=user.id,
+                    access_role=member_data.access_role,
+                    purposes=member_data.purposes,
+                    domain=member_data.domain,
+                    colleges=assigned_colleges,
+                    status='active'
+                )
+                self.async_session.add(new_member)
+
+            await self.async_session.commit()
+            await self.async_session.refresh(new_member)
+        except Exception as local_err:
+            # Saga compensating transaction:
+            # If the local database transaction fails after Central Auth provisioned the account,
+            # execute compensating revocation in Central Auth to prevent distributed partial state.
+            await self.async_session.rollback()
+            try:
+                await revoke_provisioning(
+                    email=email_clean,
+                    is_new_user=is_new_user,
+                    central_user_id=central_user_id,
+                )
+                logger.info(
+                    f"[central-auth] Compensating revocation triggered for {email_clean} after local transaction failure."
+                )
+            except Exception as revoke_err:
+                logger.error(
+                    f"[central-auth] CRITICAL: Failed to execute compensating revocation for {email_clean}: {revoke_err}"
+                )
+            raise local_err
         
         return {
             "id": new_member.id,
@@ -326,6 +350,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
         if not member:
             return None
         
+        previous_access_role = member.access_role
         raw_role = member_data.access_role if member_data.access_role is not None else member.access_role
         effective_role = (raw_role or "").strip().replace("_", " ").lower()
         is_updating_to_jf = (
@@ -363,10 +388,18 @@ class TeamCRUDRepository(BaseCRUDRepository):
         stmt = select(User).where(User.id == member.user_id)
         result = await self.async_session.execute(stmt)
         user = result.scalar_one_or_none()
+
+        canonical_role = derive_central_role(member.access_role)
         
         if user:
             if member_data.name:
                 user.name = member_data.name
+
+            role_changed = (
+                member_data.access_role is not None
+                and derive_central_role(member_data.access_role) != derive_central_role(previous_access_role)
+            )
+
             if member_data.password and member_data.password.strip():
                 # Permission check: resetting credentials via team endpoints requires administrator privileges (fail-closed)
                 if caller_user is None or not is_admin_user(caller_user):
@@ -376,19 +409,30 @@ class TeamCRUDRepository(BaseCRUDRepository):
                 if is_admin_user(user) or is_super_admin_user(user):
                     raise ValueError("Cannot reset credentials for administrative accounts via team member settings.")
 
-                user.password_hash = pwd_generator.generate_hashed_password(
-                    hash_salt="", new_password=member_data.password.strip()
+                new_password = member_data.password.strip()
+
+                # Authoritative Central Auth sync first: do not catch or suppress errors (prevents credential split-brain).
+                await provision_or_invite_staff(
+                    email=user.email,
+                    name=user.name or "",
+                    role=canonical_role,
+                    send_invite_email=False,
+                    password=new_password,
                 )
-                try:
-                    await provision_or_invite_staff(
-                        email=user.email,
-                        name=user.name or "",
-                        role="STAFF",
-                        send_invite_email=False,
-                        password=member_data.password.strip(),
-                    )
-                except Exception as exc:
-                    logger.warning(f"[central-auth] Could not sync password reset to Central Auth for {user.email}: {exc}")
+
+                # Only write local password_hash after Central Auth successfully updates
+                user.password_hash = pwd_generator.generate_hashed_password(
+                    hash_salt="", new_password=new_password
+                )
+            elif role_changed:
+                # Synchronize canonical role change to Central Auth even if password wasn't reset
+                await provision_or_invite_staff(
+                    email=user.email,
+                    name=user.name or "",
+                    role=canonical_role,
+                    send_invite_email=False,
+                    password=None,
+                )
             
         await self.async_session.commit()
         await self.async_session.refresh(member)
