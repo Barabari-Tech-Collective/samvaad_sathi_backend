@@ -15,6 +15,8 @@ from src.api.dependencies.admin import is_admin_user, is_super_admin_user
 from src.services.central_auth_service import (
     provision_or_invite_staff,
     revoke_provisioning,
+    compensate_central_role,
+    record_durable_credential_reconciliation,
     derive_central_role,
     CentralAuthProvisioningError,
     CentralAuthReconciliationError,
@@ -191,6 +193,18 @@ class TeamCRUDRepository(BaseCRUDRepository):
             if existing_member and existing_member.status == "active":
                 raise EntityAlreadyExists("User is already an active member of this team.")
 
+        # Baseline state tracking before Central Auth mutations
+        existing_user_has_password = bool(user and user.password_hash and user.password_hash.strip())
+        previous_local_role = existing_member.access_role if existing_member else getattr(user, "role", None)
+        previous_canonical_role = derive_central_role(previous_local_role) if previous_local_role else None
+
+        # Do not overwrite pre-existing credentials for existing users during team member addition
+        password_to_send = (
+            member_data.password.strip()
+            if (member_data.password and member_data.password.strip() and not existing_user_has_password)
+            else None
+        )
+
         # 4. Handle Central Auth provisioning (Central Auth is source of truth for credentials)
         # Any failure in Central Auth provisioning raises CentralAuthProvisioningError and aborts
         # before any local user or team membership mutations occur.
@@ -200,10 +214,19 @@ class TeamCRUDRepository(BaseCRUDRepository):
             name=member_data.name.strip(),
             role=central_role,
             send_invite_email=True,
-            password=member_data.password.strip() if (member_data.password and member_data.password.strip()) else None,
+            password=password_to_send,
         )
         central_user_id = str(provision_res)
         is_new_user = getattr(provision_res, "is_new_user", False)
+
+        # Track exactly what this operation changed in Central Auth for safe saga compensation
+        changed_in_central = {
+            "is_new_user": is_new_user,
+            "role_changed": (not is_new_user and previous_canonical_role is not None and central_role != previous_canonical_role),
+            "previous_canonical_role": previous_canonical_role,
+            "password_initialized": bool(password_to_send),
+            "new_password": password_to_send,
+        }
 
         try:
             # 5. Reconcile existing local user binding with central_user_id BEFORE mutating membership.
@@ -268,23 +291,55 @@ class TeamCRUDRepository(BaseCRUDRepository):
             await self.async_session.commit()
             await self.async_session.refresh(new_member)
         except Exception as local_err:
-            # Saga compensating transaction:
-            # If the local database transaction fails after Central Auth provisioned the account,
-            # execute compensating revocation in Central Auth to prevent distributed partial state.
             await self.async_session.rollback()
-            try:
-                await revoke_provisioning(
-                    email=email_clean,
-                    is_new_user=is_new_user,
-                    central_user_id=central_user_id,
-                )
-                logger.info(
-                    f"[central-auth] Compensating revocation triggered for {email_clean} after local transaction failure."
-                )
-            except Exception as revoke_err:
-                logger.error(
-                    f"[central-auth] CRITICAL: Failed to execute compensating revocation for {email_clean}: {revoke_err}"
-                )
+            # Saga compensating transaction:
+            # Compensate ONLY what this operation created or changed.
+            # Do NOT revoke pre-existing access/entitlements for existing users!
+            if changed_in_central["is_new_user"]:
+                # This operation created a brand-new user in Central Auth. Revoke it.
+                try:
+                    await revoke_provisioning(
+                        email=email_clean,
+                        is_new_user=True,
+                        central_user_id=central_user_id,
+                    )
+                    logger.info(
+                        f"[central-auth] Compensating revocation executed for new user {email_clean} after local transaction failure."
+                    )
+                except Exception as revoke_err:
+                    logger.error(
+                        f"[central-auth] CRITICAL: Failed to execute compensating revocation for {email_clean}: {revoke_err}"
+                    )
+            else:
+                # User already existed prior to this operation.
+                # DO NOT call revoke_provisioning(is_new_user=False), because that removes pre-existing product entitlement!
+                if changed_in_central["role_changed"] and changed_in_central["previous_canonical_role"]:
+                    try:
+                        await compensate_central_role(
+                            email=email_clean,
+                            name=user.name if user else member_data.name.strip(),
+                            previous_canonical_role=changed_in_central["previous_canonical_role"],
+                        )
+                    except Exception as role_err:
+                        logger.error(
+                            f"[central-auth] CRITICAL: Failed to restore role for {email_clean}: {role_err}"
+                        )
+                if changed_in_central["password_initialized"] and changed_in_central["new_password"]:
+                    try:
+                        new_pw_hash = pwd_generator.generate_hashed_password(
+                            hash_salt="", new_password=changed_in_central["new_password"]
+                        )
+                        await record_durable_credential_reconciliation(
+                            user_id=user.id if user else None,
+                            email=email_clean,
+                            new_password_hash=new_pw_hash,
+                            central_user_id=central_user_id,
+                            async_session=self.async_session,
+                        )
+                    except Exception as pw_err:
+                        logger.error(
+                            f"[central-auth] CRITICAL: Failed to record credential reconciliation for {email_clean}: {pw_err}"
+                        )
             raise local_err
         
         return {
@@ -390,6 +445,19 @@ class TeamCRUDRepository(BaseCRUDRepository):
         user = result.scalar_one_or_none()
 
         canonical_role = derive_central_role(member.access_role)
+        previous_canonical_role = derive_central_role(previous_access_role)
+        previous_user_name = user.name if user else ""
+
+        # Track mutations made to Central Auth for saga compensation and durable reconciliation
+        changed_in_central = {
+            "role_updated": False,
+            "previous_canonical_role": previous_canonical_role,
+            "password_updated": False,
+            "new_password_hash": None,
+            "user_id": user.id if user else None,
+            "user_email": user.email if user else None,
+            "central_user_id": user.student_id if user else None,
+        }
         
         if user:
             if member_data.name:
@@ -397,7 +465,7 @@ class TeamCRUDRepository(BaseCRUDRepository):
 
             role_changed = (
                 member_data.access_role is not None
-                and derive_central_role(member_data.access_role) != derive_central_role(previous_access_role)
+                and derive_central_role(member_data.access_role) != previous_canonical_role
             )
 
             if member_data.password and member_data.password.strip():
@@ -420,10 +488,16 @@ class TeamCRUDRepository(BaseCRUDRepository):
                     password=new_password,
                 )
 
-                # Only write local password_hash after Central Auth successfully updates
-                user.password_hash = pwd_generator.generate_hashed_password(
+                new_hash = pwd_generator.generate_hashed_password(
                     hash_salt="", new_password=new_password
                 )
+                changed_in_central["password_updated"] = True
+                changed_in_central["new_password_hash"] = new_hash
+                if role_changed:
+                    changed_in_central["role_updated"] = True
+
+                # Only write local password_hash after Central Auth successfully updates
+                user.password_hash = new_hash
             elif role_changed:
                 # Synchronize canonical role change to Central Auth even if password wasn't reset
                 await provision_or_invite_staff(
@@ -433,11 +507,48 @@ class TeamCRUDRepository(BaseCRUDRepository):
                     send_invite_email=False,
                     password=None,
                 )
+                changed_in_central["role_updated"] = True
             
-        await self.async_session.commit()
-        await self.async_session.refresh(member)
-        if user:
-            await self.async_session.refresh(user)
+        try:
+            await self.async_session.commit()
+            await self.async_session.refresh(member)
+            if user:
+                await self.async_session.refresh(user)
+        except Exception as local_err:
+            await self.async_session.rollback()
+            # Saga compensation & durable reconciliation path:
+            # Central Auth was updated before local commit. If local commit fails afterward,
+            # execute compensation and durable reconciliation to prevent distributed partial state.
+
+            # 1. Compensate role in Central Auth if role was changed
+            if changed_in_central["role_updated"] and changed_in_central["previous_canonical_role"] and user:
+                try:
+                    await compensate_central_role(
+                        email=user.email,
+                        name=previous_user_name,
+                        previous_canonical_role=changed_in_central["previous_canonical_role"],
+                    )
+                except Exception as comp_err:
+                    logger.error(
+                        f"[central-auth] CRITICAL: Failed to compensate Central Auth role for {user.email}: {comp_err}"
+                    )
+
+            # 2. Durable credential reconciliation if password was reset
+            if changed_in_central["password_updated"] and changed_in_central["new_password_hash"] and user:
+                try:
+                    await record_durable_credential_reconciliation(
+                        user_id=changed_in_central["user_id"],
+                        email=changed_in_central["user_email"],
+                        new_password_hash=changed_in_central["new_password_hash"],
+                        central_user_id=changed_in_central["central_user_id"],
+                        async_session=self.async_session,
+                    )
+                except Exception as rec_err:
+                    logger.error(
+                        f"[central-auth] CRITICAL: Failed to record credential reconciliation for {user.email}: {rec_err}"
+                    )
+
+            raise local_err
             
         return {
             "id": member.id,
