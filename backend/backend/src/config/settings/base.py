@@ -120,6 +120,8 @@ class BackendBaseSettings(BaseSettings):
         # Staging on render
         "https://samvaad-sathi-backend-tdd0.onrender.com",
         "https://samvaad-saathi-frontend.onrender.com",
+        # Sampark Saathi frontend staging on Amplify
+        "https://staging.d1zdqqsxijaw3t.amplifyapp.com",
     ]
     ALLOWED_METHODS: list[str] = ["*"]
     ALLOWED_HEADERS: list[str] = ["*"]
@@ -133,6 +135,13 @@ class BackendBaseSettings(BaseSettings):
         matches nothing, so the origin looks allow-listed but silently gets CORS-rejected.
         Fail at import time instead of at 2am in a browser console.
         """
+        extra = decouple.config("CORS_ALLOWED_ORIGINS", cast=str, default="").strip()
+        if extra:
+            for item in extra.split(","):
+                cleaned = item.strip().rstrip("/")
+                if cleaned and cleaned not in origins:
+                    origins.append(cleaned)
+
         for origin in origins:
             parsed = urllib.parse.urlparse(origin)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
