@@ -122,6 +122,8 @@ class BackendBaseSettings(BaseSettings):
         "https://samvaad-saathi-frontend.onrender.com",
         # Sampark Saathi frontend staging on Amplify
         "https://staging.d1zdqqsxijaw3t.amplifyapp.com",
+        # Samvaad Saathi Student frontend staging on Amplify
+        "https://staging.d36hlrn367i0rr.amplifyapp.com",
     ]
     ALLOWED_METHODS: list[str] = ["*"]
     ALLOWED_HEADERS: list[str] = ["*"]
