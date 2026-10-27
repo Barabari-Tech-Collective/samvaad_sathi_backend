@@ -7,7 +7,7 @@ on:
         type: string
         required: true
       database_backup_reference:
-        description: 'Latest verified Aiven backup/snapshot ID and timestamp'
+        description: 'Verified pre-migration backup reference: Aiven backup ID + timestamp, or pg_dump archive path + SHA-256 + timestamp (archive must pass pg_restore --list)'
         type: string
         required: true
 permissions:
