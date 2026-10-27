@@ -89,6 +89,44 @@ def test_staff_dashboard_origin_is_allowed_for_direct_bulk_uploads():
     assert "https://admin.barabaricollective.org" in settings.ALLOWED_ORIGINS
 
 
+def test_score_bands_separate_weak_candidates_from_average_candidates():
+    assert pipeline.score_band_for(59.99) == "Weak"
+    assert pipeline.score_band_for(60.0) == "Average"
+
+
+@pytest.mark.asyncio
+async def test_partial_recruiter_update_preserves_notes_and_outcome():
+    candidate = SimpleNamespace(
+        reviewer_notes="Keep this note",
+        reviewer_decision=None,
+        decision_reason=None,
+        interview_outcome="advanced",
+        outcome_recorded_at=datetime.datetime.now(datetime.timezone.utc),
+        reviewed_by=None,
+        assigned_reviewer_id=None,
+    )
+    session = AsyncMock()
+    repo = BulkATSCRUDRepository(session)
+    repo.get_candidate = AsyncMock(return_value=candidate)
+
+    await repo.update_review(
+        42,
+        reviewer_notes=None,
+        reviewer_decision="shortlist",
+        decision_reason="Bulk recruiter decision",
+        interview_outcome=None,
+        reviewed_by=7,
+        update_reviewer_notes=False,
+        update_interview_outcome=False,
+    )
+
+    assert candidate.reviewer_notes == "Keep this note"
+    assert candidate.interview_outcome == "advanced"
+    assert candidate.reviewer_decision == "shortlist"
+    assert candidate.decision_reason == "Bulk recruiter decision"
+    assert candidate.reviewed_by == 7
+
+
 def test_batch_requires_jd_or_required_skills_as_role_rubric():
     with pytest.raises(HTTPException) as exc_info:
         _require_role_rubric(
@@ -769,6 +807,9 @@ async def test_candidate_pipeline_builds_metric_scorecard_and_brief(monkeypatch)
     )
 
     scorecard = result.deterministic_report["bulkAtsScorecard"]
+    # Demonstrated evidence leads the skill score: 20% deterministic coverage
+    # (80) plus 80% Jev evidence judgment (100).
+    assert scorecard["categoryScores"]["skills"] == 96.0
     assert set(scorecard["categoryScores"]) == {
         "skills",
         "education",
@@ -982,7 +1023,7 @@ def test_experience_fallback_does_not_treat_internships_as_professional_mismatch
 
 
 @pytest.mark.asyncio
-async def test_fresher_batch_suppresses_score_for_jev_experience_mismatch(monkeypatch):
+async def test_fresher_batch_marks_jev_experience_mismatch_as_provisional(monkeypatch):
     monkeypatch.setattr(
         pipeline,
         "extract_resume_text",
@@ -1070,11 +1111,12 @@ async def test_fresher_batch_suppresses_score_for_jev_experience_mismatch(monkey
     )
 
     assert result.status == "needs_review"
-    assert result.final_score is None
+    assert result.final_score is not None
     gate = result.deterministic_report["bulkAtsReviewGate"]
     assert gate["detectedField"] == "Product management"
     assert gate["source"] == "jev"
-    assert result.deterministic_report["bulkAtsScorecard"]["scoreSuppressed"] is True
+    assert result.deterministic_report["bulkAtsScorecard"]["provisional"] is True
+    assert result.deterministic_report["bulkAtsScorecard"]["weightedContributions"]
     assert "experienced_candidate_in_fresher_batch" in result.warnings
 
 
