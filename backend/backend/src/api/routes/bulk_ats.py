@@ -440,7 +440,9 @@ async def create_batch(
     if normalized_creator_email and not re.fullmatch(
         r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_creator_email
     ):
-        raise HTTPException(status_code=400, detail="creator_email must be a valid email")
+        raise HTTPException(
+            status_code=400, detail="creator_email must be a valid email"
+        )
     normalized_creator_name = (
         creator_name.strip() or current_user.name.strip() or current_user.email
     )
@@ -699,7 +701,9 @@ async def upload_resumes(
                 )
                 continue
 
-            raw_bytes = await upload.read()
+            raw_bytes = await upload.read(
+                settings.BULK_ATS_MAX_FILE_SIZE_MB * 1024 * 1024 + 1
+            )
             if not raw_bytes:
                 skipped.append({"filename": upload.filename, "reason": "empty file"})
                 continue
@@ -991,24 +995,40 @@ async def get_candidate(
     candidate = await _get_authorized_candidate(
         repo, candidate_id=candidate_id, current_user=current_user
     )
-    batch_candidates = await repo.list_candidates(batch_id=candidate.batch_id, limit=1000, sort="score")
+    batch_candidates = await repo.list_candidates(
+        batch_id=candidate.batch_id, limit=1000, sort="score"
+    )
     scored = [item for item in batch_candidates if item.final_score is not None]
     scores = sorted(item.final_score for item in scored if item.final_score is not None)
-    rank = next((index + 1 for index, item in enumerate(scored) if item.id == candidate.id), None)
+    rank = next(
+        (index + 1 for index, item in enumerate(scored) if item.id == candidate.id),
+        None,
+    )
     score = candidate.final_score
     percentile = None
     median = None
     if scores and score is not None:
         midpoint = len(scores) // 2
-        median = scores[midpoint] if len(scores) % 2 else (scores[midpoint - 1] + scores[midpoint]) / 2
-        percentile = round(sum(value <= score for value in scores) / len(scores) * 100, 1)
+        median = (
+            scores[midpoint]
+            if len(scores) % 2
+            else (scores[midpoint - 1] + scores[midpoint]) / 2
+        )
+        percentile = round(
+            sum(value <= score for value in scores) / len(scores) * 100, 1
+        )
     detail = _candidate_detail(candidate)
     detail["rankExplanation"] = {
         "rank": rank,
         "totalScored": len(scores),
         "percentile": percentile,
         "batchMedian": median,
-        "strongestEvidence": ((candidate.deterministic_report or {}).get("deterministicMetrics", {}).get("projectModule", {}).get("projectEvaluation", [])[:1]),
+        "strongestEvidence": (
+            (candidate.deterministic_report or {})
+            .get("deterministicMetrics", {})
+            .get("projectModule", {})
+            .get("projectEvaluation", [])[:1]
+        ),
         "missingEvidence": candidate.warnings or [],
     }
     return detail
@@ -1022,11 +1042,19 @@ async def merge_candidate(
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     repo = BulkATSCRUDRepository(session)
-    duplicate = await _get_authorized_candidate(repo, candidate_id=candidate_id, current_user=current_user)
-    canonical = await _get_authorized_candidate(repo, candidate_id=payload.canonical_candidate_id, current_user=current_user)
+    duplicate = await _get_authorized_candidate(
+        repo, candidate_id=candidate_id, current_user=current_user
+    )
+    canonical = await _get_authorized_candidate(
+        repo, candidate_id=payload.canonical_candidate_id, current_user=current_user
+    )
     if duplicate.batch_id != canonical.batch_id:
-        raise HTTPException(status_code=400, detail="Candidates must belong to the same batch")
-    merged, archived = await repo.merge_candidates(duplicate_id=duplicate.id, canonical_id=canonical.id)
+        raise HTTPException(
+            status_code=400, detail="Candidates must belong to the same batch"
+        )
+    merged, archived = await repo.merge_candidates(
+        duplicate_id=duplicate.id, canonical_id=canonical.id
+    )
     if merged is None or archived is None:
         raise HTTPException(status_code=400, detail="Candidates could not be merged")
     await repo.record_audit(
@@ -1047,13 +1075,21 @@ async def create_rubric_version(
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     repo = BulkATSCRUDRepository(session)
-    batch = await _get_authorized_batch(repo, batch_id=batch_id, current_user=current_user)
+    batch = await _get_authorized_batch(
+        repo, batch_id=batch_id, current_user=current_user
+    )
     required = [skill.strip() for skill in payload.required_skills if skill.strip()]
     preferred = [skill.strip() for skill in payload.preferred_skills if skill.strip()]
     description = payload.role_description.strip()
-    _require_role_rubric(job_profile_id=batch.job_profile_id, role_description=description, required_skills=required)
+    _require_role_rubric(
+        job_profile_id=batch.job_profile_id,
+        role_description=description,
+        required_skills=required,
+    )
     next_version = (batch.rubric_version or 1) + 1
-    analysis = analyze_job_description(description, required_skills=required, preferred_skills=preferred)
+    analysis = analyze_job_description(
+        description, required_skills=required, preferred_skills=preferred
+    )
     batch.rubric_version = next_version
     batch.role_description = description or None
     batch.evaluation_intent = payload.evaluation_intent.strip() or None
@@ -1061,14 +1097,25 @@ async def create_rubric_version(
     batch.preferred_skills = preferred or None
     batch.experience_mode = payload.experience_mode
     batch.jd_analysis = analysis
-    batch.rubric_snapshot = {**payload.model_dump(), "version": next_version, "jdAnalysis": analysis}
+    batch.rubric_snapshot = {
+        **payload.model_dump(),
+        "version": next_version,
+        "jdAnalysis": analysis,
+    }
     await session.commit()
     candidates = await repo.list_candidates(batch_id=batch_id, limit=1000)
     queued = 0
     for candidate in candidates:
-        if await enqueue_job("process_bulk_ats_candidate_task", candidate_id=candidate.id):
+        if await enqueue_job(
+            "process_bulk_ats_candidate_task", candidate_id=candidate.id
+        ):
             queued += 1
-    await repo.record_audit(action="rubric_version_created", actor_id=current_user.id, batch_id=batch_id, metadata={"version": next_version, "queued": queued})
+    await repo.record_audit(
+        action="rubric_version_created",
+        actor_id=current_user.id,
+        batch_id=batch_id,
+        metadata={"version": next_version, "queued": queued},
+    )
     return {"batchId": batch_id, "rubricVersion": next_version, "queued": queued}
 
 
@@ -1269,10 +1316,10 @@ async def rerun_candidate(
 @router.patch("/candidates/{candidate_id}/review")
 async def review_candidate(
     candidate_id: int,
-    reviewer_notes: str = Form(""),
-    reviewer_decision: str = Form(""),
-    decision_reason: str = Form(""),
-    interview_outcome: str = Form(""),
+    reviewer_notes: str | None = Form(None),
+    reviewer_decision: str | None = Form(None),
+    decision_reason: str | None = Form(None),
+    interview_outcome: str | None = Form(None),
     assigned_reviewer_id: int | None = Form(None),
     current_user: User = Depends(get_current_bulk_ats_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -1281,11 +1328,20 @@ async def review_candidate(
     existing = await _get_authorized_candidate(
         repo, candidate_id=candidate_id, current_user=current_user
     )
-    decision = reviewer_decision.strip() or None
-    outcome = interview_outcome.strip() or None
-    if decision not in {None, "shortlist", "hold", "not_shortlisted"}:
+    decision = (
+        reviewer_decision.strip() or None if reviewer_decision is not None else None
+    )
+    outcome = (
+        interview_outcome.strip() or None if interview_outcome is not None else None
+    )
+    if reviewer_decision is not None and decision not in {
+        None,
+        "shortlist",
+        "hold",
+        "not_shortlisted",
+    }:
         raise HTTPException(status_code=400, detail="Invalid reviewer_decision")
-    if outcome not in {
+    if interview_outcome is not None and outcome not in {
         None,
         "not_interviewed",
         "interviewed",
@@ -1297,19 +1353,32 @@ async def review_candidate(
         raise HTTPException(status_code=400, detail="Invalid interview_outcome")
     if assigned_reviewer_id is not None:
         try:
-            reviewer = await UserCRUDRepository(session).get_user_by_id(user_id=assigned_reviewer_id)
+            reviewer = await UserCRUDRepository(session).get_user_by_id(
+                user_id=assigned_reviewer_id
+            )
         except EntityDoesNotExist:
             reviewer = None
         if reviewer is None or reviewer.role not in {"recruiter", "placement_staff"}:
-            raise HTTPException(status_code=400, detail="assigned_reviewer_id must belong to Bulk ATS staff")
+            raise HTTPException(
+                status_code=400,
+                detail="assigned_reviewer_id must belong to Bulk ATS staff",
+            )
     candidate = await repo.update_review(
         candidate_id,
-        reviewer_notes=reviewer_notes[:10000],
-        reviewer_decision=decision,
-        decision_reason=decision_reason.strip()[:5000] or None,
-        interview_outcome=outcome,
+        reviewer_notes=(reviewer_notes[:10000] if reviewer_notes is not None else None),
+        reviewer_decision=(decision if reviewer_decision is not None else None),
+        decision_reason=(
+            decision_reason.strip()[:5000] or None
+            if decision_reason is not None
+            else None
+        ),
+        interview_outcome=(outcome if interview_outcome is not None else None),
         reviewed_by=current_user.id,
         assigned_reviewer_id=assigned_reviewer_id,
+        update_reviewer_notes=reviewer_notes is not None,
+        update_reviewer_decision=reviewer_decision is not None,
+        update_decision_reason=decision_reason is not None,
+        update_interview_outcome=interview_outcome is not None,
     )
     if candidate is None:  # Defensive: it could only disappear between the two calls.
         raise HTTPException(status_code=404, detail="Candidate not found")
@@ -1318,7 +1387,17 @@ async def review_candidate(
         actor_id=current_user.id,
         batch_id=existing.batch_id,
         candidate_id=candidate.id,
-        metadata={"decision": decision, "interviewOutcome": outcome, "assignedReviewerId": assigned_reviewer_id},
+        metadata={
+            "decision": (
+                decision
+                if reviewer_decision is not None
+                else existing.reviewer_decision
+            ),
+            "interviewOutcome": (
+                outcome if interview_outcome is not None else existing.interview_outcome
+            ),
+            "assignedReviewerId": assigned_reviewer_id,
+        },
     )
     return _candidate_detail(candidate)
 
@@ -1377,9 +1456,19 @@ async def get_batch_calibration(
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
         decision = candidate.reviewer_decision or "not_decided"
         decisions[decision] = decisions.get(decision, 0) + 1
-    average = (sum(c.final_score or 0 for c in scored) / len(scored)) if scored else None
-    hired = [c.final_score for c in candidates if c.interview_outcome == "hired" and c.final_score is not None]
-    rejected = [c.final_score for c in candidates if c.interview_outcome == "rejected" and c.final_score is not None]
+    average = (
+        (sum(c.final_score or 0 for c in scored) / len(scored)) if scored else None
+    )
+    hired = [
+        c.final_score
+        for c in candidates
+        if c.interview_outcome == "hired" and c.final_score is not None
+    ]
+    rejected = [
+        c.final_score
+        for c in candidates
+        if c.interview_outcome == "rejected" and c.final_score is not None
+    ]
     return {
         "batchId": batch_id,
         "candidateCount": len(candidates),
@@ -1401,7 +1490,9 @@ async def generate_interview_kit(
 ):
     """Create a deterministic, evidence-aware interview guide for human review."""
     repo = BulkATSCRUDRepository(session)
-    candidate = await _get_authorized_candidate(repo, candidate_id=candidate_id, current_user=current_user)
+    candidate = await _get_authorized_candidate(
+        repo, candidate_id=candidate_id, current_user=current_user
+    )
     report = candidate.deterministic_report or {}
     scorecard = report.get("bulkAtsScorecard") if isinstance(report, dict) else {}
     scorecard = scorecard if isinstance(scorecard, dict) else {}
@@ -1417,9 +1508,21 @@ async def generate_interview_kit(
     for category, prompt in metrics.items():
         value = category_scores.get(category)
         if value is None or value < 70:
-            questions.append({"category": category, "question": prompt, "reason": "Score or evidence gap needs human validation."})
+            questions.append(
+                {
+                    "category": category,
+                    "question": prompt,
+                    "reason": "Score or evidence gap needs human validation.",
+                }
+            )
     if not questions:
-        questions.append({"category": "verification", "question": "Which accomplishment best demonstrates readiness for this role, and what evidence can you share?", "reason": "Confirm the strongest evidence before advancing."})
+        questions.append(
+            {
+                "category": "verification",
+                "question": "Which accomplishment best demonstrates readiness for this role, and what evidence can you share?",
+                "reason": "Confirm the strongest evidence before advancing.",
+            }
+        )
     await repo.record_audit(
         action="interview_kit_generated",
         actor_id=current_user.id,
@@ -1427,7 +1530,11 @@ async def generate_interview_kit(
         candidate_id=candidate.id,
         metadata={"questionCount": len(questions)},
     )
-    return {"candidateId": candidate.id, "questions": questions, "generatedAt": datetime.datetime.now(datetime.timezone.utc)}
+    return {
+        "candidateId": candidate.id,
+        "questions": questions,
+        "generatedAt": datetime.datetime.now(datetime.timezone.utc),
+    }
 
 
 @router.get("/google-drive/status")

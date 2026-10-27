@@ -34,7 +34,7 @@ DEFAULT_WEIGHTS: dict[str, dict[str, int]] = {
 SCORE_BANDS: tuple[tuple[float, str], ...] = (
     (85.0, "Excellent"),
     (70.0, "Good"),
-    (50.0, "Average"),
+    (60.0, "Average"),
     (0.0, "Weak"),
 )
 

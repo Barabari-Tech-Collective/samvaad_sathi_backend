@@ -436,17 +436,16 @@ async def run_candidate_pipeline(
     jev_mode_mismatch = bool(_jev_value(jev_answers, "experience_mode_mismatch"))
     fallback_mode_mismatch = (
         experience_mode == "fresher"
-        and not jev_scored
-        and total_experience_months >= 24
+        and total_experience_months >= 12
         and _has_sustained_professional_experience(parsed_resume_json)
     )
     experience_mode_mismatch = experience_mode == "fresher" and (
         jev_mode_mismatch or fallback_mode_mismatch
     )
+    review_gate = None
     if experience_mode_mismatch:
         candidate_field = infer_candidate_field(parsed_resume_json)
         warnings.append("experienced_candidate_in_fresher_batch")
-        warnings = sorted(set(warnings))
         review_gate = {
             "type": "experience_mode_mismatch",
             "status": "needs_review",
@@ -458,46 +457,11 @@ async def run_candidate_pipeline(
             "source": "jev" if jev_mode_mismatch else "deterministic_fallback",
             "message": (
                 f"This appears to be an experienced {candidate_field.label.lower()} "
-                "profile in a fresher evaluation. No comparable score was assigned; "
-                "route it to the appropriate experienced-role review."
+                "profile in a fresher evaluation. A provisional score is shown so the "
+                "candidate remains comparable, but a recruiter must route it to the "
+                "appropriate experienced-role review."
             ),
         }
-        deterministic_report = dict(deterministic_report)
-        deterministic_report["bulkAtsReviewGate"] = review_gate
-        deterministic_report["bulkAtsScorecard"] = {
-            "categoryScores": {},
-            "weights": {},
-            "weightedContributions": {},
-            "experienceMode": experience_mode,
-            "roleContext": role_context,
-            "domainProfile": domain_profile.as_dict(),
-            "scoreSuppressed": True,
-            "scoreSuppressedReason": "experience_mode_mismatch",
-            "evaluationIntentApplied": bool(evaluation_intent.strip()),
-            "scoringSources": (
-                "deterministic_and_jev" if jev_scored else "deterministic_only"
-            ),
-        }
-        deterministic_report["candidateBrief"] = {
-            "summary": review_gate["message"],
-            "strengths": [],
-            "gaps": [],
-            "warnings": warnings,
-            "recommendation": "Move to experienced-role manual review",
-        }
-        return CandidateResult(
-            status="needs_review",
-            error_message=None,
-            extracted_resume_text=resume_text,
-            parsed_resume_json=parsed_resume_json,
-            deterministic_report=deterministic_report,
-            jev_report=jev_report,
-            link_report=link_requirement_report,
-            final_score=None,
-            score_band=None,
-            needs_review=True,
-            warnings=warnings,
-        )
 
     # 5. Weighted final score. ATSCalculator's scoreBreakdown (skillsMatch,
     # experienceMatch, projectMatch, linkIntegrity, educationScore) is
@@ -521,6 +485,20 @@ async def run_candidate_pipeline(
             return (det_pct + jev_pct) / 2
         return det_pct if det_pct is not None else jev_pct
 
+    def evidence_weighted_skills(jev_pct: float | None) -> float | None:
+        """Prefer demonstrated skill evidence over keyword coverage.
+
+        The deterministic scorer remains useful for normalized coverage, but it
+        cannot distinguish a skill merely listed from one demonstrated in work.
+        Jev receives the project and experience context, so its assessment leads
+        whenever available.
+        """
+        det_pct = deterministic_breakdown.get("skillsMatch")
+        det_pct = float(det_pct) if isinstance(det_pct, (int, float)) else None
+        if det_pct is not None and jev_pct is not None:
+            return (det_pct * 0.2) + (jev_pct * 0.8)
+        return jev_pct if jev_pct is not None else det_pct
+
     education_quality_choice = _jev_value(jev_answers, "education_quality")
     education_jev_pct = (
         EDUCATION_QUALITY_SCORE.get(education_quality_choice)
@@ -535,13 +513,22 @@ async def run_candidate_pipeline(
         answer = jev_answers.get(question_id)
         return score_answer_to_pct(answer) if answer else None
 
+    jev_skills_pct = jev_score_pct("skills_score")
     category_pct = {
-        "skills": blended("skillsMatch", jev_score_pct("skills_score")),
+        "skills": evidence_weighted_skills(jev_skills_pct),
         "education": blended("educationScore", education_jev_pct),
         "experience": blended("experienceMatch", jev_score_pct("experience_relevance")),
         "projects": blended("projectMatch", jev_score_pct("project_quality")),
         "links": link_pct,
     }
+
+    deterministic_skills_pct = deterministic_breakdown.get("skillsMatch")
+    if (
+        isinstance(deterministic_skills_pct, (int, float))
+        and isinstance(jev_skills_pct, (int, float))
+        and deterministic_skills_pct - jev_skills_pct >= 20
+    ):
+        warnings.append("listed_skills_need_verification")
 
     if category_pct["skills"] is None:
         warnings.append("missing_skills_rubric")
@@ -592,7 +579,9 @@ async def run_candidate_pipeline(
         warnings.append("low_overall_confidence")
 
     needs_review = (
-        jev_needs_review
+        experience_mode_mismatch
+        or "listed_skills_need_verification" in warnings
+        or jev_needs_review
         or low_jev_confidence
         or confidence["level"] == "low"
         or bool(link_requirement_report["missing_required"])
@@ -607,6 +596,8 @@ async def run_candidate_pipeline(
         for key in weights
     }
     deterministic_report = dict(deterministic_report)
+    if review_gate is not None:
+        deterministic_report["bulkAtsReviewGate"] = review_gate
     deterministic_report["bulkAtsScorecard"] = {
         "categoryScores": {
             key: round(value, 2) if isinstance(value, (int, float)) else None
@@ -617,6 +608,7 @@ async def run_candidate_pipeline(
         "experienceMode": experience_mode,
         "roleContext": role_context,
         "evaluationIntentApplied": bool(evaluation_intent.strip()),
+        "provisional": experience_mode_mismatch,
         "domainProfile": domain_profile.as_dict(),
         "scoreApplicability": {
             "skills": category_pct["skills"] is not None,
