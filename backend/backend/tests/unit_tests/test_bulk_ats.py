@@ -1004,6 +1004,36 @@ def test_domain_aware_project_score_rewards_ownership_and_outcomes_without_githu
     assert "designed" in project["factorEvidence"]["ownership"]
 
 
+@pytest.mark.asyncio
+async def test_deepseek_project_review_stays_bound_to_saved_project(monkeypatch):
+    monkeypatch.setattr(settings, "BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED", True)
+    monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "test-key")
+    generated = deepseek_feedback.FeedbackPayload(
+        summary="Review the claimed result.",
+        projectReviews=[
+            {"projectName": "Community retention programme", "review": "The résumé claims an 18% retention improvement; ask how it was measured."},
+            {"projectName": "Other project", "review": "Unrelated generated content."},
+        ],
+    )
+    monkeypatch.setattr(
+        deepseek_feedback,
+        "_generate_validated_json",
+        AsyncMock(return_value=(generated, {"attempts": 1})),
+    )
+    brief, meta = await deepseek_feedback.enrich_candidate_brief(
+        role_name="Programme Manager",
+        scorecard={"categoryScores": {"projects": 72}},
+        evidence={},
+        warnings=[],
+        deterministic_brief={},
+        projects=[{"projectName": "Community retention programme", "score": 27, "breakdown": {"outcomes": 7}}],
+    )
+    assert meta["source"] == "deepseek"
+    assert brief["projectReviews"] == [
+        {"projectName": "Community retention programme", "review": "The résumé claims an 18% retention improvement; ask how it was measured."}
+    ]
+
+
 def test_candidate_detail_exposes_saved_project_claims_without_changing_score():
     candidate = SimpleNamespace(
         id=17,

@@ -693,6 +693,43 @@ async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> di
         confidence = scorecard.get("confidence") or {}
         score_interval = confidence.get("scoreInterval") or {}
         if result.deterministic_report and scorecard:
+            project_nodes = (
+                result.deterministic_report.get("deterministicMetrics", {})
+                .get("projectModule", {})
+                .get("projectEvaluation", [])
+            ) or []
+            parsed_projects = (result.parsed_resume_json or {}).get("projects") or []
+            if not isinstance(project_nodes, list):
+                project_nodes = []
+            if not isinstance(parsed_projects, list):
+                parsed_projects = []
+            compact_projects = []
+            for evaluation in project_nodes[:3]:
+                if not isinstance(evaluation, dict):
+                    continue
+                name = str(evaluation.get("projectName") or "").strip()
+                if not name:
+                    continue
+                source = next(
+                    (
+                        item for item in parsed_projects
+                        if isinstance(item, dict)
+                        and str(item.get("title") or "").strip().casefold() == name.casefold()
+                    ),
+                    {},
+                )
+                highlights = source.get("highlights") or []
+                if not isinstance(highlights, list):
+                    highlights = []
+                compact_projects.append({
+                    "projectName": name[:120],
+                    "description": str(source.get("description") or "")[:360],
+                    "highlights": [str(item)[:160] for item in highlights[:2]],
+                    "score": evaluation.get("score"),
+                    "breakdown": evaluation.get("breakdown") or {},
+                    "factorEvidence": evaluation.get("factorEvidence") or {},
+                    "gaps": (evaluation.get("detectedGaps") or [])[:2],
+                })
             brief, brief_meta = await enrich_candidate_brief(
                 role_name=batch.role_name,
                 scorecard=scorecard,
@@ -702,6 +739,7 @@ async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> di
                 or {},
                 existing_report=candidate.deterministic_report,
                 evaluation_intent=batch.evaluation_intent or "",
+                projects=compact_projects,
             )
             result.deterministic_report["candidateBrief"] = brief
             result.deterministic_report["candidateBriefMeta"] = brief_meta
