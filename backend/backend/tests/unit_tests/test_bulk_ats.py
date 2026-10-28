@@ -94,6 +94,32 @@ def test_score_bands_separate_weak_candidates_from_average_candidates():
     assert pipeline.score_band_for(60.0) == "Average"
 
 
+def test_candidate_summary_exposes_bounded_private_note_preview():
+    candidate = SimpleNamespace(
+        id=1,
+        candidate_name="Example",
+        email_or_candidate_id="example@test.invalid",
+        final_score=82,
+        score_band="Good",
+        status="completed",
+        needs_review=False,
+        warnings=[],
+        confidence_score=90,
+        score_lower_bound=None,
+        score_upper_bound=None,
+        reviewer_decision="shortlist",
+        interview_outcome="interviewed",
+        reviewer_notes="  " + "A" * 500,
+        assigned_reviewer_id=None,
+        deterministic_report=None,
+    )
+    summary = bulk_ats_routes._candidate_summary(candidate)
+    assert summary["hasReviewerNotes"] is True
+    assert summary["reviewerNotesPreview"] == "A" * 240
+    assert summary["reviewerDecision"] == "shortlist"
+    assert summary["interviewOutcome"] == "interviewed"
+
+
 @pytest.mark.asyncio
 async def test_partial_recruiter_update_preserves_notes_and_outcome():
     candidate = SimpleNamespace(
