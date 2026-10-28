@@ -31,20 +31,25 @@ def _difficulty_for_level(level: int) -> str:
 
 class JobProfileCRUDRepository(BaseCRUDRepository):
     # --- feature/roles-page-api methods ---
-    async def get_summary(self) -> dict:
+    async def get_summary(self, category: Optional[str] = None) -> dict:
         """
         Returns a summary count of job profiles based on their status in the database.
+        Optionally filtered by category / domain.
         """
         total_stmt = select(func.count()).select_from(JobProfile)
-        total_count = (await self.async_session.execute(total_stmt)).scalar() or 0
-        
         pending_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.UNDER_REVIEW)
-        pending_count = (await self.async_session.execute(pending_stmt)).scalar() or 0
-
         approved_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.PUBLISHED)
-        approved_count = (await self.async_session.execute(approved_stmt)).scalar() or 0
-
         rejected_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.CHANGES_REQUESTED)
+
+        if category:
+            total_stmt = total_stmt.where(JobProfile.category == category)
+            pending_stmt = pending_stmt.where(JobProfile.category == category)
+            approved_stmt = approved_stmt.where(JobProfile.category == category)
+            rejected_stmt = rejected_stmt.where(JobProfile.category == category)
+
+        total_count = (await self.async_session.execute(total_stmt)).scalar() or 0
+        pending_count = (await self.async_session.execute(pending_stmt)).scalar() or 0
+        approved_count = (await self.async_session.execute(approved_stmt)).scalar() or 0
         rejected_count = (await self.async_session.execute(rejected_stmt)).scalar() or 0
 
         return {
@@ -119,12 +124,16 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(profile)
         return profile
 
-    async def get_recent_activity(self, limit: int = 5) -> List[dict]:
+    async def get_recent_activity(self, limit: int = 5, category: Optional[str] = None) -> List[dict]:
         """
         Derives recent activity from JobProfile records.
         Returns the latest 'limit' profiles formatted as activity.
+        Optionally filtered by category / domain.
         """
-        query = select(JobProfile).order_by(JobProfile.created_at.desc()).limit(limit)
+        query = select(JobProfile)
+        if category:
+            query = query.where(JobProfile.category == category)
+        query = query.order_by(JobProfile.created_at.desc()).limit(limit)
         result = await self.async_session.execute(query)
         profiles = result.scalars().all()
         

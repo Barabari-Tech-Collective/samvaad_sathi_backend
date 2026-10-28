@@ -2639,4 +2639,69 @@ async def test_check_is_admin_dep_grants_viewer_access():
     assert await check_is_admin_dep(current_user=student_user, session=mock_session) is False
 
 
+@pytest.mark.asyncio
+async def test_resolve_effective_category_scopes_facilitator_to_domain():
+    from src.api.routes.job_profiles_v2 import resolve_effective_category
+
+    # Junior Facilitator with Sales domain in active membership
+    jr_user = MagicMock()
+    jr_user.id = 55
+    jr_user.is_admin = False
+    jr_user._token_is_admin = False
+    jr_user.is_super_admin = False
+    jr_user._token_is_super_admin = False
+    jr_user.email = "omer@test.com"
+    jr_user.role = "junior facilitator"
+    jr_user._token_role = "junior facilitator"
+
+    mock_member = MagicMock()
+    mock_member.access_role = "Junior Facilitator"
+    mock_member.domain = "Sales"
+    mock_team = MagicMock()
+    mock_team.name = "Program Team"
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(
+        return_value=MagicMock(all=lambda: [(mock_member, mock_team)])
+    )
+
+    # Even if no category query param is passed, effective category MUST be "Sales"
+    effective_cat = await resolve_effective_category(
+        current_user=jr_user,
+        session=mock_session,
+        requested_category=None,
+    )
+    assert effective_cat == "Sales"
+
+    # Even if they attempt to pass another category, facilitator stays scoped to their domain
+    effective_cat_override = await resolve_effective_category(
+        current_user=jr_user,
+        session=mock_session,
+        requested_category="Engineering",
+    )
+    assert effective_cat_override == "Sales"
+
+    # Admin user is NOT scoped to any domain and can view requested category or all
+    admin_user = MagicMock()
+    admin_user.is_admin = True
+    admin_user._token_is_admin = True
+    admin_user.is_super_admin = True
+    admin_user._token_is_super_admin = True
+
+    admin_all = await resolve_effective_category(
+        current_user=admin_user,
+        session=mock_session,
+        requested_category=None,
+    )
+    assert admin_all is None
+
+    admin_filtered = await resolve_effective_category(
+        current_user=admin_user,
+        session=mock_session,
+        requested_category="Engineering",
+    )
+    assert admin_filtered == "Engineering"
+
+
+
 
