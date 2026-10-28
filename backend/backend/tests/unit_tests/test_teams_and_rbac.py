@@ -2498,3 +2498,111 @@ def test_program_team_member_view_only_batch_progress():
     assert perms["can_access_practice_interview"] is False
     assert perms["can_access_ats"] is False
 
+
+def test_purpose_tag_exact_matching_prevents_ats_substring_leak():
+    """Security test: Naive substring matching on 'ats' must not grant ATS access for words like 'chats' or 'formats'."""
+    user = _make_user(807, email="leak_test@example.com")
+    member = MagicMock()
+    member.access_role = "Team Member"
+    member.purposes = ["chats with recruiters", "formats", "status tracking"]
+    member.colleges = None
+    team = MagicMock()
+    team.name = "Placement Team"
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_access_ats"] is False
+    assert perms["can_create_roles"] is False
+
+
+@pytest.mark.asyncio
+async def test_interview_viewer_guard_rejects_active_member_without_interview_perms_despite_stale_token():
+    """Security test: Active team member in DB without interview rights must be rejected even with a stale creator token."""
+    from src.api.dependencies.admin import get_current_interview_viewer_user
+
+    user = _make_user(808, email="stale_token@example.com")
+    user._token_role = "creator"  # Stale token claim
+
+    session = AsyncMock()
+    member = MagicMock()
+    member.access_role = "Team Member"
+    member.purposes = ["Check student progress"]  # Only student progress, no interviews
+    member.colleges = None
+    team = MagicMock()
+    team.name = "Program Team"
+
+    mock_res = MagicMock()
+    mock_res.all.return_value = [(member, team)]
+    session.execute.return_value = mock_res
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_interview_viewer_user(current_user=user, session=session)
+    assert exc_info.value.status_code == 403
+    assert "You do not have permission to view the interview portal" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_job_profile_questions_endpoint_allows_junior_facilitator():
+    """Route test: GET /job-profiles/{id}/questions allows Junior Facilitators via get_current_interview_viewer_user."""
+    from src.api.routes.job_profiles_v2 import get_job_profile_questions_v2
+
+    user = _make_user(809, email="jf_viewer@example.com")
+    mock_repo = AsyncMock()
+    mock_profile = MagicMock()
+    mock_profile.id = 42
+    mock_repo.get_by_id.return_value = mock_profile
+
+    mock_q = MagicMock()
+    mock_q.id = 101
+    mock_q.level = 1
+    mock_q.question_text = "Tell me about yourself."
+    mock_q.difficulty = "easy"
+    mock_q.question_type = "technical"
+    mock_q.expected_answer = "Clear answer"
+    mock_q.example_output = "Output"
+    mock_q.is_ai_generated = True
+    mock_q.is_custom = False
+    mock_q.created_at = datetime.datetime.now(datetime.timezone.utc)
+    mock_q.keywords = []
+    mock_q.concepts_covered = []
+    mock_repo.get_job_profile_questions.return_value = [mock_q]
+
+    resp = await get_job_profile_questions_v2(
+        job_profile_id=42,
+        current_user=user,
+        job_profile_repo=mock_repo,
+    )
+    assert str(resp.job_profile_id) == "42"
+    assert resp.total_questions == 1
+    assert resp.level_counts.level_1 == 1
+
+
+def test_cross_membership_unrestricted_creator_retains_privileges_with_tagged_member_elsewhere():
+    """Cross-membership test: Unrestricted Creator in Team 1 retains role creation and ATS even if Team 2 has tags."""
+    user = _make_user(810, email="multi_team_creator@example.com")
+    user._token_role = None
+
+    # Team 1: Unrestricted Placement Creator (purposes=None)
+    member_t1 = MagicMock()
+    member_t1.access_role = "Creator"
+    member_t1.purposes = None
+    member_t1.colleges = None
+    team_1 = MagicMock()
+    team_1.name = "Placement Team"
+
+    # Team 2: Program Team Member with student progress tag
+    member_t2 = MagicMock()
+    member_t2.access_role = "Team Member"
+    member_t2.purposes = ["Check student progress"]
+    member_t2.colleges = None
+    team_2 = MagicMock()
+    team_2.name = "Program Team"
+
+    perms = calculate_user_permissions(user, [(member_t1, team_1), (member_t2, team_2)])
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_ats"] is True
+    assert perms["can_edit"] is True
+    assert perms["can_access_interviews"] is True
+    assert perms["can_access_students"] is True
+    assert perms["colleges"] is None
+
+

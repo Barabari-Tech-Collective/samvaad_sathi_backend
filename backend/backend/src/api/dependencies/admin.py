@@ -226,6 +226,8 @@ def calculate_user_permissions(
     is_program_lead = False
     is_placement_creator = False
     is_program_creator = False
+    placement_creator_unrestricted = False
+    program_creator_unrestricted = False
     is_sr_facilitator = False
     is_junior_facilitator = False
     is_team_member = False
@@ -252,12 +254,14 @@ def calculate_user_permissions(
         m_role = normalize_role(getattr(member, "access_role", ""))
         m_purposes = getattr(member, "purposes", None)
 
+        member_has_purposes = False
         if m_purposes and isinstance(m_purposes, list):
             for p in m_purposes:
                 if p and isinstance(p, str):
                     cleaned = p.strip().lower().replace("_", " ")
                     if cleaned:
                         all_purposes.add(cleaned)
+                        member_has_purposes = True
                         has_explicit_purposes = True
 
         is_placement = any(kw in t_name for kw in ["placement", "partnership"])
@@ -290,8 +294,12 @@ def calculate_user_permissions(
         elif m_role in {"creator"}:
             if is_placement:
                 is_placement_creator = True
+                if not member_has_purposes:
+                    placement_creator_unrestricted = True
             else:
                 is_program_creator = True
+                if not member_has_purposes:
+                    program_creator_unrestricted = True
         elif m_role in TEAM_MEMBER_ROLES:
             is_team_member = True
 
@@ -310,15 +318,30 @@ def calculate_user_permissions(
             is_junior_facilitator = True
         elif token_role in {"creator"}:
             is_program_creator = True
+            program_creator_unrestricted = True
         elif token_role in TEAM_MEMBER_ROLES:
             is_team_member = True
 
-    # Check purpose tags
-    has_create_interview = any("create interview" in p or "interview" in p for p in all_purposes)
-    has_batch_progress = any("batch progress" in p or "batch" in p for p in all_purposes)
-    has_student_progress = any("student progress" in p or "student" in p for p in all_purposes)
-    has_college_progress = any("college progress" in p or "college" in p for p in all_purposes)
-    has_ats_purpose = any("ats" in p for p in all_purposes)
+    # Check purpose tags with exact token set matching to avoid substring collision
+    ATS_TAG_VARIANTS = {"ats", "bulk ats", "bulk_ats", "ats screening", "ats access"}
+    INTERVIEW_TAG_VARIANTS = {"create interview", "create_interview", "interview", "interviews"}
+    BATCH_TAG_VARIANTS = {"check batch progress", "batch progress", "batch"}
+    STUDENT_TAG_VARIANTS = {"check student progress", "student progress", "student", "students"}
+    COLLEGE_TAG_VARIANTS = {"check college progress", "college progress", "college", "colleges"}
+
+    has_create_interview = bool(all_purposes & INTERVIEW_TAG_VARIANTS) or any(
+        p.startswith("create interview") or p == "interview" for p in all_purposes
+    )
+    has_batch_progress = bool(all_purposes & BATCH_TAG_VARIANTS) or any(
+        "batch progress" in p for p in all_purposes
+    )
+    has_student_progress = bool(all_purposes & STUDENT_TAG_VARIANTS) or any(
+        "student progress" in p for p in all_purposes
+    )
+    has_college_progress = bool(all_purposes & COLLEGE_TAG_VARIANTS) or any(
+        "college progress" in p for p in all_purposes
+    )
+    has_ats_purpose = bool(all_purposes & ATS_TAG_VARIANTS)
 
     # 1. Edit & View-only capabilities:
     # Any Lead, Senior Facilitator, or Creator possesses edit capabilities.
@@ -332,19 +355,19 @@ def calculate_user_permissions(
     is_view_only = not can_edit
 
     # 2. Page access & Role creation:
-    # Role Creation: Leads, Senior Facilitators, and Creators (by default or with interview/batch tags)
+    # Role Creation: Leads, Senior Facilitators, and Creators (unrestricted on any team or with interview/batch tags)
     can_create_roles = bool(
         is_placement_lead
         or is_program_lead
         or is_sr_facilitator
-        or (is_placement_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
-        or (is_program_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
+        or (is_placement_creator and (placement_creator_unrestricted or has_create_interview or has_batch_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_create_interview or has_batch_progress))
     )
 
-    # Bulk ATS: Placement Leads, legacy/unrestricted Placement Creators, or users with explicit ATS tag/token claim
+    # Bulk ATS: Placement Leads, unrestricted Placement Creators, or users with explicit ATS tag/token claim
     can_access_ats = bool(
         is_placement_lead
-        or (is_placement_creator and (not has_explicit_purposes or has_ats_purpose or can_access_ats_token))
+        or (is_placement_creator and (placement_creator_unrestricted or has_ats_purpose or can_access_ats_token))
         or has_ats_purpose
         or can_access_ats_token
     )
@@ -355,50 +378,50 @@ def calculate_user_permissions(
         or is_program_lead
         or is_sr_facilitator
         or is_junior_facilitator
-        or (is_placement_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
-        or (is_program_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
+        or (is_placement_creator and (placement_creator_unrestricted or has_create_interview or has_batch_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_create_interview or has_batch_progress))
         or (is_team_member and (has_create_interview or has_batch_progress))
     )
 
-    # Practice Interview: Leads, Senior Facilitators, and Creators (by default or with interview/batch tag)
+    # Practice Interview: Leads, Senior Facilitators, and Creators (unrestricted or with interview/batch tag)
     can_access_practice_interview = bool(
         is_placement_lead
         or is_program_lead
         or is_sr_facilitator
-        or (is_placement_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
-        or (is_program_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
+        or (is_placement_creator and (placement_creator_unrestricted or has_create_interview or has_batch_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_create_interview or has_batch_progress))
     )
 
-    # Dashboard: Leads, Facilitators, or members/creators with batch progress tag (or legacy placement creators)
+    # Dashboard: Leads, Facilitators, or members/creators with batch progress tag (or unrestricted placement creators)
     can_access_dashboard = bool(
         is_placement_lead
         or is_program_lead
         or is_sr_facilitator
         or is_junior_facilitator
-        or (is_placement_creator and (not has_explicit_purposes or has_batch_progress))
-        or (is_program_creator and has_batch_progress)
+        or (is_placement_creator and (placement_creator_unrestricted or has_batch_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_batch_progress))
         or (is_team_member and has_batch_progress)
     )
 
-    # Students: Leads, Facilitators, or members/creators with batch/student progress tag (or legacy placement creators)
+    # Students: Leads, Facilitators, or members/creators with batch/student progress tag (or unrestricted placement creators)
     can_access_students = bool(
         is_placement_lead
         or is_program_lead
         or is_sr_facilitator
         or is_junior_facilitator
-        or (is_placement_creator and (not has_explicit_purposes or has_batch_progress or has_student_progress))
-        or (is_program_creator and (has_batch_progress or has_student_progress))
+        or (is_placement_creator and (placement_creator_unrestricted or has_batch_progress or has_student_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_batch_progress or has_student_progress))
         or (is_team_member and (has_batch_progress or has_student_progress))
     )
 
-    # Colleges: Leads, Facilitators, or members/creators with college progress tag (or legacy placement creators)
+    # Colleges: Leads, Facilitators, or members/creators with college progress tag (or unrestricted placement creators)
     can_access_colleges = bool(
         is_placement_lead
         or is_program_lead
         or is_sr_facilitator
         or is_junior_facilitator
-        or (is_placement_creator and (not has_explicit_purposes or has_college_progress))
-        or (is_program_creator and has_college_progress)
+        or (is_placement_creator and (placement_creator_unrestricted or has_college_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_college_progress))
         or (is_team_member and has_college_progress)
     )
 
@@ -632,6 +655,13 @@ async def get_current_interview_viewer_user(
             perms = calculate_user_permissions(current_user, memberships)
             if perms.get("can_access_interviews", False):
                 return current_user
+            # Authoritative rejection for active DB members without interview view permissions
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to view the interview portal.",
+            )
+
+    # Token fallback strictly for identities without active local team records (SSO / test mocks)
 
     role_from_token = normalize_role(
         getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")

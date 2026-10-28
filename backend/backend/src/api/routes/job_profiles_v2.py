@@ -740,7 +740,7 @@ async def get_generate_questions_status(
 )
 async def get_job_profile_questions_v2(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_creator_user),
+    current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileQuestionsListResponse:
     # 1. Validate job_profile_id exists
