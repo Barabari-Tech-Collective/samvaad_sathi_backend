@@ -1001,6 +1001,65 @@ def test_domain_aware_project_score_rewards_ownership_and_outcomes_without_githu
     }
 
 
+def test_candidate_detail_exposes_saved_project_claims_without_changing_score():
+    candidate = SimpleNamespace(
+        id=17,
+        candidate_name="Example Candidate",
+        email_or_candidate_id="example@example.test",
+        final_score=84,
+        score_band="strong",
+        status="completed",
+        needs_review=False,
+        warnings=[],
+        confidence_score=0.8,
+        score_lower_bound=None,
+        score_upper_bound=None,
+        reviewer_decision=None,
+        interview_outcome="interviewed",
+        assigned_reviewer_id=None,
+        parsed_resume_json={
+            "skills": [],
+            "projects": [
+                {
+                    "title": "CivicSphere",
+                    "description": "Built a service request tracker for local councils.",
+                    "highlights": ["Led the design", "Reduced request time by 20%"],
+                }
+            ],
+        },
+        original_filename="example.pdf",
+        resume_url=None,
+        batch=SimpleNamespace(role_name="Product manager"),
+        error_message=None,
+        deterministic_report={
+            "deterministicMetrics": {
+                "projectModule": {"projectEvaluation": [{"score": 28, "maxScore": 35}]}
+            }
+        },
+        jev_report=None,
+        link_report=None,
+        reviewer_notes=None,
+        decision_reason=None,
+        outcome_recorded_at=None,
+        created_at=datetime.datetime.now(datetime.timezone.utc),
+        updated_at=datetime.datetime.now(datetime.timezone.utc),
+    )
+
+    detail = bulk_ats_routes._candidate_detail(candidate)
+
+    assert detail["interviewOutcome"] == "interviewed"
+    assert detail["reviewerDecision"] is None
+    assert detail["parsedProjects"][0]["description"] == (
+        "Built a service request tracker for local councils."
+    )
+    assert detail["parsedProjects"][0]["highlights"][1] == (
+        "Reduced request time by 20%"
+    )
+    assert detail["deterministicReport"]["deterministicMetrics"]["projectModule"][
+        "projectEvaluation"
+    ][0]["score"] == 28
+
+
 def test_experience_fallback_does_not_treat_internships_as_professional_mismatch():
     assert not pipeline._has_sustained_professional_experience(
         {
