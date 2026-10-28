@@ -999,6 +999,9 @@ def test_domain_aware_project_score_rewards_ownership_and_outcomes_without_githu
         "outcomes",
         "supportingEvidence",
     }
+    assert "18%" in project["factorEvidence"]["outcomes"]
+    assert "programme" in project["factorEvidence"]["roleRelevance"]
+    assert "designed" in project["factorEvidence"]["ownership"]
 
 
 def test_candidate_detail_exposes_saved_project_claims_without_changing_score():

@@ -315,14 +315,18 @@ class ProjectScorer:
             else:
                 clarity = 2.0
 
-            ownership_hits = sum(
-                1 for word in ownership_words if re.search(rf"\b{word}\b", body)
+            ownership_matches = sorted(
+                word for word in ownership_words if re.search(rf"\b{word}\b", body)
             )
+            ownership_hits = len(ownership_matches)
             ownership = (
                 7.0 if ownership_hits >= 3 else 5.5 if ownership_hits >= 1 else 3.0
             )
 
-            keyword_hits = sum(1 for keyword in normalized_keywords if keyword in body)
+            matched_keywords = sorted(
+                keyword for keyword in normalized_keywords if keyword in body
+            )
+            keyword_hits = len(matched_keywords)
             if not normalized_keywords:
                 relevance = 4.5
             elif keyword_hits >= min(3, len(normalized_keywords)):
@@ -332,8 +336,12 @@ class ProjectScorer:
             else:
                 relevance = 2.5
 
-            has_metric = bool(self.metrics_pattern.search(body))
-            has_outcome = any(re.search(rf"\b{word}\b", body) for word in outcome_words)
+            metric_match = self.metrics_pattern.search(body)
+            has_metric = bool(metric_match)
+            outcome_matches = sorted(
+                word for word in outcome_words if re.search(rf"\b{word}\b", body)
+            )
+            has_outcome = bool(outcome_matches)
             outcomes = 7.0 if has_metric else 5.5 if has_outcome else 3.0
 
             repo = project.get("repository") or {}
@@ -377,6 +385,45 @@ class ProjectScorer:
                     "Add an appropriate work sample or enough detail for a recruiter to verify the outcome."
                 )
 
+            factor_evidence = {
+                "clarity": (
+                    f"The résumé gives {len(highlights)} project highlights and "
+                    f"{len(description.strip())} description characters."
+                ),
+                "ownership": (
+                    "Personal contribution is signalled by: "
+                    + ", ".join(ownership_matches[:5])
+                    + ". Confirm what the candidate personally delivered."
+                    if ownership_matches
+                    else "No clear action verb describes what the candidate personally delivered."
+                ),
+                "roleRelevance": (
+                    "Requested capabilities named in this project: "
+                    + ", ".join(matched_keywords[:5])
+                    + "."
+                    if matched_keywords
+                    else "No requested capability was named in this project description."
+                    if normalized_keywords
+                    else "No role capabilities were supplied for a project-level comparison."
+                ),
+                "outcomes": (
+                    f"A measurable claim ({metric_match.group().strip()}) is stated; verify its context."
+                    if metric_match
+                    else "An outcome is suggested by: "
+                    + ", ".join(outcome_matches[:4])
+                    + ". Ask for the actual result."
+                    if outcome_matches
+                    else "No result, learning, decision, or measurable impact is stated."
+                ),
+                "supportingEvidence": (
+                    "A repository or work-sample link was checked as working."
+                    if working_evidence
+                    else "A project URL is provided, but its contents were not assessed."
+                    if project_url
+                    else "No direct project URL was provided; the résumé details alone support this factor."
+                ),
+            }
+
             evaluations.append(
                 {
                     "projectName": title,
@@ -385,6 +432,7 @@ class ProjectScorer:
                     "rating": self._get_rating_label(project_total),
                     "projectUrl": project_url,
                     "detectedGaps": gaps,
+                    "factorEvidence": factor_evidence,
                     "domain": domain_profile.get("label", "General business"),
                     "breakdown": {
                         "clarity": clarity,
