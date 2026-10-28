@@ -2702,6 +2702,31 @@ async def test_resolve_effective_category_scopes_facilitator_to_domain():
     )
     assert admin_filtered == "Engineering"
 
+    # Team Lead user has global access across all domains
+    lead_user = MagicMock()
+    lead_user.id = 77
+    lead_user.is_admin = False
+    lead_user._token_is_admin = False
+    lead_user.is_super_admin = False
+    lead_user._token_is_super_admin = False
+    lead_user.role = "lead"
+    lead_user._token_role = "lead"
+
+    lead_all = await resolve_effective_category(
+        current_user=lead_user,
+        session=mock_session,
+        requested_category=None,
+    )
+    assert lead_all is None  # None means all interviews globally across all domains
+
+    lead_filtered = await resolve_effective_category(
+        current_user=lead_user,
+        session=mock_session,
+        requested_category="Engineering",
+    )
+    assert lead_filtered == "Engineering"
+
+
 
 
 

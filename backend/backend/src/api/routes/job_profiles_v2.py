@@ -12,6 +12,7 @@ from src.api.dependencies.admin import (
     calculate_user_permissions,
     CREATOR_ROLES,
     JUNIOR_ROLES,
+    LEAD_ROLES,
     normalize_role,
 )
 from src.api.dependencies.repository import get_repository
@@ -84,22 +85,26 @@ async def resolve_effective_category(
     requested_category: Optional[str] = None,
 ) -> Optional[str]:
     """Resolve category/domain filtering for interview endpoints.
-    - Super Admins and Global Admins can query any category or view all (None).
-    - Facilitators (Senior & Junior) and creators with an assigned team domain
-      are scoped strictly to their assigned domain.
+    - Super Admins, Global Admins, and Team Leads always have GLOBAL access across
+      all domains (returning requested_category directly, so None shows all interviews).
+    - Facilitators (Senior & Junior) with an assigned team domain are strictly scoped
+      to their assigned domain.
     """
     if isinstance(current_user, dict):
         user_id = current_user.get("id")
         user_role = normalize_role(current_user.get("role", ""))
         is_admin = current_user.get("is_admin", False)
+        is_lead = user_role in LEAD_ROLES
     else:
         user_id = getattr(current_user, "id", None)
         user_role = normalize_role(
             getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")
         )
         is_admin = is_admin_user(current_user)
+        is_lead = user_role in LEAD_ROLES
 
-    if is_admin:
+    # 1. Super Admins, Admins, and Team Leads always have global access across all domains
+    if is_admin or is_lead:
         return requested_category
 
     user_domain = None
@@ -111,6 +116,9 @@ async def resolve_effective_category(
             for item in memberships:
                 member = item[0] if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__") else item
                 m_role = normalize_role(getattr(member, "access_role", "") or getattr(member, "role", ""))
+                # If any active membership is a Lead, they inherit global access
+                if m_role in LEAD_ROLES:
+                    return requested_category
                 if m_role in JUNIOR_ROLES or m_role in {"sr facilitator", "senior facilitator"}:
                     is_facilitator = True
                 m_domain = getattr(member, "domain", None)
@@ -119,11 +127,11 @@ async def resolve_effective_category(
         except Exception:
             pass
 
-    # If the user is a facilitator with an assigned domain, their domain is authoritative
+    # Facilitators with an assigned domain are strictly scoped to their domain
     if is_facilitator and user_domain:
         return user_domain
 
-    return requested_category or user_domain
+    return requested_category
 
 
 @router.get(
