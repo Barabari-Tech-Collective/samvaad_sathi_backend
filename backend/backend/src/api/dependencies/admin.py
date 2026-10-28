@@ -320,116 +320,98 @@ def calculate_user_permissions(
     has_college_progress = any("college progress" in p or "college" in p for p in all_purposes)
     has_ats_purpose = any("ats" in p for p in all_purposes)
 
-    # 1. Edit & View-only capabilities
-    if is_placement_lead or is_program_lead or is_sr_facilitator or is_placement_creator or is_program_creator:
-        can_edit = True
-        is_view_only = False
-    elif is_junior_facilitator or is_team_member:
-        can_edit = False
-        is_view_only = True
-    else:
-        can_edit = False
-        is_view_only = True
+    # 1. Edit & View-only capabilities:
+    # Any Lead, Senior Facilitator, or Creator possesses edit capabilities.
+    can_edit = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_placement_creator
+        or is_program_creator
+    )
+    is_view_only = not can_edit
 
-    # 2. Page access & Role creation
-    if is_placement_lead:
-        # Placement Team Lead: full access to all pages including ATS
-        can_create_roles = True
-        can_access_interviews = True
-        can_access_practice_interview = True
-        can_access_dashboard = True
-        can_access_students = True
-        can_access_colleges = True
-        can_access_ats = True
-    elif is_program_lead:
-        # Program Team Lead: full access to all pages except ATS
-        can_create_roles = True
-        can_access_interviews = True
-        can_access_practice_interview = True
-        can_access_dashboard = True
-        can_access_students = True
-        can_access_colleges = True
-        can_access_ats = has_ats_purpose or can_access_ats_token
-    elif is_sr_facilitator:
-        # Senior Facilitator: can create/edit interview roles in their domain, full access to their colleges
-        can_create_roles = True
-        can_access_interviews = True
-        can_access_practice_interview = True
-        can_access_dashboard = True
-        can_access_students = True
-        can_access_colleges = True
-        can_access_ats = False
-    elif is_junior_facilitator:
-        # Junior Facilitator: view-only access to their colleges, can view interviews in their domain
-        can_create_roles = False
-        can_access_interviews = True
-        can_access_practice_interview = False
-        can_access_dashboard = True
-        can_access_students = True
-        can_access_colleges = True
-        can_access_ats = False
-    elif is_placement_creator:
-        # Placement Creator: tag-driven or default interview creation
-        if has_explicit_purposes:
-            can_create_roles = has_create_interview or has_batch_progress
-            can_access_interviews = has_create_interview or has_batch_progress
-            can_access_practice_interview = has_create_interview or has_batch_progress
-            can_access_dashboard = has_batch_progress
-            can_access_students = has_batch_progress or has_student_progress
-            can_access_colleges = has_college_progress
-            can_access_ats = has_ats_purpose or can_access_ats_token
-        else:
-            can_create_roles = True
-            can_access_interviews = True
-            can_access_practice_interview = True
-            can_access_dashboard = False
-            can_access_students = False
-            can_access_colleges = False
-            can_access_ats = can_access_ats_token
-    elif is_program_creator:
-        # Program Creator: tag-driven or default interview creation
-        if has_explicit_purposes:
-            can_create_roles = has_create_interview or has_batch_progress
-            can_access_interviews = has_create_interview or has_batch_progress
-            can_access_practice_interview = has_create_interview or has_batch_progress
-            can_access_dashboard = has_batch_progress
-            can_access_students = has_batch_progress or has_student_progress
-            can_access_colleges = has_college_progress
-            can_access_ats = False
-        else:
-            can_create_roles = True
-            can_access_interviews = True
-            can_access_practice_interview = True
-            can_access_dashboard = False
-            can_access_students = False
-            can_access_colleges = False
-            can_access_ats = False
-    elif is_team_member:
-        # Team Member: strictly view-only, driven by assigned tags
-        can_create_roles = False
-        can_access_interviews = has_create_interview or has_batch_progress
-        can_access_practice_interview = False
-        can_access_dashboard = has_batch_progress
-        can_access_students = has_batch_progress or has_student_progress
-        can_access_colleges = has_college_progress
-        can_access_ats = can_access_ats_token
-    else:
-        can_create_roles = False
-        can_access_interviews = False
-        can_access_practice_interview = False
-        can_access_dashboard = False
-        can_access_students = False
-        can_access_colleges = False
-        can_access_ats = can_access_ats_token
+    # 2. Page access & Role creation:
+    # Role Creation: Leads, Senior Facilitators, and Creators (by default or with interview/batch tags)
+    can_create_roles = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or (is_placement_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
+        or (is_program_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
+    )
+
+    # Bulk ATS: Placement Leads, legacy/unrestricted Placement Creators, or users with explicit ATS tag/token claim
+    can_access_ats = bool(
+        is_placement_lead
+        or (is_placement_creator and (not has_explicit_purposes or has_ats_purpose or can_access_ats_token))
+        or has_ats_purpose
+        or can_access_ats_token
+    )
+
+    # Interview Portal: All Leads, Senior/Junior Facilitators, Creators, or Team Members with interview/batch tag
+    can_access_interviews = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_junior_facilitator
+        or (is_placement_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
+        or (is_program_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
+        or (is_team_member and (has_create_interview or has_batch_progress))
+    )
+
+    # Practice Interview: Leads, Senior Facilitators, and Creators (by default or with interview/batch tag)
+    can_access_practice_interview = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or (is_placement_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
+        or (is_program_creator and (not has_explicit_purposes or has_create_interview or has_batch_progress))
+    )
+
+    # Dashboard: Leads, Facilitators, or members/creators with batch progress tag (or legacy placement creators)
+    can_access_dashboard = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_junior_facilitator
+        or (is_placement_creator and (not has_explicit_purposes or has_batch_progress))
+        or (is_program_creator and has_batch_progress)
+        or (is_team_member and has_batch_progress)
+    )
+
+    # Students: Leads, Facilitators, or members/creators with batch/student progress tag (or legacy placement creators)
+    can_access_students = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_junior_facilitator
+        or (is_placement_creator and (not has_explicit_purposes or has_batch_progress or has_student_progress))
+        or (is_program_creator and (has_batch_progress or has_student_progress))
+        or (is_team_member and (has_batch_progress or has_student_progress))
+    )
+
+    # Colleges: Leads, Facilitators, or members/creators with college progress tag (or legacy placement creators)
+    can_access_colleges = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_junior_facilitator
+        or (is_placement_creator and (not has_explicit_purposes or has_college_progress))
+        or (is_program_creator and has_college_progress)
+        or (is_team_member and has_college_progress)
+    )
 
     # 3. College Scoping:
-    # Junior Facilitators are strictly restricted to assigned colleges.
-    # Senior Facilitators are restricted to assigned colleges if provided; otherwise unrestricted (None).
     # Leads and Creators have unrestricted cross-college access (None).
-    if is_junior_facilitator:
-        colleges = junior_colleges if junior_colleges else []
+    # Senior Facilitators are restricted to assigned colleges if provided; otherwise unrestricted (None).
+    # Junior Facilitators are strictly restricted to assigned colleges.
+    if is_placement_lead or is_program_lead or is_placement_creator or is_program_creator:
+        colleges = None
     elif is_sr_facilitator:
         colleges = sr_colleges if sr_colleges else None
+    elif is_junior_facilitator:
+        colleges = junior_colleges if junior_colleges else []
     else:
         colleges = None
 
