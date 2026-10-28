@@ -3,7 +3,17 @@ from fastapi import File, UploadFile
 from typing import List, Optional
 import logging
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import get_current_creator_user, get_current_interview_viewer_user, get_user_active_memberships
+from src.api.dependencies.session import get_async_session
+from src.api.dependencies.admin import (
+    is_admin_user,
+    get_current_creator_user,
+    get_current_interview_viewer_user,
+    get_user_active_memberships,
+    calculate_user_permissions,
+    CREATOR_ROLES,
+    JUNIOR_ROLES,
+    normalize_role,
+)
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.job_profile import (
     JobProfileSummaryResponse,
@@ -45,11 +55,23 @@ from src.services.skills_extractor import extract_skills_from_text
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.syllabus_service import syllabus_service
-from src.api.dependencies.admin import is_admin_user
 from src.worker.queue import enqueue_job, get_job_status
 
-def check_is_admin_dep(current_user=fastapi.Depends(get_current_user)) -> bool:
-    return is_admin_user(current_user)
+
+async def check_is_admin_dep(
+    current_user=fastapi.Depends(get_current_user),
+    session=fastapi.Depends(get_async_session),
+) -> bool:
+    if is_admin_user(current_user):
+        return True
+    if session is not None:
+        memberships = await get_user_active_memberships(current_user.id, session)
+        if memberships:
+            perms = calculate_user_permissions(current_user, memberships)
+            if perms.get("can_access_interviews", False):
+                return True
+    role = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    return role in CREATOR_ROLES or role in JUNIOR_ROLES
 
 logger = logging.getLogger(__name__)
 

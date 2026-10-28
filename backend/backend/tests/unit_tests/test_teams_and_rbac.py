@@ -2606,3 +2606,37 @@ def test_cross_membership_unrestricted_creator_retains_privileges_with_tagged_me
     assert perms["colleges"] is None
 
 
+@pytest.mark.asyncio
+async def test_check_is_admin_dep_grants_viewer_access():
+    from src.api.routes.job_profiles_v2 import check_is_admin_dep
+
+    # Admin user
+    admin_user = MagicMock()
+    admin_user.is_admin = True
+    assert await check_is_admin_dep(current_user=admin_user, session=None) is True
+
+    # Junior Facilitator via token role
+    jr_user = MagicMock()
+    jr_user.is_admin = False
+    jr_user._token_is_admin = False
+    jr_user.email = "jr@test.com"
+    jr_user.role = "junior facilitator"
+    jr_user._token_role = "junior facilitator"
+    assert await check_is_admin_dep(current_user=jr_user, session=None) is True
+
+    # Regular student user
+    student_user = MagicMock()
+    student_user.id = 999
+    student_user.is_super_admin = False
+    student_user._token_is_super_admin = False
+    student_user.is_admin = False
+    student_user._token_is_admin = False
+    student_user.email = "student@test.com"
+    student_user.role = "student"
+    student_user._token_role = "student"
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+    assert await check_is_admin_dep(current_user=student_user, session=mock_session) is False
+
+
+
