@@ -136,6 +136,12 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
     is_team_lead = perms["is_team_lead"]
     effective_role = access_role or getattr(user, "_token_role", None) or getattr(user, "role", None)
 
+    can_access_dashboard = perms.get("can_access_dashboard", False)
+    can_access_students = perms.get("can_access_students", False)
+    can_access_colleges = perms.get("can_access_colleges", False)
+    can_access_interviews = perms.get("can_access_interviews", False)
+    can_access_practice_interview = perms.get("can_access_practice_interview", False)
+
     role_claim = (
         "SUPER_ADMIN" if is_super_admin_flag
         else ("ADMIN" if is_admin_flag
@@ -174,6 +180,11 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
         "can_edit": can_edit,
         "is_view_only": is_view_only,
         "is_team_lead": is_team_lead,
+        "can_access_dashboard": can_access_dashboard,
+        "can_access_students": can_access_students,
+        "can_access_colleges": can_access_colleges,
+        "can_access_interviews": can_access_interviews,
+        "can_access_practice_interview": can_access_practice_interview,
         "effective_role": effective_role,
         "role_claim": role_claim,
         "extra_claims": extra_claims,
@@ -241,6 +252,11 @@ async def login_user(
             can_access_ats=claims_data["can_access_ats"],
             can_edit=claims_data["can_edit"],
             is_view_only=claims_data["is_view_only"],
+            can_access_dashboard=claims_data.get("can_access_dashboard", False),
+            can_access_students=claims_data.get("can_access_students", False),
+            can_access_colleges=claims_data.get("can_access_colleges", False),
+            can_access_interviews=claims_data.get("can_access_interviews", False),
+            can_access_practice_interview=claims_data.get("can_access_practice_interview", False),
             team_name=claims_data["team_name"],
             can_use_bulk_ats=is_bulk_ats_user(user),
             degree=None,
@@ -371,6 +387,11 @@ async def get_me(
             can_access_ats=claims_data["can_access_ats"],
             can_edit=claims_data["can_edit"],
             is_view_only=claims_data["is_view_only"],
+            can_access_dashboard=claims_data.get("can_access_dashboard", False),
+            can_access_students=claims_data.get("can_access_students", False),
+            can_access_colleges=claims_data.get("can_access_colleges", False),
+            can_access_interviews=claims_data.get("can_access_interviews", False),
+            can_access_practice_interview=claims_data.get("can_access_practice_interview", False),
             team_name=claims_data["team_name"],
             can_use_bulk_ats=is_bulk_ats_user(current_user),
             degree=current_user.degree,

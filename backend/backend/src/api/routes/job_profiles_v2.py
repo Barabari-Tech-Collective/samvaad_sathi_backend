@@ -3,7 +3,7 @@ from fastapi import File, UploadFile
 from typing import List, Optional
 import logging
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import get_current_creator_user
+from src.api.dependencies.admin import get_current_creator_user, get_current_interview_viewer_user, get_user_active_memberships
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.job_profile import (
     JobProfileSummaryResponse,
@@ -63,7 +63,7 @@ router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles-v2"])
     summary="Get recent role-related activity",
 )
 async def get_recent_activity(
-    current_user=fastapi.Depends(get_current_creator_user),
+    current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> List[JobProfileActivityResponse]:
     """
@@ -81,7 +81,7 @@ async def get_recent_activity(
     summary="Get summary counts for Job Profiles",
 )
 async def get_job_profiles_summary(
-    current_user=fastapi.Depends(get_current_creator_user),
+    current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileSummaryResponse:
     """
@@ -122,6 +122,18 @@ async def create_job_profile(
     current_user=fastapi.Depends(get_current_creator_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileResponse:
+    creator_domain = None
+    if not is_admin_user(current_user):
+        memberships = await get_user_active_memberships(current_user.id, job_profile_repo.async_session)
+        for item in memberships:
+            member = item[0] if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__") else item
+            m_domain = getattr(member, "domain", None)
+            if m_domain:
+                creator_domain = m_domain
+                break
+
+    effective_category = payload.category or creator_domain
+
     profile = await job_profile_repo.create_profile(
         job_name=payload.job_name,
         job_description=payload.job_description,
@@ -129,7 +141,7 @@ async def create_job_profile(
         experience_level=payload.experience_level,
         skills=payload.skills,
         additional_context=payload.additional_context,
-        category=payload.category,
+        category=effective_category,
         employment_type=payload.employment_type,
         interview_mode=payload.interview_mode,
         created_by=current_user.id,
@@ -200,7 +212,7 @@ async def update_job_profile_review(
 )
 async def get_job_profile_review(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_creator_user),
+    current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileReviewResponse:
     # 1. Fetch JobProfile record
@@ -728,7 +740,7 @@ async def get_generate_questions_status(
 )
 async def get_job_profile_questions_v2(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_creator_user),
+    current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileQuestionsListResponse:
     # 1. Validate job_profile_id exists

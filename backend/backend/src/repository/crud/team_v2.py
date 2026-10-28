@@ -166,15 +166,15 @@ class TeamCRUDRepository(BaseCRUDRepository):
             raise EntityDoesNotExist("Team not found or is inactive")
 
         clean_role = (member_data.access_role or "").strip().replace("_", " ").lower()
-        if clean_role in {"jr facilitator", "junior facilitator"}:
+        if clean_role in {"jr facilitator", "junior facilitator", "sr facilitator", "senior facilitator"}:
             sanitized_colleges = (
                 [c.strip() for c in member_data.colleges if isinstance(c, str) and c.strip()]
                 if member_data.colleges is not None
                 else []
             )
-            if not sanitized_colleges:
+            if clean_role in {"jr facilitator", "junior facilitator"} and not sanitized_colleges:
                 raise ValueError("Assigned colleges are required when adding a Junior Facilitator.")
-            assigned_colleges = sanitized_colleges
+            assigned_colleges = sanitized_colleges if sanitized_colleges else None
         else:
             # Team Members and Creators are not assigned specific colleges (they view all colleges)
             assigned_colleges = None
@@ -430,6 +430,10 @@ class TeamCRUDRepository(BaseCRUDRepository):
                 or not any(isinstance(c, str) and c.strip() for c in member.colleges)
             ):
                 raise ValueError("Assigned colleges are required when changing role to Junior Facilitator.")
+        elif effective_role in {"sr facilitator", "senior facilitator"}:
+            if member_data.colleges is not None:
+                clean_colleges = [c.strip() for c in member_data.colleges if isinstance(c, str) and c.strip()]
+                member.colleges = clean_colleges if clean_colleges else None
         elif member_data.colleges is not None:
             member.colleges = [c.strip() for c in member_data.colleges if isinstance(c, str) and c.strip()]
 

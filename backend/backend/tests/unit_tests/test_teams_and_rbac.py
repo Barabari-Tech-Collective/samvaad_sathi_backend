@@ -22,6 +22,7 @@ from src.api.dependencies.admin import (
     is_admin_user,
     is_super_admin_user,
     is_team_authorized_user,
+    calculate_user_permissions,
 )
 from src.config.manager import settings
 from src.models.db.team import Team
@@ -1158,6 +1159,109 @@ def test_permission_matrix_placement_creator():
     assert perms["is_team_lead"] is True
 
 
+def test_placement_creator_only_create_interview_tag():
+    """Placement Creator with ONLY 'Create interview' tag:
+    Gets interview creation, practice interview, but NO bulk ATS and NO dashboard/student/college pages.
+    """
+    from src.api.dependencies.admin import calculate_user_permissions
+
+    user = _make_user(110, email="creator_interview@barabari.org")
+    team = Team(id=1, name="Placement Team", status="active")
+    member = TeamMember(
+        id=10, team_id=1, user_id=110, access_role="Creator", status="active",
+        purposes=["Create interview"]
+    )
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_create_roles"] is True
+    assert perms["can_edit"] is True
+    assert perms["is_view_only"] is False
+    assert perms["can_access_interviews"] is True
+    assert perms["can_access_practice_interview"] is True
+    assert perms["can_access_ats"] is False  # Dedicated ATS tag required
+    assert perms["can_access_dashboard"] is False
+    assert perms["can_access_students"] is False
+    assert perms["can_access_colleges"] is False
+
+
+def test_placement_creator_batch_progress_tag():
+    """Placement Creator with 'Check batch progress' tag:
+    Gets dashboard page, student page, interview page, and edit access.
+    """
+    from src.api.dependencies.admin import calculate_user_permissions
+
+    user = _make_user(111, email="creator_batch@barabari.org")
+    team = Team(id=1, name="Placement Team", status="active")
+    member = TeamMember(
+        id=11, team_id=1, user_id=111, access_role="Creator", status="active",
+        purposes=["Check batch progress"]
+    )
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_access_dashboard"] is True
+    assert perms["can_access_students"] is True
+    assert perms["can_access_interviews"] is True
+    assert perms["can_edit"] is True
+    assert perms["can_access_colleges"] is False
+
+
+def test_placement_creator_student_progress_tag():
+    """Placement Creator with ONLY 'Check student progress' tag:
+    Gets student page only; Colleges page and Dashboard page are hidden.
+    """
+    from src.api.dependencies.admin import calculate_user_permissions
+
+    user = _make_user(112, email="creator_student@barabari.org")
+    team = Team(id=1, name="Placement Team", status="active")
+    member = TeamMember(
+        id=12, team_id=1, user_id=112, access_role="Creator", status="active",
+        purposes=["Check student progress"]
+    )
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_access_students"] is True
+    assert perms["can_edit"] is True
+    assert perms["can_access_colleges"] is False
+    assert perms["can_access_dashboard"] is False
+    assert perms["can_access_interviews"] is False
+
+
+def test_placement_creator_college_progress_tag():
+    """Placement Creator with ONLY 'Check college progress' tag:
+    Gets college page only.
+    """
+    from src.api.dependencies.admin import calculate_user_permissions
+
+    user = _make_user(113, email="creator_college@barabari.org")
+    team = Team(id=1, name="Placement Team", status="active")
+    member = TeamMember(
+        id=13, team_id=1, user_id=113, access_role="Creator", status="active",
+        purposes=["Check college progress"]
+    )
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_access_colleges"] is True
+    assert perms["can_access_students"] is False
+    assert perms["can_access_dashboard"] is False
+
+
+def test_placement_creator_with_ats_tag():
+    """Placement Creator with ATS tag: gets bulk ATS access."""
+    from src.api.dependencies.admin import calculate_user_permissions
+
+    user = _make_user(114, email="creator_ats@barabari.org")
+    team = Team(id=1, name="Placement Team", status="active")
+    member = TeamMember(
+        id=14, team_id=1, user_id=114, access_role="Creator", status="active",
+        purposes=["Create interview", "Bulk ATS"]
+    )
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_access_ats"] is True
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_interviews"] is True
+
+
 def test_permission_matrix_placement_team_member():
     """2. Placement Team Member: view access only, no colleges assigned, no edit access, no ATS."""
     from src.api.dependencies.admin import calculate_user_permissions
@@ -2238,3 +2342,267 @@ async def test_login_user_handles_senior_facilitator_with_row_memberships():
         assert call_claims.get("role") == "SENIOR FACILITATOR"
         assert resp.authorized_user.access_role == "Senior Facilitator"
         assert resp.authorized_user.team_name == "Program Team"
+
+
+def test_program_team_lead_permissions():
+    """Program Team Lead gets all core pages, full edit access, unrestricted colleges, but no ATS."""
+    user = _make_user(801, email="prog_lead@example.com")
+    user._token_role = None
+    user._token_is_admin = False
+    user._token_is_super_admin = False
+    member = MagicMock()
+    member.access_role = "Team Lead"
+    member.purposes = None
+    member.colleges = None
+
+    team = MagicMock()
+    team.name = "Program Team"
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["is_team_lead"] is True
+    assert perms["can_edit"] is True
+    assert perms["is_view_only"] is False
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_dashboard"] is True
+    assert perms["can_access_students"] is True
+    assert perms["can_access_colleges"] is True
+    assert perms["can_access_interviews"] is True
+    assert perms["can_access_practice_interview"] is True
+    assert perms["can_access_ats"] is False
+    assert perms["colleges"] is None
+
+
+def test_program_senior_facilitator_with_assigned_colleges():
+    """Senior Facilitator with assigned colleges gets edit access, role creation, and scoped colleges."""
+    user = _make_user(802, email="sr_fac@example.com")
+    user._token_role = None
+    user._token_is_admin = False
+    user._token_is_super_admin = False
+    member = MagicMock()
+    member.access_role = "Sr Facilitator"
+    member.purposes = None
+    member.colleges = ["CMRIT", "VNRVJIET"]
+
+    team = MagicMock()
+    team.name = "Program Team"
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_edit"] is True
+    assert perms["is_view_only"] is False
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_interviews"] is True
+    assert perms["can_access_practice_interview"] is True
+    assert perms["can_access_dashboard"] is True
+    assert perms["can_access_students"] is True
+    assert perms["can_access_colleges"] is True
+    assert perms["can_access_ats"] is False
+    assert perms["colleges"] == ["CMRIT", "VNRVJIET"]
+
+
+def test_program_senior_facilitator_unrestricted_colleges():
+    """Senior Facilitator without assigned colleges has unrestricted college access."""
+    user = _make_user(803, email="sr_fac_unrestricted@example.com")
+    user._token_role = None
+    user._token_is_admin = False
+    user._token_is_super_admin = False
+    member = MagicMock()
+    member.access_role = "Senior Facilitator"
+    member.purposes = None
+    member.colleges = None
+
+    team = MagicMock()
+    team.name = "Program Team"
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_edit"] is True
+    assert perms["can_create_roles"] is True
+    assert perms["colleges"] is None
+
+
+def test_program_junior_facilitator_permissions():
+    """Junior Facilitator is strictly view-only, cannot create roles, but can view interviews and their colleges."""
+    user = _make_user(804, email="jr_fac@example.com")
+    user._token_role = None
+    user._token_is_admin = False
+    user._token_is_super_admin = False
+    member = MagicMock()
+    member.access_role = "Jr Facilitator"
+    member.purposes = None
+    member.colleges = ["CMRIT"]
+
+    team = MagicMock()
+    team.name = "Program Team"
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_edit"] is False
+    assert perms["is_view_only"] is True
+    assert perms["can_create_roles"] is False
+    assert perms["can_access_interviews"] is True
+    assert perms["can_access_practice_interview"] is False
+    assert perms["can_access_dashboard"] is True
+    assert perms["can_access_students"] is True
+    assert perms["can_access_colleges"] is True
+    assert perms["can_access_ats"] is False
+    assert perms["colleges"] == ["CMRIT"]
+
+
+def test_program_creator_single_interview_purpose():
+    """Program Creator with 'Create interview' gets creator portal, practice, edit, but no dashboard/students/colleges/ATS."""
+    user = _make_user(805, email="prog_creator@example.com")
+    user._token_role = None
+    user._token_is_admin = False
+    user._token_is_super_admin = False
+    member = MagicMock()
+    member.access_role = "Creator"
+    member.purposes = ["Create interview"]
+    member.colleges = None
+
+    team = MagicMock()
+    team.name = "Program Team"
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_edit"] is True
+    assert perms["is_view_only"] is False
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_interviews"] is True
+    assert perms["can_access_practice_interview"] is True
+    assert perms["can_access_dashboard"] is False
+    assert perms["can_access_students"] is False
+    assert perms["can_access_colleges"] is False
+    assert perms["can_access_ats"] is False
+    assert perms["colleges"] is None
+
+
+def test_program_team_member_view_only_batch_progress():
+    """Program Team Member with 'Check batch progress' gets view-only Dashboard + Students."""
+    user = _make_user(806, email="prog_member@example.com")
+    user._token_role = None
+    user._token_is_admin = False
+    user._token_is_super_admin = False
+    member = MagicMock()
+    member.access_role = "Team Member"
+    member.purposes = ["Check batch progress"]
+    member.colleges = None
+
+    team = MagicMock()
+    team.name = "Program Team"
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_edit"] is False
+    assert perms["is_view_only"] is True
+    assert perms["can_create_roles"] is False
+    assert perms["can_access_dashboard"] is True
+    assert perms["can_access_students"] is True
+    assert perms["can_access_colleges"] is False
+    assert perms["can_access_interviews"] is True
+    assert perms["can_access_practice_interview"] is False
+    assert perms["can_access_ats"] is False
+
+
+def test_purpose_tag_exact_matching_prevents_ats_substring_leak():
+    """Security test: Naive substring matching on 'ats' must not grant ATS access for words like 'chats' or 'formats'."""
+    user = _make_user(807, email="leak_test@example.com")
+    member = MagicMock()
+    member.access_role = "Team Member"
+    member.purposes = ["chats with recruiters", "formats", "status tracking"]
+    member.colleges = None
+    team = MagicMock()
+    team.name = "Placement Team"
+
+    perms = calculate_user_permissions(user, [(member, team)])
+    assert perms["can_access_ats"] is False
+    assert perms["can_create_roles"] is False
+
+
+@pytest.mark.asyncio
+async def test_interview_viewer_guard_rejects_active_member_without_interview_perms_despite_stale_token():
+    """Security test: Active team member in DB without interview rights must be rejected even with a stale creator token."""
+    from src.api.dependencies.admin import get_current_interview_viewer_user
+
+    user = _make_user(808, email="stale_token@example.com")
+    user._token_role = "creator"  # Stale token claim
+
+    session = AsyncMock()
+    member = MagicMock()
+    member.access_role = "Team Member"
+    member.purposes = ["Check student progress"]  # Only student progress, no interviews
+    member.colleges = None
+    team = MagicMock()
+    team.name = "Program Team"
+
+    mock_res = MagicMock()
+    mock_res.all.return_value = [(member, team)]
+    session.execute.return_value = mock_res
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await get_current_interview_viewer_user(current_user=user, session=session)
+    assert exc_info.value.status_code == 403
+    assert "You do not have permission to view the interview portal" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_job_profile_questions_endpoint_allows_junior_facilitator():
+    """Route test: GET /job-profiles/{id}/questions allows Junior Facilitators via get_current_interview_viewer_user."""
+    from src.api.routes.job_profiles_v2 import get_job_profile_questions_v2
+
+    user = _make_user(809, email="jf_viewer@example.com")
+    mock_repo = AsyncMock()
+    mock_profile = MagicMock()
+    mock_profile.id = 42
+    mock_repo.get_by_id.return_value = mock_profile
+
+    mock_q = MagicMock()
+    mock_q.id = 101
+    mock_q.level = 1
+    mock_q.question_text = "Tell me about yourself."
+    mock_q.difficulty = "easy"
+    mock_q.question_type = "technical"
+    mock_q.expected_answer = "Clear answer"
+    mock_q.example_output = "Output"
+    mock_q.is_ai_generated = True
+    mock_q.is_custom = False
+    mock_q.created_at = datetime.datetime.now(datetime.timezone.utc)
+    mock_q.keywords = []
+    mock_q.concepts_covered = []
+    mock_repo.get_job_profile_questions.return_value = [mock_q]
+
+    resp = await get_job_profile_questions_v2(
+        job_profile_id=42,
+        current_user=user,
+        job_profile_repo=mock_repo,
+    )
+    assert str(resp.job_profile_id) == "42"
+    assert resp.total_questions == 1
+    assert resp.level_counts.level_1 == 1
+
+
+def test_cross_membership_unrestricted_creator_retains_privileges_with_tagged_member_elsewhere():
+    """Cross-membership test: Unrestricted Creator in Team 1 retains role creation and ATS even if Team 2 has tags."""
+    user = _make_user(810, email="multi_team_creator@example.com")
+    user._token_role = None
+
+    # Team 1: Unrestricted Placement Creator (purposes=None)
+    member_t1 = MagicMock()
+    member_t1.access_role = "Creator"
+    member_t1.purposes = None
+    member_t1.colleges = None
+    team_1 = MagicMock()
+    team_1.name = "Placement Team"
+
+    # Team 2: Program Team Member with student progress tag
+    member_t2 = MagicMock()
+    member_t2.access_role = "Team Member"
+    member_t2.purposes = ["Check student progress"]
+    member_t2.colleges = None
+    team_2 = MagicMock()
+    team_2.name = "Program Team"
+
+    perms = calculate_user_permissions(user, [(member_t1, team_1), (member_t2, team_2)])
+    assert perms["can_create_roles"] is True
+    assert perms["can_access_ats"] is True
+    assert perms["can_edit"] is True
+    assert perms["can_access_interviews"] is True
+    assert perms["can_access_students"] is True
+    assert perms["colleges"] is None
+
+
