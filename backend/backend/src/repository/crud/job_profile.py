@@ -41,11 +41,12 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         approved_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.PUBLISHED)
         rejected_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.CHANGES_REQUESTED)
 
-        if category:
-            total_stmt = total_stmt.where(JobProfile.category == category)
-            pending_stmt = pending_stmt.where(JobProfile.category == category)
-            approved_stmt = approved_stmt.where(JobProfile.category == category)
-            rejected_stmt = rejected_stmt.where(JobProfile.category == category)
+        if category and category.strip():
+            cat_clean = category.strip().lower()
+            total_stmt = total_stmt.where(func.lower(JobProfile.category) == cat_clean)
+            pending_stmt = pending_stmt.where(func.lower(JobProfile.category) == cat_clean)
+            approved_stmt = approved_stmt.where(func.lower(JobProfile.category) == cat_clean)
+            rejected_stmt = rejected_stmt.where(func.lower(JobProfile.category) == cat_clean)
 
         total_count = (await self.async_session.execute(total_stmt)).scalar() or 0
         pending_count = (await self.async_session.execute(pending_stmt)).scalar() or 0
@@ -71,8 +72,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         
         if not is_admin:
             query = query.where(JobProfile.status == JobProfileStatus.PUBLISHED)
-        if category:
-            query = query.where(JobProfile.category == category)
+        if category and category.strip():
+            query = query.where(func.lower(JobProfile.category) == category.strip().lower())
         if limit is not None:
             query = query.limit(limit)
         result = await self.async_session.execute(query)
@@ -131,8 +132,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         Optionally filtered by category / domain.
         """
         query = select(JobProfile)
-        if category:
-            query = query.where(JobProfile.category == category)
+        if category and category.strip():
+            query = query.where(func.lower(JobProfile.category) == category.strip().lower())
         query = query.order_by(JobProfile.created_at.desc()).limit(limit)
         result = await self.async_session.execute(query)
         profiles = result.scalars().all()

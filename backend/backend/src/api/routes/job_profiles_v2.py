@@ -107,8 +107,9 @@ async def resolve_effective_category(
     if is_admin or is_lead:
         return requested_category
 
+    FACILITATOR_ROLES = JUNIOR_ROLES | {"sr facilitator", "senior facilitator", "facilitator"}
     user_domain = None
-    is_facilitator = user_role in JUNIOR_ROLES or user_role in {"sr facilitator", "senior facilitator"}
+    is_facilitator = user_role in FACILITATOR_ROLES
 
     if session is not None and user_id is not None:
         try:
@@ -119,7 +120,7 @@ async def resolve_effective_category(
                 # If any active membership is a Lead, they inherit global access
                 if m_role in LEAD_ROLES:
                     return requested_category
-                if m_role in JUNIOR_ROLES or m_role in {"sr facilitator", "senior facilitator"}:
+                if m_role in FACILITATOR_ROLES:
                     is_facilitator = True
                 m_domain = getattr(member, "domain", None)
                 if m_domain and isinstance(m_domain, str) and m_domain.strip():
