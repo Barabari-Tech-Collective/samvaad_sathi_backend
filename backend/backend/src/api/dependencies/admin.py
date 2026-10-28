@@ -199,17 +199,13 @@ def calculate_user_permissions(
 ) -> dict:
     """Calculate explicit role-based permissions for a user across teams.
 
-    Enforces the following rules:
-    1. Partnership / Placement Team:
-       - Creator: can_create_roles=True, can_access_ats=True, can_edit=True, is_view_only=False, colleges=None
-       - Team Member: can_create_roles=False, can_access_ats=False, can_edit=False, is_view_only=True, colleges=None
-    2. Program Team:
-       - Creator: can_create_roles=True, can_access_ats=False, can_edit=True, is_view_only=False, colleges=None
-       - Senior Facilitator: can_create_roles=True, can_access_ats=False, can_edit=True, is_view_only=False, colleges=None
-       - Junior Facilitator: can_create_roles=False, can_access_ats=False, can_edit=False, is_view_only=True, colleges=member.colleges
-       - Team Member: can_create_roles=False, can_access_ats=False, can_edit=False, is_view_only=True, colleges=None
-    3. Global Admin / Super Admin:
-       - All permissions=True, is_view_only=False, colleges=None
+    Enforces granular page-level and action-level permissions based on team type,
+    access role (Creator, Lead, Facilitator, Team Member), and purpose tags:
+    - Tag 'Create interview': Interview Creation/Roles page, interview analytics, practice interview mode.
+    - Tag 'Check batch progress': Dashboard page (batch metrics), Students page, and Interview page.
+    - Tag 'Check student progress': Students page only (view & edit candidate details); Colleges page remains hidden.
+    - Tag 'Check college progress': Colleges page only (cross-institution analytics).
+    - ATS feature: Dedicated tag/role grant.
     """
     if is_admin_user(user):
         return {
@@ -219,13 +215,25 @@ def calculate_user_permissions(
             "is_view_only": False,
             "colleges": None,
             "is_team_lead": True,
+            "can_access_dashboard": True,
+            "can_access_students": True,
+            "can_access_colleges": True,
+            "can_access_interviews": True,
+            "can_access_practice_interview": True,
         }
 
+    is_placement_lead = False
+    is_program_lead = False
     is_placement_creator = False
-    is_program_creator_or_sr = False
+    is_program_creator = False
+    is_sr_facilitator = False
     is_junior_facilitator = False
     is_team_member = False
     junior_colleges: list[str] = []
+    sr_colleges: list[str] = []
+
+    all_purposes: set[str] = set()
+    has_explicit_purposes = False
 
     for item in memberships:
         if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__"):
@@ -239,16 +247,36 @@ def calculate_user_permissions(
             member = item
             team = getattr(member, "team", None)
 
-        t_name = (getattr(team, "name", "") or "").strip().lower() if team else ""
+        raw_team_name = getattr(team, "name", "")
+        t_name = raw_team_name.strip().lower() if isinstance(raw_team_name, str) else ""
         m_role = normalize_role(getattr(member, "access_role", ""))
+        m_purposes = getattr(member, "purposes", None)
+
+        if m_purposes and isinstance(m_purposes, list):
+            for p in m_purposes:
+                if p and isinstance(p, str):
+                    cleaned = p.strip().lower().replace("_", " ")
+                    if cleaned:
+                        all_purposes.add(cleaned)
+                        has_explicit_purposes = True
 
         is_placement = any(kw in t_name for kw in ["placement", "partnership"])
 
-        if m_role in CREATOR_ROLES:
+        if m_role in {"lead", "team lead", "manager"}:
             if is_placement:
-                is_placement_creator = True
+                is_placement_lead = True
             else:
-                is_program_creator_or_sr = True
+                is_program_lead = True
+        elif m_role in {"sr facilitator", "senior facilitator"}:
+            is_sr_facilitator = True
+            if (
+                member
+                and getattr(member, "colleges", None)
+                and isinstance(member.colleges, list)
+            ):
+                sr_colleges.extend(
+                    [c for c in member.colleges if isinstance(c, str) and c.strip()]
+                )
         elif m_role in JUNIOR_ROLES:
             is_junior_facilitator = True
             if (
@@ -259,6 +287,11 @@ def calculate_user_permissions(
                 junior_colleges.extend(
                     [c for c in member.colleges if isinstance(c, str) and c.strip()]
                 )
+        elif m_role in {"creator"}:
+            if is_placement:
+                is_placement_creator = True
+            else:
+                is_program_creator = True
         elif m_role in TEAM_MEMBER_ROLES:
             is_team_member = True
 
@@ -269,32 +302,140 @@ def calculate_user_permissions(
     can_access_ats_token = token_role in _BULK_ATS_ROLES
 
     if not memberships:
-        if token_role in CREATOR_ROLES:
-            is_program_creator_or_sr = True
+        if token_role in {"lead", "team lead", "manager"}:
+            is_program_lead = True
+        elif token_role in {"sr facilitator", "senior facilitator"}:
+            is_sr_facilitator = True
         elif token_role in JUNIOR_ROLES:
             is_junior_facilitator = True
+        elif token_role in {"creator"}:
+            is_program_creator = True
         elif token_role in TEAM_MEMBER_ROLES:
             is_team_member = True
 
-    can_access_ats = is_placement_creator or can_access_ats_token
-    can_create_roles = is_placement_creator or is_program_creator_or_sr
-    can_edit = can_create_roles
-    is_view_only = not can_edit
+    # Check purpose tags
+    has_create_interview = any("create interview" in p or "interview" in p for p in all_purposes)
+    has_batch_progress = any("batch progress" in p or "batch" in p for p in all_purposes)
+    has_student_progress = any("student progress" in p or "student" in p for p in all_purposes)
+    has_college_progress = any("college progress" in p or "college" in p for p in all_purposes)
+    has_ats_purpose = any("ats" in p for p in all_purposes)
 
-    # Scoping colleges:
-    # Junior Facilitators are strictly restricted to their assigned colleges.
-    # Being a generic Team Member elsewhere does not widen a Junior Facilitator's college access.
-    # Creators and Senior Facilitators (and pure Team Members) have unrestricted access (None).
-    if is_placement_creator or is_program_creator_or_sr:
-        colleges = None
+    # 1. Edit & View-only capabilities
+    if is_placement_lead or is_program_lead or is_sr_facilitator or is_placement_creator or is_program_creator:
+        can_edit = True
+        is_view_only = False
+    elif is_junior_facilitator or is_team_member:
+        can_edit = False
+        is_view_only = True
+    else:
+        can_edit = False
+        is_view_only = True
+
+    # 2. Page access & Role creation
+    if is_placement_lead:
+        # Placement Team Lead: full access to all pages including ATS
+        can_create_roles = True
+        can_access_interviews = True
+        can_access_practice_interview = True
+        can_access_dashboard = True
+        can_access_students = True
+        can_access_colleges = True
+        can_access_ats = True
+    elif is_program_lead:
+        # Program Team Lead: full access to all pages except ATS
+        can_create_roles = True
+        can_access_interviews = True
+        can_access_practice_interview = True
+        can_access_dashboard = True
+        can_access_students = True
+        can_access_colleges = True
+        can_access_ats = has_ats_purpose or can_access_ats_token
+    elif is_sr_facilitator:
+        # Senior Facilitator: can create/edit interview roles in their domain, full access to their colleges
+        can_create_roles = True
+        can_access_interviews = True
+        can_access_practice_interview = True
+        can_access_dashboard = True
+        can_access_students = True
+        can_access_colleges = True
+        can_access_ats = False
     elif is_junior_facilitator:
+        # Junior Facilitator: view-only access to their colleges, can view interviews in their domain
+        can_create_roles = False
+        can_access_interviews = True
+        can_access_practice_interview = False
+        can_access_dashboard = True
+        can_access_students = True
+        can_access_colleges = True
+        can_access_ats = False
+    elif is_placement_creator:
+        # Placement Creator: tag-driven or default interview creation
+        if has_explicit_purposes:
+            can_create_roles = has_create_interview or has_batch_progress
+            can_access_interviews = has_create_interview or has_batch_progress
+            can_access_practice_interview = has_create_interview or has_batch_progress
+            can_access_dashboard = has_batch_progress
+            can_access_students = has_batch_progress or has_student_progress
+            can_access_colleges = has_college_progress
+            can_access_ats = has_ats_purpose or can_access_ats_token
+        else:
+            can_create_roles = True
+            can_access_interviews = True
+            can_access_practice_interview = True
+            can_access_dashboard = False
+            can_access_students = False
+            can_access_colleges = False
+            can_access_ats = can_access_ats_token
+    elif is_program_creator:
+        # Program Creator: tag-driven or default interview creation
+        if has_explicit_purposes:
+            can_create_roles = has_create_interview or has_batch_progress
+            can_access_interviews = has_create_interview or has_batch_progress
+            can_access_practice_interview = has_create_interview or has_batch_progress
+            can_access_dashboard = has_batch_progress
+            can_access_students = has_batch_progress or has_student_progress
+            can_access_colleges = has_college_progress
+            can_access_ats = False
+        else:
+            can_create_roles = True
+            can_access_interviews = True
+            can_access_practice_interview = True
+            can_access_dashboard = False
+            can_access_students = False
+            can_access_colleges = False
+            can_access_ats = False
+    elif is_team_member:
+        # Team Member: strictly view-only, driven by assigned tags
+        can_create_roles = False
+        can_access_interviews = has_create_interview or has_batch_progress
+        can_access_practice_interview = False
+        can_access_dashboard = has_batch_progress
+        can_access_students = has_batch_progress or has_student_progress
+        can_access_colleges = has_college_progress
+        can_access_ats = can_access_ats_token
+    else:
+        can_create_roles = False
+        can_access_interviews = False
+        can_access_practice_interview = False
+        can_access_dashboard = False
+        can_access_students = False
+        can_access_colleges = False
+        can_access_ats = can_access_ats_token
+
+    # 3. College Scoping:
+    # Junior Facilitators are strictly restricted to assigned colleges.
+    # Senior Facilitators are restricted to assigned colleges if provided; otherwise unrestricted (None).
+    # Leads and Creators have unrestricted cross-college access (None).
+    if is_junior_facilitator:
         colleges = junior_colleges if junior_colleges else []
+    elif is_sr_facilitator:
+        colleges = sr_colleges if sr_colleges else None
     else:
         colleges = None
 
     is_team_lead = bool(
-        is_placement_creator
-        or (is_program_creator_or_sr and token_role in LEAD_ROLES)
+        is_placement_lead
+        or is_program_lead
         or token_role in LEAD_ROLES
         or any(
             normalize_role(
@@ -321,6 +462,11 @@ def calculate_user_permissions(
         "is_view_only": is_view_only,
         "colleges": colleges,
         "is_team_lead": is_team_lead,
+        "can_access_dashboard": can_access_dashboard,
+        "can_access_students": can_access_students,
+        "can_access_colleges": can_access_colleges,
+        "can_access_interviews": can_access_interviews,
+        "can_access_practice_interview": can_access_practice_interview,
     }
 
 
@@ -484,6 +630,36 @@ async def get_current_creator_user(
     raise fastapi.HTTPException(
         status_code=fastapi.status.HTTP_403_FORBIDDEN,
         detail="Creator Portal access required. Only Senior Facilitators, Creators, and Administrators can create or modify interview roles.",
+    )
+
+
+async def get_current_interview_viewer_user(
+    current_user: User = fastapi.Depends(get_current_user),
+    session=fastapi.Depends(get_async_session),
+) -> User:
+    """Require user to have interview portal view permissions.
+    - Super Admins, Global Admins, Leads, Creators, and Facilitators (both Senior and Junior) have view access.
+    - Standard Team Members without interview permissions are rejected with 403 Forbidden.
+    """
+    if is_admin_user(current_user):
+        return current_user
+
+    if session is not None:
+        memberships = await get_user_active_memberships(current_user.id, session)
+        if memberships:
+            perms = calculate_user_permissions(current_user, memberships)
+            if perms.get("can_access_interviews", False):
+                return current_user
+
+    role_from_token = normalize_role(
+        getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")
+    )
+    if role_from_token in CREATOR_ROLES or role_from_token in JUNIOR_ROLES:
+        return current_user
+
+    raise fastapi.HTTPException(
+        status_code=fastapi.status.HTTP_403_FORBIDDEN,
+        detail="You do not have permission to view the interview portal.",
     )
 
 
