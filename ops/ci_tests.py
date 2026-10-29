@@ -21,6 +21,7 @@ settings = {
     # service container speaks plaintext and rejects the upgrade, which failed
     # the migration gate before it could execute a single statement.
     "DB_SSL_ENABLED": "False",
+    "REQUIRE_CENTRAL_AUTH_CONFIG": "False",
 }
 os.environ.update(settings)
 sys.path.insert(0, str(ROOT / "backend/backend"))

@@ -109,3 +109,44 @@ async def test_browser_origin_can_differ_from_verified_internal_auth(settings_st
     assert location.startswith(expected + "/barabari-auth/")
     assert parse_qs(urlsplit(location).query)["state"] == [request.session["sso_state"]]
     assert settings_stub.AUTH_SERVICE_BASE_URL == "https://auth.internal.test"
+
+
+class _Central:
+    CENTRAL_IDENTITY_CHECK_ENABLED = True
+    REQUIRE_CENTRAL_AUTH_CONFIG = True
+    AUTH_SERVICE_BASE_URL = "https://auth.example.org"
+    PRODUCT_IDENTITY_API_KEY = "k"
+    SAMPARK_PRODUCT_UNIQUE_ID = "p-1"
+
+
+def _central(monkeypatch, **overrides):
+    import src.main as main
+
+    stub = _Central()
+    for name, value in overrides.items():
+        setattr(stub, name, value)
+    monkeypatch.setattr(main, "settings", stub)
+    return main.verify_central_auth_configuration
+
+
+def test_complete_central_configuration_starts(monkeypatch):
+    _central(monkeypatch)()
+
+
+@pytest.mark.parametrize(
+    "overrides,named",
+    [
+        ({"AUTH_SERVICE_BASE_URL": ""}, "AUTH_SERVICE_BASE_URL"),
+        ({"AUTH_SERVICE_BASE_URL": "http://auth.example.org"}, "AUTH_SERVICE_BASE_URL"),
+        ({"PRODUCT_IDENTITY_API_KEY": "  "}, "PRODUCT_IDENTITY_API_KEY"),
+        ({"SAMPARK_PRODUCT_UNIQUE_ID": ""}, "SAMPARK_PRODUCT_UNIQUE_ID"),
+    ],
+)
+def test_missing_central_configuration_fails_at_startup_naming_the_setting(monkeypatch, overrides, named):
+    with pytest.raises(RuntimeError, match=named):
+        _central(monkeypatch, **overrides)()
+
+
+def test_explicit_opt_out_and_disabled_central_auth_do_not_block_startup(monkeypatch):
+    _central(monkeypatch, AUTH_SERVICE_BASE_URL="", REQUIRE_CENTRAL_AUTH_CONFIG=False)()
+    _central(monkeypatch, AUTH_SERVICE_BASE_URL="", CENTRAL_IDENTITY_CHECK_ENABLED=False)()

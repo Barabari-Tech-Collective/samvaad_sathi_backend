@@ -417,6 +417,9 @@ class BackendBaseSettings(BaseSettings):
     # Auth-service Central Student Registry. Product backends use this server-side key to
     # hydrate common profile fields; it must match auth-service CENTRAL_PROFILE_API_KEY.
     CENTRAL_IDENTITY_CHECK_ENABLED: bool = decouple.config("CENTRAL_IDENTITY_CHECK_ENABLED", cast=bool, default=True)  # type: ignore
+    # Refuse to start when central authentication is on but its settings are missing, instead of
+    # answering 503 to every request. Set to False only for local work and tests.
+    REQUIRE_CENTRAL_AUTH_CONFIG: bool = decouple.config("REQUIRE_CENTRAL_AUTH_CONFIG", cast=bool, default=True)  # type: ignore
     # Seconds a verified central identity is reused. 0 (default) keeps fresh per-request verification;
     # any positive value trades that guarantee for fewer auth-service calls (bounded staleness).
     CENTRAL_IDENTITY_CACHE_SECONDS: int = decouple.config("CENTRAL_IDENTITY_CACHE_SECONDS", cast=int, default=0)  # type: ignore

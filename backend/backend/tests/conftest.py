@@ -1,5 +1,10 @@
 """Suite-wide isolation from state that outlives a test run."""
+import os
+
 import pytest
+
+# Tests build the app without a central auth service; production keeps the strict default.
+os.environ.setdefault("REQUIRE_CENTRAL_AUTH_CONFIG", "False")
 
 
 @pytest.fixture(autouse=True)

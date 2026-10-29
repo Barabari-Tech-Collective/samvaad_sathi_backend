@@ -48,6 +48,35 @@ def verify_sso_configuration() -> None:
     )
 
 
+def verify_central_auth_configuration() -> None:
+    """Fail at startup, naming what is missing, when central authentication cannot work.
+
+    Central authentication is the only way in, so without its settings every request would
+    answer 503 and the cause would only show up one request at a time. This is keyed on an
+    explicit setting rather than ENVIRONMENT, because a deployed host may run with
+    ENVIRONMENT=DEV. Local work and tests opt out with REQUIRE_CENTRAL_AUTH_CONFIG=False.
+    """
+    if not getattr(settings, "CENTRAL_IDENTITY_CHECK_ENABLED", False):
+        return
+    if not getattr(settings, "REQUIRE_CENTRAL_AUTH_CONFIG", True):
+        return
+    missing = []
+    base = str(getattr(settings, "AUTH_SERVICE_BASE_URL", "") or "").strip()
+    if not base.startswith("https://"):
+        missing.append("AUTH_SERVICE_BASE_URL (an https:// origin)")
+    if not str(getattr(settings, "PRODUCT_IDENTITY_API_KEY", "") or "").strip():
+        missing.append("PRODUCT_IDENTITY_API_KEY")
+    if not str(getattr(settings, "SAMPARK_PRODUCT_UNIQUE_ID", "") or "").strip():
+        missing.append("SAMPARK_PRODUCT_UNIQUE_ID")
+    if missing:
+        raise RuntimeError(
+            "Central authentication is on but not configured: set "
+            + ", ".join(missing)
+            + ". Without them every request is refused. For local work only, set "
+            "REQUIRE_CENTRAL_AUTH_CONFIG=False."
+        )
+
+
 def initialize_backend_application() -> fastapi.FastAPI:
 
     logging.basicConfig(
@@ -64,6 +93,7 @@ def initialize_backend_application() -> fastapi.FastAPI:
     # Load environment variables from .env if present
     load_dotenv()
     verify_sso_configuration()
+    verify_central_auth_configuration()
     app = fastapi.FastAPI(**settings.set_backend_app_attributes)  # type: ignore
 
     # Tags metadata for Swagger grouping
