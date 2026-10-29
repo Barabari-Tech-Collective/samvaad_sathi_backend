@@ -72,7 +72,7 @@ async def check_is_admin_dep(
             if perms.get("can_access_interviews", False):
                 return True
     role = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
-    return role in CREATOR_ROLES or role in JUNIOR_ROLES
+    return role in CREATOR_ROLES or role in JUNIOR_ROLES or role in {"facilitator", "staff"}
 
 logger = logging.getLogger(__name__)
 
