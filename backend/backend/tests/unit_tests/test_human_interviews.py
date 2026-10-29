@@ -126,3 +126,35 @@ def test_reschedule_and_outcome_contracts():
         ends_at="2026-11-05T10:00:00Z",
         instructions="   ",
     ).instructions is None
+
+
+def test_interview_emails_render_escaped_and_branded():
+    from src.services.email.human_interview_emails import build
+
+    start = dt.datetime(2026, 11, 5, 9, 0, tzinfo=dt.timezone.utc)
+    data = {
+        "student_name": "Asha <script>",
+        "title": "Technical Round 1",
+        "role_name": "Software Developer",
+        "interviewer_name": "Ravi",
+        "instructions": "Explain your project",
+        "starts_at": start,
+        "ends_at": start + dt.timedelta(minutes=45),
+        "result": "next_round",
+        "feedback": "Clear and confident.",
+    }
+    for event in ["scheduled", "rescheduled", "cancelled", "result"]:
+        subject, html, text = build(event, data)
+        assert "<script>" not in html and "&lt;script&gt;" in html
+        assert "#1F285B" in html and "Samvaad Saathi" in text
+    subject, html, text = build("scheduled", data)
+    assert "2:30 PM IST" in html and "Thursday, 5 November 2026" in subject
+    assert "Explain your project" in text
+    assert "You move to the next round" in build("result", data)[2]
+
+
+def test_email_is_skipped_without_credentials(monkeypatch):
+    from src.services.email import sender
+
+    monkeypatch.setattr(sender.settings, "SMTP_LOGIN", "")
+    assert sender.send_email("a@b.c", "s", "<p>h</p>", "t") is False

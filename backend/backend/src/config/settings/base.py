@@ -382,6 +382,16 @@ class BackendBaseSettings(BaseSettings):
     GOOGLE_DRIVE_OAUTH_CLIENT_ID: str = decouple.config("GOOGLE_DRIVE_OAUTH_CLIENT_ID", cast=str, default="")  # type: ignore
     GOOGLE_DRIVE_OAUTH_CLIENT_SECRET: str = decouple.config("GOOGLE_DRIVE_OAUTH_CLIENT_SECRET", cast=str, default="")  # type: ignore
     GOOGLE_DRIVE_OAUTH_REDIRECT_URI: str = decouple.config("GOOGLE_DRIVE_OAUTH_REDIRECT_URI", cast=str, default="")  # type: ignore
+    # Brevo SMTP relay, the same credentials auth-service uses for sign-up codes.
+    # EMAIL_FROM_ADDRESS must be a sender verified in Brevo, or mail is silently dropped.
+    SMTP_HOST: str = decouple.config("SMTP_HOST", cast=str, default="smtp-relay.brevo.com")  # type: ignore
+    SMTP_PORT: int = decouple.config("SMTP_PORT", cast=int, default=587)  # type: ignore
+    SMTP_LOGIN: str = decouple.config("SMTP_LOGIN", cast=str, default="")  # type: ignore
+    SMTP_PASSWORD: str = decouple.config("SMTP_PASSWORD", cast=str, default="")  # type: ignore
+    EMAIL_FROM_ADDRESS: str = decouple.config("EMAIL_FROM_ADDRESS", cast=str, default="")  # type: ignore
+    EMAIL_FROM_NAME: str = decouple.config("EMAIL_FROM_NAME", cast=str, default="The Barabari Collective")  # type: ignore
+    # Student app address used for buttons in emails, e.g. https://samvaad-saathi.barabaricollective.org
+    STUDENT_APP_URL: str = decouple.config("STUDENT_APP_URL", cast=str, default="https://samvaad-saathi.barabaricollective.org")  # type: ignore
     GOOGLE_DRIVE_OAUTH_FRONTEND_RETURN_URL: str = decouple.config("GOOGLE_DRIVE_OAUTH_FRONTEND_RETURN_URL", cast=str, default="")  # type: ignore
     GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY: str = decouple.config("GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY", cast=str, default="")  # type: ignore
     GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY_ID: str = decouple.config("GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY_ID", cast=str, default="v1")  # type: ignore

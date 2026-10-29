@@ -15,6 +15,8 @@ from src.api.dependencies.session import get_async_session
 from src.models.db.human_interview import HumanInterview
 from src.models.db.user import User
 from src.services import human_interviews as service
+from src.services.email.human_interview_emails import build as build_email
+from src.services.email.sender import send_email
 
 router = fastapi.APIRouter(prefix="/v2/human-interviews", tags=["human-interviews"])
 
@@ -105,6 +107,38 @@ class Outcome(BaseModel):
     @classmethod
     def trim(cls, value):
         return value.strip() if isinstance(value, str) else value
+
+
+async def email_payload(session, row) -> dict:
+    student = await session.get(User, row.student_id)
+    return {
+        "to": getattr(student, "email", None),
+        "student_name": getattr(student, "name", None),
+        **{
+            key: getattr(row, key)
+            for key in (
+                "title",
+                "role_name",
+                "interviewer_name",
+                "instructions",
+                "starts_at",
+                "ends_at",
+                "result",
+                "feedback",
+            )
+        },
+    }
+
+
+def send_interview_email(event: str, payload: dict) -> None:
+    subject, html, text = build_email(event, payload)
+    send_email(payload["to"], subject, html, text)
+
+
+def queue_email(background, event: str, payload: dict) -> None:
+    # Runs after the response is sent; a mail failure never undoes the change.
+    if payload.get("to"):
+        background.add_task(send_interview_email, event, payload)
 
 
 def no_store(response):
@@ -245,6 +279,7 @@ async def create(
     course_id: str,
     body: Create,
     response: fastapi.Response,
+    background: fastapi.BackgroundTasks,
     user=fastapi.Depends(get_current_admin_user),
     session=fastapi.Depends(get_async_session),
 ):
@@ -351,7 +386,9 @@ async def create(
         "human_interview_scheduled",
         "Host scheduled an external Google Meet interview; no attendance inferred.",
     )
+    payload = await email_payload(session, row)
     await session.commit()
+    queue_email(background, "scheduled", payload)
     return service.metadata(row, now, can_manage=service.permitted(user, "update"), staff=True)
 
 
@@ -361,6 +398,7 @@ async def close(
     appointment_id: int,
     body: Close,
     response: fastapi.Response,
+    background: fastapi.BackgroundTasks,
     user=fastapi.Depends(get_current_admin_user),
     session=fastapi.Depends(get_async_session),
 ):
@@ -394,7 +432,10 @@ async def close(
     )
     row.version += 1
     service.audit(session, user, row, "human_interview_host_reported", body.reason)
+    payload = await email_payload(session, row)
     await session.commit()
+    if body.status == "cancelled":
+        queue_email(background, "cancelled", payload)
     no_store(response)
     return service.metadata(row, now, staff=True)
 
@@ -405,6 +446,7 @@ async def reschedule(
     appointment_id: int,
     body: Reschedule,
     response: fastapi.Response,
+    background: fastapi.BackgroundTasks,
     user=fastapi.Depends(get_current_admin_user),
     session=fastapi.Depends(get_async_session),
 ):
@@ -464,7 +506,9 @@ async def reschedule(
         "human_interview_rescheduled",
         f"{body.reason} (was {previous})",
     )
+    payload = await email_payload(session, row)
     await session.commit()
+    queue_email(background, "rescheduled", payload)
     no_store(response)
     return service.metadata(
         row, now, can_manage=service.permitted(user, "update"), staff=True
@@ -477,6 +521,7 @@ async def record_outcome(
     appointment_id: int,
     body: Outcome,
     response: fastapi.Response,
+    background: fastapi.BackgroundTasks,
     user=fastapi.Depends(get_current_admin_user),
     session=fastapi.Depends(get_async_session),
 ):
@@ -509,7 +554,10 @@ async def record_outcome(
         else "human_interview_result_saved",
         f"Result {body.result}",
     )
+    payload = await email_payload(session, row)
     await session.commit()
+    if body.release:
+        queue_email(background, "result", payload)
     no_store(response)
     return service.metadata(
         row, now, can_manage=service.permitted(user, "update"), staff=True
