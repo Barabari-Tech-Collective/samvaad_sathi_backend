@@ -17,6 +17,7 @@ from src.api.dependencies.admin import (
     is_admin_user,
     normalize_role,
 )
+from src.api.dependencies.session import get_async_session
 from src.models.db.user import User
 
 
@@ -93,22 +94,29 @@ def require_course(course_id: str, grants: tuple[CourseGrant, ...], user: User) 
         raise fastapi.HTTPException(403, "This course is outside your assigned scope.")
 
 
-async def require_global_legacy_analytics(current_user: User) -> None:
-    """Unadapted aggregations must not bypass a course-limited workspace.
+async def require_global_legacy_analytics(current_user: User, session=None) -> None:
+    """Unadapted aggregations must not bypass an explicit course grant.
 
-    Call only after identity validation. Student-owned routes remain separate.
-    Scoped staff use /v2/course-workspace; administrators retain operational
-    access. Removing this guard requires equivalent row-level filtering and
-    purpose checks in every legacy handler, including aggregates and exports.
+    Administrators keep operational access. Staff whose memberships carry no course
+    assignment keep the role-based dashboards, scoped by their college limits in the
+    handlers. A person with any explicit course grant is limited to /v2/course-workspace,
+    because these legacy handlers cannot enforce course boundaries. Without a database
+    session the check fails closed to administrators only.
     """
-    if not is_admin_user(current_user):
-        raise fastapi.HTTPException(
-            403,
-            "Use the course-scoped workspace. This legacy endpoint cannot enforce course boundaries.",
-        )
+    if is_admin_user(current_user):
+        return
+    if session is not None:
+        grants = await grants_for(current_user, session)
+        if not grants:
+            return
+    raise fastapi.HTTPException(
+        403,
+        "Use the course-scoped workspace. This legacy endpoint cannot enforce course boundaries.",
+    )
 
 
 async def legacy_analytics_guard(
     current_user: User = fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
 ) -> None:
-    await require_global_legacy_analytics(current_user)
+    await require_global_legacy_analytics(current_user, session)

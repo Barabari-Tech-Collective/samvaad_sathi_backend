@@ -144,20 +144,37 @@ async def test_new_interview_keeps_the_verified_course_snapshot():
 async def test_old_practice_context_cannot_bypass_course_scope():
     from src.api.routes.practice_dashboard import _context
 
-    with patch(
-        "src.api.routes.practice_dashboard.get_user_active_memberships",
-        AsyncMock(
+    def memberships(**member):
+        return AsyncMock(
             return_value=[
                 (
-                    SimpleNamespace(access_role="facilitator"),
+                    SimpleNamespace(access_role="facilitator", **member),
                     SimpleNamespace(name="Program"),
                 )
             ]
-        ),
+        )
+
+    # An explicit course grant limits the person to the course workspace.
+    with patch(
+        "src.api.routes.practice_dashboard.get_user_active_memberships",
+        memberships(course_ids=["development"]),
+    ), patch(
+        "src.services.course_access.get_user_active_memberships",
+        memberships(course_ids=["development"]),
     ):
         with pytest.raises(fastapi.HTTPException) as exc:
             await _context(user(), AsyncMock())
     assert exc.value.status_code == 403
+    # Without a course grant the role-based dashboards stay available.
+    with patch(
+        "src.api.routes.practice_dashboard.get_user_active_memberships",
+        memberships(),
+    ), patch(
+        "src.services.course_access.get_user_active_memberships",
+        memberships(),
+    ):
+        role, _ = await _context(user(), AsyncMock())
+    assert role == "facilitator"
 
 
 def test_unknown_course_is_denied_even_if_another_course_is_allowed():
@@ -198,9 +215,25 @@ async def test_staff_cannot_escalate_course_access_or_mutate_database():
 
 @pytest.mark.asyncio
 async def test_legacy_aggregations_are_not_a_scope_bypass():
+    scoped = SimpleNamespace(course_ids=["development"], colleges=None, access_role="lead")
+    unscoped = SimpleNamespace(course_ids=[], colleges=None, access_role="lead")
+
+    def session_with(member):
+        result = MagicMock()
+        result.all.return_value = [(member, SimpleNamespace(name="Program"))]
+        db = AsyncMock()
+        db.execute.return_value = result
+        return db
+
+    # No session: fail closed to administrators only.
     with pytest.raises(fastapi.HTTPException):
         await require_global_legacy_analytics(user())
     await require_global_legacy_analytics(user(admin=True))
+    # An explicit course grant limits the person to the course workspace.
+    with pytest.raises(fastapi.HTTPException):
+        await require_global_legacy_analytics(user(), session_with(scoped))
+    # Staff with no course grant keep their role-based dashboards.
+    await require_global_legacy_analytics(user(), session_with(unscoped))
 
 
 @pytest.mark.asyncio

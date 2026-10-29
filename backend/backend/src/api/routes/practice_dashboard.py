@@ -169,7 +169,7 @@ async def _context(
     # staff must use the course workspace until each workflow is migrated.
     from src.services.course_access import require_global_legacy_analytics
 
-    await require_global_legacy_analytics(user)
+    await require_global_legacy_analytics(user, session)
     permissions = calculate_user_permissions(user, memberships)
     colleges = permissions.get("colleges")
     return role, (
