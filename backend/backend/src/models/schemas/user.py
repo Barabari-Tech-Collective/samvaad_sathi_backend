@@ -85,6 +85,11 @@ class SessionUserProfile(BaseSchemaModel):
     membership_roles: list[str] = pydantic.Field(default_factory=list)
     can_edit: bool = False
     is_view_only: bool = False
+    can_access_dashboard: bool = False
+    can_access_students: bool = False
+    can_access_colleges: bool = False
+    can_access_interviews: bool = False
+    can_access_practice_interview: bool = False
     # company removed from response
 
 

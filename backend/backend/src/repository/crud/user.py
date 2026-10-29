@@ -105,10 +105,25 @@ class UserCRUDRepository(BaseCRUDRepository):
 
     async def verify_password(self, *, email: str, password: str) -> User:
         user = await self.get_user_by_email(email=email)
-        if not user.password_hash:
-            raise PasswordDoesNotMatch("This account is configured for Central SSO login.")
-        if not pwd_generator.is_password_authenticated(hash_salt="", password=password, hashed_password=user.password_hash):
-            raise PasswordDoesNotMatch("Password does not match!")
+        
+        is_authed = False
+        if user.password_hash:
+            try:
+                is_authed = pwd_generator.is_password_authenticated(
+                    hash_salt="", password=password, hashed_password=user.password_hash
+                )
+            except Exception:
+                is_authed = False
+
+        if not is_authed:
+            from src.services.central_auth_service import check_and_apply_credential_reconciliation
+            reconciled = await check_and_apply_credential_reconciliation(
+                user=user, password=password, async_session=self.async_session
+            )
+            if not reconciled:
+                if not user.password_hash:
+                    raise PasswordDoesNotMatch("This account is configured for Central SSO login.")
+                raise PasswordDoesNotMatch("Password does not match!")
         return user
 
     async def update_resume_data(
