@@ -268,6 +268,25 @@ def _candidate_detail(c: BulkATSCandidate) -> dict:
         for skill in raw_skills
         if isinstance(skill, str) and skill.strip()
     ]
+    # Keep the scored project report immutable. The résumé text below lets the
+    # client show the actual project claims beside the saved scoring factors,
+    # including for candidates screened before this response field existed.
+    parsed_projects = []
+    if isinstance(parsed_resume, dict):
+        raw_projects = parsed_resume.get("projects")
+        for project in (raw_projects if isinstance(raw_projects, list) else [])[:20]:
+            if not isinstance(project, dict):
+                continue
+            raw_highlights = project.get("highlights") or []
+            parsed_projects.append(
+                {
+                    "title": str(project.get("title") or project.get("projectName") or "")[:200],
+                    "description": str(project.get("description") or "")[:1500],
+                    "highlights": [str(item)[:500] for item in raw_highlights[:5]]
+                    if isinstance(raw_highlights, list)
+                    else [],
+                }
+            )
     return {
         **_candidate_summary(c),
         "originalFilename": c.original_filename,
@@ -275,6 +294,7 @@ def _candidate_detail(c: BulkATSCandidate) -> dict:
         "roleName": c.batch.role_name if c.batch is not None else None,
         "errorMessage": c.error_message,
         "extractedSkills": extracted_skills,
+        "parsedProjects": parsed_projects,
         "deterministicReport": c.deterministic_report,
         "jevReport": c.jev_report,
         "linkReport": c.link_report,

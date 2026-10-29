@@ -196,7 +196,7 @@ def verify_database_backup_reference():
     reference = required("DATABASE_BACKUP_REFERENCE")
     if len(reference) < 12 or reference.lower() in {"none", "n/a", "not applicable"}:
         raise RuntimeError(
-            "Provide the latest verified managed-database backup ID and timestamp"
+            "Provide a verified pre-migration backup reference: managed backup ID/timestamp or pg_dump archive path/SHA-256/timestamp"
         )
     return reference
 

@@ -54,7 +54,7 @@ Verify the applied head with `alembic current` and confirm it is
 
 ## Production deploy and rollback
 
-- Record the database backup reference in the release workflow input.
+- Record the pre-migration backup reference in the release workflow input: either the managed Aiven backup ID and timestamp, or a protected `pg_dump` archive path, SHA-256 checksum, and timestamp. For a `pg_dump` archive, confirm `pg_restore --list` succeeds before release and keep the archive protected from public access.
 - Deploy backend and frontend only after staging acceptance and green CI.
 - Run the production health check, then smoke-test batch creation, candidate detail, rerun, feedback, and export.
 - Monitor error rate, API latency, queue depth, AI failure/retry counts, and database migration logs for at least 15 minutes.

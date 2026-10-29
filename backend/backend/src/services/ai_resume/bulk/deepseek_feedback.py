@@ -20,11 +20,17 @@ from src.config.manager import settings
 logger = logging.getLogger(__name__)
 
 
+class ProjectReviewPayload(pydantic.BaseModel):
+    projectName: str = pydantic.Field(min_length=1, max_length=120)
+    review: str = pydantic.Field(min_length=1, max_length=400)
+
+
 class FeedbackPayload(pydantic.BaseModel):
     summary: str = pydantic.Field(max_length=600)
     strengthNarratives: list[str] = pydantic.Field(default_factory=list, max_length=3)
     gapNarratives: list[str] = pydantic.Field(default_factory=list, max_length=3)
     interviewFocus: list[str] = pydantic.Field(default_factory=list, max_length=5)
+    projectReviews: list[ProjectReviewPayload] = pydantic.Field(default_factory=list, max_length=3)
 
 
 FeedbackAudience = Literal["student", "team"]
@@ -149,6 +155,7 @@ def _input_payload(
     scorecard: dict,
     evidence: dict,
     warnings: list[str],
+    projects: list[dict] | None = None,
 ) -> dict:
     return {
         "role": role_name,
@@ -157,6 +164,7 @@ def _input_payload(
         "confidence": scorecard.get("confidence", {}),
         "evidence": evidence,
         "warnings": warnings,
+        "projects": (projects or [])[:3],
     }
 
 
@@ -169,6 +177,7 @@ async def enrich_candidate_brief(
     deterministic_brief: dict,
     existing_report: dict | None = None,
     evaluation_intent: str = "",
+    projects: list[dict] | None = None,
 ) -> tuple[dict, dict]:
     compact = _input_payload(
         role_name=role_name,
@@ -176,6 +185,7 @@ async def enrich_candidate_brief(
         scorecard=scorecard,
         evidence=evidence,
         warnings=warnings,
+        projects=projects,
     )
     canonical = json.dumps(
         compact, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -206,8 +216,11 @@ async def enrich_candidate_brief(
         "Use evaluationIntent only to make the feedback relevant to the stated project or evaluation purpose. "
         "Return only one complete JSON object shaped exactly like this example: "
         '{"summary":"...","strengthNarratives":["..."],'
-        '"gapNarratives":["..."],"interviewFocus":["..."]}. '
-        "Keep the total under 180 words and each list to at most 3 concise items."
+        '"gapNarratives":["..."],"interviewFocus":["..."],'
+        '"projectReviews":[{"projectName":"...","review":"..."}]}. '
+        "For each supplied project, write one concise recruiter assessment naming a specific "
+        "claim or missing proof from that project and how it relates to its saved factor points. "
+        "Never claim to have opened a link or verified a claim. Keep the total under 240 words."
     )
     try:
         generated, usage = await _generate_validated_json(
@@ -217,6 +230,12 @@ async def enrich_candidate_brief(
         )
         brief = dict(deterministic_brief)
         brief.update(generated.model_dump())
+        allowed = {str(item.get("projectName", "")).casefold() for item in projects or []}
+        brief["projectReviews"] = [
+            item for item in brief["projectReviews"]
+            if str(item.get("projectName", "")).casefold() in allowed
+            and str(item.get("review", "")).strip()
+        ]
         return brief, {
             "source": "deepseek",
             "model": settings.DEEPSEEK_MODEL,
