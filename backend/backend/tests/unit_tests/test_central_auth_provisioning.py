@@ -231,6 +231,61 @@ async def test_add_team_member_binds_unbound_existing_user():
 
 
 @pytest.mark.asyncio
+async def test_add_team_member_forwards_explicit_password_for_existing_non_admin_user():
+    """Verify that when an Admin explicitly provides a password for an existing user during team addition,
+    the password is forwarded to Central Auth so the user is provisioned with an active bcrypt hash.
+    """
+    mock_session = AsyncMock()
+    team = Team(id=1, name="Program Team", status="active")
+    existing_user_with_pw = User(
+        id=77,
+        email="facilitator@barabari.org",
+        student_id="existing-central-id",
+        password_hash="old_test_hash",
+        is_admin=False,
+        is_super_admin=False,
+    )
+
+    def execute_mock(stmt):
+        result = MagicMock()
+        stmt_str = str(stmt).lower()
+        if "team_member" in stmt_str:
+            result.scalar_one_or_none.return_value = None
+        elif "from team" in stmt_str or "team.id ==" in stmt_str:
+            result.scalar_one_or_none.return_value = team
+        elif 'from "user"' in stmt_str or "user.email" in stmt_str:
+            result.scalar_one_or_none.return_value = existing_user_with_pw
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
+
+    mock_session.execute.side_effect = execute_mock
+    repo = TeamCRUDRepository(async_session=mock_session)
+
+    member_data = TeamMemberCreate(
+        name="Facilitator",
+        email="facilitator@barabari.org",
+        access_role="sr facilitator",
+        password="ActivePassword123!",
+    )
+
+    with patch(
+        "src.repository.crud.team_v2.provision_or_invite_staff",
+        new=AsyncMock(return_value="existing-central-id"),
+    ) as mock_prov:
+        res = await repo.add_team_member(team_id=1, member_data=member_data)
+
+    mock_prov.assert_awaited_once_with(
+        email="facilitator@barabari.org",
+        name="Facilitator",
+        role="FACILITATOR",
+        send_invite_email=True,
+        password="ActivePassword123!",
+    )
+    assert res["email"] == "facilitator@barabari.org" 
+
+
+@pytest.mark.asyncio
 async def test_add_team_member_compensating_revocation_on_local_commit_failure():
     """Verify saga compensation: if local commit fails after central provisioning, revoke_provisioning is called."""
     mock_session = AsyncMock()

@@ -1,9 +1,20 @@
 import fastapi
 from fastapi import File, UploadFile
-from typing import List, Optional
+from typing import List, Optional, Any
 import logging
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import get_current_creator_user, get_current_interview_viewer_user, get_user_active_memberships
+from src.api.dependencies.session import get_async_session
+from src.api.dependencies.admin import (
+    is_admin_user,
+    get_current_creator_user,
+    get_current_interview_viewer_user,
+    get_user_active_memberships,
+    calculate_user_permissions,
+    CREATOR_ROLES,
+    JUNIOR_ROLES,
+    LEAD_ROLES,
+    normalize_role,
+)
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.job_profile import (
     JobProfileSummaryResponse,
@@ -45,15 +56,84 @@ from src.services.skills_extractor import extract_skills_from_text
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.syllabus_service import syllabus_service
-from src.api.dependencies.admin import is_admin_user
 from src.worker.queue import enqueue_job, get_job_status
 
-def check_is_admin_dep(current_user=fastapi.Depends(get_current_user)) -> bool:
-    return is_admin_user(current_user)
+
+async def check_is_admin_dep(
+    current_user=fastapi.Depends(get_current_user),
+    session=fastapi.Depends(get_async_session),
+) -> bool:
+    if is_admin_user(current_user):
+        return True
+    if session is not None:
+        memberships = await get_user_active_memberships(current_user.id, session)
+        if memberships:
+            perms = calculate_user_permissions(current_user, memberships)
+            if perms.get("can_access_interviews", False):
+                return True
+    role = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    return role in CREATOR_ROLES or role in JUNIOR_ROLES or role in {"facilitator", "staff"}
 
 logger = logging.getLogger(__name__)
 
 router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles-v2"])
+
+
+async def resolve_effective_category(
+    current_user: Any,
+    session: Optional[Any],
+    requested_category: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve category/domain filtering for interview endpoints.
+    - Super Admins, Global Admins, and Team Leads always have GLOBAL access across
+      all domains (returning requested_category directly, so None shows all interviews).
+    - Facilitators (Senior & Junior) with an assigned team domain are strictly scoped
+      to their assigned domain.
+    """
+    if isinstance(current_user, dict):
+        user_id = current_user.get("id")
+        user_role = normalize_role(current_user.get("role", ""))
+        is_admin = current_user.get("is_admin", False)
+        is_lead = user_role in LEAD_ROLES
+    else:
+        user_id = getattr(current_user, "id", None)
+        user_role = normalize_role(
+            getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")
+        )
+        is_admin = is_admin_user(current_user)
+        is_lead = user_role in LEAD_ROLES
+
+    # 1. Super Admins, Admins, and Team Leads always have global access across all domains
+    if is_admin or is_lead:
+        return requested_category
+
+    FACILITATOR_ROLES = JUNIOR_ROLES | {"sr facilitator", "senior facilitator", "facilitator"}
+    user_domain = None
+    is_facilitator = user_role in FACILITATOR_ROLES
+
+    if session is not None and user_id is not None:
+        try:
+            memberships = await get_user_active_memberships(user_id, session)
+            for item in memberships:
+                member = item[0] if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__") else item
+                m_role = normalize_role(getattr(member, "access_role", "") or getattr(member, "role", ""))
+                # If any active membership is a Lead, they inherit global access
+                if m_role in LEAD_ROLES:
+                    return requested_category
+                if m_role in FACILITATOR_ROLES:
+                    is_facilitator = True
+                m_domain = getattr(member, "domain", None)
+                if m_domain and isinstance(m_domain, str) and m_domain.strip():
+                    user_domain = m_domain.strip()
+        except Exception:
+            pass
+
+    # Facilitators with an assigned domain are strictly scoped to their domain
+    if is_facilitator and user_domain:
+        return user_domain
+
+    return requested_category
+
 
 @router.get(
     path="/job-profiles/recent-activity",
@@ -63,6 +143,7 @@ router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles-v2"])
     summary="Get recent role-related activity",
 )
 async def get_recent_activity(
+    category: Optional[str] = fastapi.Query(None),
     current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> List[JobProfileActivityResponse]:
@@ -70,8 +151,14 @@ async def get_recent_activity(
     Returns the latest 5 activities related to job profiles.
     Derived from the job_profile table records.
     """
-    activities = await job_profile_repo.get_recent_activity(limit=5)
+    effective_category = await resolve_effective_category(
+        current_user=current_user,
+        session=job_profile_repo.async_session,
+        requested_category=category,
+    )
+    activities = await job_profile_repo.get_recent_activity(limit=5, category=effective_category)
     return [JobProfileActivityResponse(**a) for a in activities]
+
 
 @router.get(
     path="/job-profiles/summary",
@@ -81,6 +168,7 @@ async def get_recent_activity(
     summary="Get summary counts for Job Profiles",
 )
 async def get_job_profiles_summary(
+    category: Optional[str] = fastapi.Query(None),
     current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileSummaryResponse:
@@ -91,8 +179,14 @@ async def get_job_profiles_summary(
     - Approved (default 0)
     - Rejected (default 0)
     """
-    summary_data = await job_profile_repo.get_summary()
+    effective_category = await resolve_effective_category(
+        current_user=current_user,
+        session=job_profile_repo.async_session,
+        requested_category=category,
+    )
+    summary_data = await job_profile_repo.get_summary(category=effective_category)
     return JobProfileSummaryResponse(**summary_data)
+
 
 @router.get(
     path="/job-profiles",
@@ -105,9 +199,15 @@ async def list_job_profiles(
     category: Optional[str] = fastapi.Query(None),
     limit: Optional[int] = fastapi.Query(None),
     is_admin: bool = fastapi.Depends(check_is_admin_dep),
+    current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileListResponse:
-    profiles = await job_profile_repo.list_profiles(category=category, limit=limit, is_admin=is_admin)
+    effective_category = await resolve_effective_category(
+        current_user=current_user,
+        session=job_profile_repo.async_session,
+        requested_category=category,
+    )
+    profiles = await job_profile_repo.list_profiles(category=effective_category, limit=limit, is_admin=is_admin)
     return JobProfileListResponse(items=profiles, total=len(profiles))
 
 @router.post(

@@ -198,10 +198,12 @@ class TeamCRUDRepository(BaseCRUDRepository):
         previous_local_role = existing_member.access_role if existing_member else getattr(user, "role", None)
         previous_canonical_role = derive_central_role(previous_local_role) if previous_local_role else None
 
-        # Do not overwrite pre-existing credentials for existing users during team member addition
+        # Forward explicit password provided by Admin to Central Auth for active credential provisioning.
+        # Administrative accounts are protected from credential resets via team member provisioning.
+        is_admin_target = bool(user and (is_admin_user(user) or is_super_admin_user(user)))
         password_to_send = (
             member_data.password.strip()
-            if (member_data.password and member_data.password.strip() and not existing_user_has_password)
+            if (member_data.password and member_data.password.strip() and not is_admin_target)
             else None
         )
 

@@ -31,20 +31,26 @@ def _difficulty_for_level(level: int) -> str:
 
 class JobProfileCRUDRepository(BaseCRUDRepository):
     # --- feature/roles-page-api methods ---
-    async def get_summary(self) -> dict:
+    async def get_summary(self, category: Optional[str] = None) -> dict:
         """
         Returns a summary count of job profiles based on their status in the database.
+        Optionally filtered by category / domain.
         """
         total_stmt = select(func.count()).select_from(JobProfile)
-        total_count = (await self.async_session.execute(total_stmt)).scalar() or 0
-        
         pending_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.UNDER_REVIEW)
-        pending_count = (await self.async_session.execute(pending_stmt)).scalar() or 0
-
         approved_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.PUBLISHED)
-        approved_count = (await self.async_session.execute(approved_stmt)).scalar() or 0
-
         rejected_stmt = select(func.count()).select_from(JobProfile).where(JobProfile.status == JobProfileStatus.CHANGES_REQUESTED)
+
+        if category and category.strip():
+            cat_clean = category.strip().lower()
+            total_stmt = total_stmt.where(func.lower(JobProfile.category) == cat_clean)
+            pending_stmt = pending_stmt.where(func.lower(JobProfile.category) == cat_clean)
+            approved_stmt = approved_stmt.where(func.lower(JobProfile.category) == cat_clean)
+            rejected_stmt = rejected_stmt.where(func.lower(JobProfile.category) == cat_clean)
+
+        total_count = (await self.async_session.execute(total_stmt)).scalar() or 0
+        pending_count = (await self.async_session.execute(pending_stmt)).scalar() or 0
+        approved_count = (await self.async_session.execute(approved_stmt)).scalar() or 0
         rejected_count = (await self.async_session.execute(rejected_stmt)).scalar() or 0
 
         return {
@@ -66,8 +72,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         
         if not is_admin:
             query = query.where(JobProfile.status == JobProfileStatus.PUBLISHED)
-        if category:
-            query = query.where(JobProfile.category == category)
+        if category and category.strip():
+            query = query.where(func.lower(JobProfile.category) == category.strip().lower())
         if limit is not None:
             query = query.limit(limit)
         result = await self.async_session.execute(query)
@@ -119,12 +125,16 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(profile)
         return profile
 
-    async def get_recent_activity(self, limit: int = 5) -> List[dict]:
+    async def get_recent_activity(self, limit: int = 5, category: Optional[str] = None) -> List[dict]:
         """
         Derives recent activity from JobProfile records.
         Returns the latest 'limit' profiles formatted as activity.
+        Optionally filtered by category / domain.
         """
-        query = select(JobProfile).order_by(JobProfile.created_at.desc()).limit(limit)
+        query = select(JobProfile)
+        if category and category.strip():
+            query = query.where(func.lower(JobProfile.category) == category.strip().lower())
+        query = query.order_by(JobProfile.created_at.desc()).limit(limit)
         result = await self.async_session.execute(query)
         profiles = result.scalars().all()
         

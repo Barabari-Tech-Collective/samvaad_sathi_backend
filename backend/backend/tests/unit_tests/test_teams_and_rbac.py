@@ -2606,3 +2606,127 @@ def test_cross_membership_unrestricted_creator_retains_privileges_with_tagged_me
     assert perms["colleges"] is None
 
 
+@pytest.mark.asyncio
+async def test_check_is_admin_dep_grants_viewer_access():
+    from src.api.routes.job_profiles_v2 import check_is_admin_dep
+
+    # Admin user
+    admin_user = MagicMock()
+    admin_user.is_admin = True
+    assert await check_is_admin_dep(current_user=admin_user, session=None) is True
+
+    # Junior Facilitator via token role
+    jr_user = MagicMock()
+    jr_user.is_admin = False
+    jr_user._token_is_admin = False
+    jr_user.email = "jr@test.com"
+    jr_user.role = "junior facilitator"
+    jr_user._token_role = "junior facilitator"
+    assert await check_is_admin_dep(current_user=jr_user, session=None) is True
+
+    # Regular student user
+    student_user = MagicMock()
+    student_user.id = 999
+    student_user.is_super_admin = False
+    student_user._token_is_super_admin = False
+    student_user.is_admin = False
+    student_user._token_is_admin = False
+    student_user.email = "student@test.com"
+    student_user.role = "student"
+    student_user._token_role = "student"
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+    assert await check_is_admin_dep(current_user=student_user, session=mock_session) is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_effective_category_scopes_facilitator_to_domain():
+    from src.api.routes.job_profiles_v2 import resolve_effective_category
+
+    # Junior Facilitator with Sales domain in active membership
+    jr_user = MagicMock()
+    jr_user.id = 55
+    jr_user.is_admin = False
+    jr_user._token_is_admin = False
+    jr_user.is_super_admin = False
+    jr_user._token_is_super_admin = False
+    jr_user.email = "omer@test.com"
+    jr_user.role = "junior facilitator"
+    jr_user._token_role = "junior facilitator"
+
+    mock_member = MagicMock()
+    mock_member.access_role = "Junior Facilitator"
+    mock_member.domain = "Sales"
+    mock_team = MagicMock()
+    mock_team.name = "Program Team"
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(
+        return_value=MagicMock(all=lambda: [(mock_member, mock_team)])
+    )
+
+    # Even if no category query param is passed, effective category MUST be "Sales"
+    effective_cat = await resolve_effective_category(
+        current_user=jr_user,
+        session=mock_session,
+        requested_category=None,
+    )
+    assert effective_cat == "Sales"
+
+    # Even if they attempt to pass another category, facilitator stays scoped to their domain
+    effective_cat_override = await resolve_effective_category(
+        current_user=jr_user,
+        session=mock_session,
+        requested_category="Engineering",
+    )
+    assert effective_cat_override == "Sales"
+
+    # Admin user is NOT scoped to any domain and can view requested category or all
+    admin_user = MagicMock()
+    admin_user.is_admin = True
+    admin_user._token_is_admin = True
+    admin_user.is_super_admin = True
+    admin_user._token_is_super_admin = True
+
+    admin_all = await resolve_effective_category(
+        current_user=admin_user,
+        session=mock_session,
+        requested_category=None,
+    )
+    assert admin_all is None
+
+    admin_filtered = await resolve_effective_category(
+        current_user=admin_user,
+        session=mock_session,
+        requested_category="Engineering",
+    )
+    assert admin_filtered == "Engineering"
+
+    # Team Lead user has global access across all domains
+    lead_user = MagicMock()
+    lead_user.id = 77
+    lead_user.is_admin = False
+    lead_user._token_is_admin = False
+    lead_user.is_super_admin = False
+    lead_user._token_is_super_admin = False
+    lead_user.role = "lead"
+    lead_user._token_role = "lead"
+
+    lead_all = await resolve_effective_category(
+        current_user=lead_user,
+        session=mock_session,
+        requested_category=None,
+    )
+    assert lead_all is None  # None means all interviews globally across all domains
+
+    lead_filtered = await resolve_effective_category(
+        current_user=lead_user,
+        session=mock_session,
+        requested_category="Engineering",
+    )
+    assert lead_filtered == "Engineering"
+
+
+
+
+
