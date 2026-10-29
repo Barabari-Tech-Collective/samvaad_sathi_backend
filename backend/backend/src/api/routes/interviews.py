@@ -3,6 +3,7 @@ import json
 import logging
 
 import fastapi
+from src.api.dependencies.rate_limit import student_action_limit
 from src.services.interview_course_access import require_interview_course_access
 from src.services.interview_question_plan import planned_count, snapshotted_questions
 from sqlalchemy.exc import SQLAlchemyError
@@ -80,6 +81,17 @@ from src.services.whisper import strip_word_level_data
 
 logger = logging.getLogger(__name__)
 
+
+
+def _listed_status(interview) -> str:
+    """Status shown in history lists: an elapsed resume window reads as expired.
+
+    The row is only flipped lazily when someone tries to act on it, so without this a
+    student sees long-dead sessions listed as resumable.
+    """
+    if interview.status in ("active", "paused") and interview_has_expired(interview):
+        return "expired"
+    return interview.status
 
 router = fastapi.APIRouter(prefix="", tags=["interviews"])
 
@@ -552,6 +564,7 @@ async def pause_interview(
 
 @router.post(
     path="/interviews/generate-questions",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews:generate-questions",
     response_model=GeneratedQuestionsInResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -1162,7 +1175,7 @@ async def list_my_interviews(
             interview_id=interview.id,
             track=interview.track,
             difficulty=interview.difficulty,
-            status=interview.status,
+            status=_listed_status(interview),
             interview_mode=(
                 interview.interview_mode
                 if interview.interview_mode in {"practice", "assessment"}
@@ -1581,7 +1594,7 @@ async def list_my_interviews_with_summary(
                 interview_id=interview.id,
                 track=interview.track,
                 difficulty=interview.difficulty,
-                status=interview.status,
+                status=_listed_status(interview),
                 created_at=interview.created_at,
                 knowledge_percentage=knowledge_percentage,
                 speech_fluency_percentage=speech_fluency_percentage,

@@ -136,11 +136,10 @@ async def _shared_student_predicate(course_id, current_user, session, *, coachin
             paired = membership_grants([item])
             if not paired or not any(course_id in grant.course_ids for grant in paired):
                 continue
-            role = resolve_dashboard_role(current_user, [item])
-            if role not in ({"facilitator"} if coaching_only else {"facilitator", "placements"}):
-                continue
-            purpose = "opportunity_readiness" if role == "placements" else "facilitator_coaching"
-            clauses.append(sa.and_(student_predicate(course_id, paired, global_access=False), consent(purpose)))
+            roles = {resolve_dashboard_role(current_user, [item]), resolve_dashboard_role(current_user, [item], preferred="facilitator")}
+            for role in roles & ({"facilitator"} if coaching_only else {"facilitator", "placements"}):
+                purpose = "opportunity_readiness" if role == "placements" else "facilitator_coaching"
+                clauses.append(sa.and_(student_predicate(course_id, paired, global_access=False), consent(purpose)))
         if not clauses:
             raise fastapi.HTTPException(403, "A scoped coaching or placement responsibility is required.")
         predicate = sa.or_(*clauses)
@@ -174,6 +173,7 @@ async def course_students(
         response.headers["Cache-Control"] = "no-store"
     from src.services.course_shortlists import can_open
     from src.services.human_interviews import permitted as human_permitted
+    from src.services.integrity_review import permitted as integrity_permitted
     from src.services.course_support import can_open as support_can_open
     filters = RosterFilters(q=q, activity=activity)
     authorized = await _shared_student_predicate(course_id, current_user, session)
@@ -198,6 +198,7 @@ async def course_students(
         "page": page,
         "limit": limit,
         "can_open_human_interviews": human_permitted(current_user, "read"),
+        "can_open_integrity_review": integrity_permitted(current_user, "read"),
         "can_open_support": await support_can_open(current_user, course_id, session),
         "can_open_shortlists": await can_open(current_user, course_id, session),
         "filters": filters.model_dump(),

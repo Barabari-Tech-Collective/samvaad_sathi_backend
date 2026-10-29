@@ -21,6 +21,7 @@ def settings_stub(monkeypatch):
 
     class Stub:
         AUTH_SERVICE_BASE_URL = ""
+        AUTH_SERVICE_PUBLIC_BASE_URL = ""
         ENVIRONMENT = Environment.DEVELOPMENT.value
 
     stub = Stub()
@@ -90,3 +91,21 @@ async def test_sso_login_refuses_to_redirect_without_auth_service(settings_stub)
         await auth_sso.sso_login(request)
     assert raised.value.status_code == fastapi.status.HTTP_503_SERVICE_UNAVAILABLE
     assert "unavailable" in raised.value.detail.lower()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("public_origin,expected", [("", "https://auth.internal.test"), ("http://localhost:8081", "http://localhost:8081")])
+async def test_browser_origin_can_differ_from_verified_internal_auth(settings_stub, public_origin, expected):
+    from src.api.routes.auth_sso import sso_login
+    from urllib.parse import urlsplit, parse_qs
+    settings_stub.AUTH_SERVICE_BASE_URL = "https://auth.internal.test"
+    settings_stub.AUTH_SERVICE_PUBLIC_BASE_URL = public_origin
+    settings_stub.SSO_REDIRECT_URI = "http://localhost:8000/api/auth/sso/callback"
+    settings_stub.SAMPARK_PRODUCT_UNIQUE_ID = "local-product"
+    request = fastapi.Request({"type":"http", "method":"GET", "path":"/api/auth/sso/login", "headers":[], "query_string":b"", "session":{}})
+    response = await sso_login(request, return_to="/history?tab=practice")
+    assert request.session["sso_destination"] == "/history?tab=practice"
+    location = response.headers["location"]
+    assert location.startswith(expected + "/barabari-auth/")
+    assert parse_qs(urlsplit(location).query)["state"] == [request.session["sso_state"]]
+    assert settings_stub.AUTH_SERVICE_BASE_URL == "https://auth.internal.test"

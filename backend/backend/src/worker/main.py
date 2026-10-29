@@ -6,6 +6,7 @@ process from the API server:
 See deploy/samvaad-worker.service for a systemd unit that runs this.
 """
 
+from src.services.resume_storage_delivery import deliver_resume_files
 from arq import cron
 from arq.worker import func
 
@@ -33,6 +34,7 @@ class WorkerSettings:
         purge_expired_bulk_ats_batches_task,
     ]
     cron_jobs = [
+        cron(deliver_resume_files, minute=set(range(60)), run_at_startup=True, timeout=300),
         cron(synchronize_sampark_enrollments_task,minute=set(range(0,60,5)),run_at_startup=False),
         cron(
             purge_expired_bulk_ats_batches_task, hour=2, minute=15, run_at_startup=False

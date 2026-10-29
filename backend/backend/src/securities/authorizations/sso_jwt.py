@@ -1,6 +1,6 @@
 import base64
 
-from jose import jwt as jose_jwt, JWTError as JoseJWTError
+from jose import jwt as jose_jwt, JWTError as JoseJWTError, ExpiredSignatureError
 
 from src.config.manager import settings
 
@@ -12,6 +12,10 @@ _SECRET_KEY_BYTES = base64.b64decode(settings.AUTH_SERVICE_JWT_SECRET)
 
 class SsoTokenError(Exception):
     """Raised when a Sampark Saathi auth-service access token fails to verify."""
+
+
+class SsoExpiredToken(SsoTokenError):
+    """Signature-verified JWT whose expiry has elapsed."""
 
 
 # Students are the product's primary users; ADMIN/SUPER_ADMIN operate the
@@ -79,6 +83,8 @@ def decode_sso_access_token(token: str) -> dict:
     """
     try:
         claims = jose_jwt.decode(token=token, key=_SECRET_KEY_BYTES, algorithms=["HS256"])
+    except ExpiredSignatureError as token_decode_error:
+        raise SsoExpiredToken("Access token expired") from token_decode_error
     except JoseJWTError as token_decode_error:
         raise SsoTokenError("Unable to decode Sampark Saathi access token") from token_decode_error
 

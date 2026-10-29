@@ -12,6 +12,7 @@ import asyncio
 import logging
 
 import fastapi
+from src.api.dependencies.rate_limit import student_action_limit
 from fastapi import File, UploadFile
 
 from src.api.dependencies.auth import get_current_user
@@ -114,6 +115,7 @@ async def get_pacing_levels(
 
 @router.post(
     path="/session",
+    dependencies=[fastapi.Depends(student_action_limit("practice_session", limit=120))],
     name="pacing-practice:create-session",
     response_model=PacingPracticeSessionResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -154,13 +156,15 @@ async def create_pacing_session(
         level=level,
         prompt_text=prompt_text,
         prompt_index=prompt_index,
+        **({"client_request_id": str(payload.client_request_id)} if payload.client_request_id else {}),
     )
-    await track_analytics_event(
-        session_repo.async_session,
-        event_type="practice_started",
-        user_id=current_user.id,
-        event_data={"practice_type": "pacing", "level": level, "session_id": db_session.id},
-    )
+    if not getattr(db_session, "_creation_replayed", False):
+        await track_analytics_event(
+            session_repo.async_session,
+            event_type="practice_started",
+            user_id=current_user.id,
+            event_data={"practice_type": "pacing", "level": level, "session_id": db_session.id},
+        )
 
     return PacingPracticeSessionResponse(
         session_id=db_session.id,
@@ -200,6 +204,7 @@ async def submit_pacing_session(
     db_session = await session_repo.get_by_id_and_user(
         session_id=session_id,
         user_id=current_user.id,
+        for_update=True,
     )
     if not db_session:
         raise fastapi.HTTPException(

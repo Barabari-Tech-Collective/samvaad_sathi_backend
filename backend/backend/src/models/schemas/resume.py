@@ -50,7 +50,15 @@ class ResumeDetails(BaseSchemaModel):
     companies: list[str] | None = pydantic.Field(default=None)
 
 
+class ResumeStorageReceipt(BaseSchemaModel):
+    file_sha256: str
+    status: typing.Literal["registered", "unconfirmed"]
+    resume_id: int | None = None
+    delivery_status: typing.Literal["pending", "failed", "expired"] | None = None
+
+
 class ResumeExtractionResponse(BaseSchemaModel):
+    file_sha256: str | None = pydantic.Field(default=None, description="Exact uploaded bytes; use the account-scoped storage receipt endpoint to reconcile storage")
     filename: str = pydantic.Field(description="Original uploaded filename")
     content_type: str = pydantic.Field(description="MIME type of the uploaded file")
     size: int = pydantic.Field(description="File size in bytes (<= 5MB)")

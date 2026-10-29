@@ -157,3 +157,26 @@ def test_receipt_preserves_unknowns_and_does_not_penalize_processing_failure():
     assert result["answered"] == 1
     assert result["unreached"] == 2
     assert result["reason"] == "time_limit"
+
+
+@pytest.mark.parametrize("ids", [(1, 2), (1, 2, 3, 4), (1, 1, 2)])
+def test_receipt_rejects_missing_extra_or_duplicate_question_set_after_deadline(ids):
+    value = sitting()
+    value.answer_deadline_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1)
+    with pytest.raises(fastapi.HTTPException) as error:
+        receipt(value, [Item(id=i, status="pending") for i in ids], [])
+    assert error.value.status_code == 409
+
+
+def test_receipt_rejects_foreign_interview_question_set():
+    value = sitting()
+    with pytest.raises(fastapi.HTTPException):
+        receipt(value, [Item(id=i, status="skipped", interview_id=99) for i in (1, 2, 3)], [])
+
+
+def test_receipt_does_not_count_foreign_interview_attempt():
+    value = sitting()
+    value.answer_deadline_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1)
+    result = receipt(value, [Item(id=i, status="pending") for i in (1, 2, 3)],
+        [Item(id=1, question_id=1, interview_id=99, audio_url="foreign")])
+    assert result["answered"] == 0 and result["unreached"] == 3

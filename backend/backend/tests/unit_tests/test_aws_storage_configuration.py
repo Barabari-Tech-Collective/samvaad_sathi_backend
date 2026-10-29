@@ -14,6 +14,28 @@ def test_missing_bucket_never_defaults_to_the_previous_account():
         load_storage_configuration(reader())
 
 
+def test_local_storage_is_explicit_and_uses_matching_loopback_delivery():
+    value = load_storage_configuration(reader(
+        ENVIRONMENT="DEV", AWS_S3_BUCKET_NAME="local-files",
+        AWS_ACCESS_KEY_ID="local", AWS_SECRET_ACCESS_KEY="local-only",
+        AWS_S3_LOCAL_ENDPOINT_URL="http://127.0.0.1:19000",
+        AWS_S3_PUBLIC_BASE_URL="http://127.0.0.1:19000/local-files",
+    ))
+    assert value.client_options["endpoint_url"] == "http://127.0.0.1:19000"
+    assert value.public_base_url == "http://127.0.0.1:19000/local-files"
+
+
+@pytest.mark.parametrize("environment,endpoint", [
+    ("PROD", "http://127.0.0.1:19000"), ("STAGE", "http://127.0.0.1:19000"),
+    ("DEV", "http://external.test:19000"), ("DEV", "http://127.0.0.1:19000?token=x"),
+])
+def test_local_storage_cannot_redirect_deployed_storage(environment, endpoint):
+    with pytest.raises(ValueError, match="Local S3"):
+        load_storage_configuration(reader(ENVIRONMENT=environment,
+            AWS_S3_BUCKET_NAME="local-files", AWS_ACCESS_KEY_ID="local",
+            AWS_SECRET_ACCESS_KEY="local-only", AWS_S3_LOCAL_ENDPOINT_URL=endpoint))
+
+
 def test_no_static_keys_uses_refreshable_default_credentials():
     value = load_storage_configuration(reader(AWS_S3_BUCKET_NAME="new-private-bucket", AWS_REGION="eu-west-1"))
     assert value.client_options == {"region_name": "eu-west-1"}

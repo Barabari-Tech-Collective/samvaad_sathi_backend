@@ -51,9 +51,7 @@ class UserProfileOut(BaseSchemaModel):
     # company removed from response
 
 
-class UserWithToken(BaseSchemaModel):
-    token: str
-    refresh_token: str | None = None
+class SessionUserProfile(BaseSchemaModel):
     email: pydantic.EmailStr
     name: str
     created_at: datetime.datetime
@@ -88,6 +86,17 @@ class UserWithToken(BaseSchemaModel):
     can_edit: bool = False
     is_view_only: bool = False
     # company removed from response
+
+
+class UserWithToken(SessionUserProfile):
+    # Central auth is the only credential source; /me never mints a token of its own.
+    token: str | None = None
+    refresh_token: str | None = None
+
+
+class SessionUserResponse(BaseSchemaModel):
+    user_id: int
+    authorized_user: SessionUserProfile
 
 
 class UserInResponse(BaseSchemaModel):

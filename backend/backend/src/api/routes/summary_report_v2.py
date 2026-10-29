@@ -6,6 +6,7 @@ import logging
 import time
 
 import fastapi
+from src.api.dependencies.rate_limit import student_action_limit
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
@@ -29,6 +30,7 @@ router = fastapi.APIRouter(prefix="/v2", tags=["summary-report-v2"])
 
 @router.post(
     "/summary-report",
+    dependencies=[fastapi.Depends(student_action_limit("summary_report", limit=60))],
     response_model=SummaryReportResponseLite,
     response_model_exclude_none=True,
     status_code=200,

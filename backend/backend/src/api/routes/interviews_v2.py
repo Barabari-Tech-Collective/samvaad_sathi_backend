@@ -1,5 +1,6 @@
 import json
 import fastapi
+from src.api.dependencies.rate_limit import student_action_limit
 from src.services.interview_course_access import require_interview_course_access
 from src.services.interview_question_plan import planned_count, snapshotted_questions
 import logging
@@ -462,6 +463,7 @@ async def create_or_resume_interview_v2(
 
 @router.post(
     path="/interviews/generate-questions",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews-v2:generate-questions",
     response_model=GeneratedQuestionsInResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -858,6 +860,7 @@ async def generate_questions_v2(
 
 @router.post(
     path="/interviews/non-tech/generate-questions",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews-v2:generate-non-tech-questions",
     response_model=GeneratedQuestionsInResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -1121,6 +1124,7 @@ async def generate_non_tech_questions_v2(
 
 @router.post(
     path="/interviews/structure-practice",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews-v2:structure-practice",
     response_model=StructurePracticeQuestionsResponse,
     status_code=fastapi.status.HTTP_200_OK,
@@ -1440,6 +1444,7 @@ async def _backfill_follow_up_parents(
 
 @router.post(
     path="/pronunciation/create",
+    dependencies=[fastapi.Depends(student_action_limit("practice_session", limit=120))],
     name="pronunciation:create",
     response_model=PronunciationPracticeResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -1607,6 +1612,7 @@ async def get_pronunciation_audio(
 
 @router.post(
     path="/structure-practice/session",
+    dependencies=[fastapi.Depends(student_action_limit("practice_session", limit=120))],
     name="structure-practice:create-session",
     response_model=StructurePracticeSessionResponse,
     status_code=fastapi.status.HTTP_201_CREATED,

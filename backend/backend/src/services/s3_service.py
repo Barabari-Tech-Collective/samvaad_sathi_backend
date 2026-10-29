@@ -93,6 +93,7 @@ def upload_resume_to_s3(
     user_id: int,
     filename: str,
     content_type: str = "application/pdf",
+    durable_sha256: str | None = None,
 ) -> Optional[str]:
     """
     Uploads a resume file byte stream to the S3 bucket.
@@ -120,6 +121,14 @@ def upload_resume_to_s3(
 
     # The key (path) inside the bucket
     s3_object_key = f"Samvaad-Saathi/resumes/user_{user_id}_{unique_suffix}{ext}"
+
+    if durable_sha256 is not None:
+        import hashlib
+        if hashlib.sha256(file_bytes).hexdigest() != durable_sha256:
+            raise ValueError("Durable resume fingerprint does not match original bytes")
+        # The same account/file always reaches the same key, even after a crash
+        # between object creation and the registry transaction.
+        s3_object_key = f"Samvaad-Saathi/resumes/user_{user_id}_sha256_{durable_sha256}"
 
     try:
         s3_client.put_object(
@@ -357,6 +366,8 @@ async def _background_upload_and_enforce_limit(
     source: str,
     size_bytes: int | None = None,
     file_sha256: str | None = None,
+    *,
+    durable_delivery: bool = False,
 ):
     """
     Background task to upload a resume and save the key to the UserResume table.
@@ -369,6 +380,11 @@ async def _background_upload_and_enforce_limit(
     from src.models.db.user_resume import UserResume
 
     logger = logging.getLogger(__name__)
+
+    if durable_delivery:
+        import hashlib
+        if not file_sha256 or hashlib.sha256(file_bytes).hexdigest() != file_sha256:
+            raise ValueError("Durable delivery requires the original file fingerprint")
 
     try:
         # Deduplication check before uploading to S3
@@ -391,9 +407,11 @@ async def _background_upload_and_enforce_limit(
                     return existing_resume.s3_key
 
         loop = asyncio.get_running_loop()
-        s3_key = await loop.run_in_executor(
-            None, upload_resume_to_s3, file_bytes, user_id, filename, content_type
-        )
+        from functools import partial
+        upload = partial(upload_resume_to_s3, file_bytes, user_id, filename, content_type)
+        if durable_delivery:
+            upload = partial(upload, durable_sha256=file_sha256)
+        s3_key = await loop.run_in_executor(None, upload)
 
         if s3_key:
             s3_keys_to_delete = []
@@ -423,8 +441,9 @@ async def _background_upload_and_enforce_limit(
                             f"IntegrityError: Concurrent upload detected for user {user_id}. Using existing."
                         )
 
-                        # Clean up the orphaned S3 object we just uploaded
-                        if s3_client and BUCKET_NAME:
+                        # Random keys are attempt-owned. Stable keys may already belong
+                        # to a concurrent winner: never delete them on a losing insert.
+                        if s3_client and BUCKET_NAME and not durable_delivery:
                             try:
                                 await loop.run_in_executor(
                                     None,
@@ -474,8 +493,9 @@ async def _background_upload_and_enforce_limit(
 
                     await session.commit()
             except Exception as db_err:
-                # DB transaction failed. Clean up the newly uploaded S3 object to prevent leaks.
-                if s3_client and BUCKET_NAME:
+                # Preserve stable keys for replay, including ambiguous commit outcomes.
+                # Only legacy attempt-owned keys may be removed here.
+                if s3_client and BUCKET_NAME and not durable_delivery:
                     try:
                         await loop.run_in_executor(
                             None,

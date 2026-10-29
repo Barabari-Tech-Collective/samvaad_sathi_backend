@@ -9,24 +9,53 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 TASK = "bulk_ats_semantics_v1"
-POLICY_VERSION = "jev-ats-release-v1"
+POLICY_VERSION = "jev-ats-release-v2"
+TASKS = {
+    TASK: POLICY_VERSION,
+    "practice_rubric_feedback_v1": "jev-practice-rubric-release-v2",
+}
 
 
 def finite_number(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def evaluate_cases(cases: list[dict], *, model: str, dataset_id: str, now=None):
+def proportion_interval(successes, count):
+    """Wilson 95% interval; small samples must not look certain."""
+    if not count:
+        return None
+    z = 1.959963984540054
+    p = successes / count
+    denominator = 1 + z * z / count
+    center = (p + z * z / (2 * count)) / denominator
+    radius = (
+        z * math.sqrt(p * (1 - p) / count + z * z / (4 * count * count)) / denominator
+    )
+    return [max(0.0, center - radius), min(1.0, center + radius)]
+
+
+def evaluate_cases(
+    cases: list[dict],
+    *,
+    model: str,
+    dataset_id: str,
+    now=None,
+    task: str = TASK,
+    label_review: dict | None = None,
+):
     """Paired human labels and provider predictions; no model self-grading.
 
     Each case has a unique opaque id, a predeclared segment, expected/predicted
     review booleans and expected/predicted semantic score percentages. A failed
     provider prediction is represented by null, never silently dropped.
     """
+    if task not in TASKS:
+        raise ValueError("Unsupported evaluation task")
     if not model.strip() or not dataset_id.strip() or not cases:
         raise ValueError("Model, dataset id and labelled cases are required")
     if len(cases) > 10000:
@@ -88,6 +117,10 @@ def evaluate_cases(cases: list[dict], *, model: str, dataset_id: str, now=None):
             "reviewNegativeCount": negatives,
             "scoreLabelCount": len(scored_rows),
             "reviewRecall": 1 - missed / positives if positives else None,
+            "reviewRecall95Interval": proportion_interval(
+                positives - missed, positives
+            ),
+            "falseReviewRate95Interval": proportion_interval(false_alarms, negatives),
             "falseReviewRate": false_alarms / negatives if negatives else None,
             "scoreMAE": sum(errors) / len(errors) if errors else None,
             "predictionCoverage": len(errors) / len(scored_rows) if scored_rows else 0,
@@ -116,8 +149,9 @@ def evaluate_cases(cases: list[dict], *, model: str, dataset_id: str, now=None):
                 failures.append(f"{name}:{key}")
     instant = now or datetime.now(timezone.utc)
     return {
-        "policyVersion": POLICY_VERSION,
-        "task": TASK,
+        "labelReview": label_review,
+        "policyVersion": TASKS[task],
+        "task": task,
         "model": model,
         "datasetId": dataset_id,
         "evaluatedAt": instant.isoformat(),
@@ -129,6 +163,65 @@ def evaluate_cases(cases: list[dict], *, model: str, dataset_id: str, now=None):
     }
 
 
+def validate_label_review(
+    review, *, dataset_id, model, task, case_count, case_digest=None, now=None
+):
+    if not isinstance(review, dict):
+        raise ValueError("Independent label review is required")
+    reviewers = review.get("reviewer_ids")
+    if (
+        not isinstance(reviewers, list)
+        or len(reviewers) != 2
+        or any(
+            not isinstance(value, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{3,64}", value)
+            for value in reviewers
+        )
+        or len(set(reviewers)) != 2
+    ):
+        raise ValueError("Two independent reviewer identities are required")
+    if any(
+        review.get(key) != value
+        for key, value in [
+            ("datasetId", dataset_id),
+            ("model", model),
+            ("task", task),
+            ("case_count", case_count),
+        ]
+    ):
+        raise ValueError("Review does not match evaluation task/model/dataset")
+    digest = review.get("cases_sha256", "")
+    if (
+        not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        or (case_digest is not None and digest != case_digest)
+    ):
+        raise ValueError("Reviewed cases digest does not match")
+    disagreements = review.get("disagreement_count")
+    if (
+        type(disagreements) is not int
+        or not 0 <= disagreements <= case_count
+        or case_count < 1
+    ):
+        raise ValueError("Invalid review counts")
+    rate = review.get("agreement_rate")
+    if not finite_number(rate) or not math.isclose(
+        rate, 1 - disagreements / case_count
+    ):
+        raise ValueError("Invalid inter-reviewer agreement")
+    third = review.get("adjudicator_id")
+    if disagreements and (
+        not isinstance(third, str)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{3,64}", third)
+        or third in reviewers
+    ):
+        raise ValueError("Disagreements require independent adjudication")
+    reviewed = datetime.fromisoformat(review["reviewedAt"])
+    if not reviewed.tzinfo or reviewed > (now or datetime.now(timezone.utc)):
+        raise ValueError("Review time must be aware and cannot be future-dated")
+    return review
+
+
 def rollout_allowed(
     *,
     path: str,
@@ -138,8 +231,11 @@ def rollout_allowed(
     cohort_key: str,
     segment: str | None = None,
     now=None,
+    task: str = TASK,
 ) -> bool:
     """Operator-pinned evidence + stable cohort. Any ambiguity keeps Jev off."""
+    if task not in TASKS:
+        return False
     if (
         type(percent) is not int
         or not 0 < percent <= 100
@@ -159,8 +255,8 @@ def rollout_allowed(
         evaluated = datetime.fromisoformat(report["evaluatedAt"])
         expires = datetime.fromisoformat(report["expiresAt"])
         if (
-            report["task"] != TASK
-            or report["policyVersion"] != POLICY_VERSION
+            report["task"] != task
+            or report["policyVersion"] != TASKS[task]
             or report["model"] != model
             or report["passed"] is not True
             or report["failures"] != []
@@ -171,6 +267,14 @@ def rollout_allowed(
             or expires - evaluated > timedelta(days=30)
         ):
             return False
+        validate_label_review(
+            report.get("labelReview"),
+            dataset_id=report["datasetId"],
+            model=model,
+            task=task,
+            case_count=report["overall"]["count"],
+            now=evaluated,
+        )
         # Recheck aggregate thresholds even for a digest-pinned operator artifact.
         results = [report["overall"], *report["segments"].values()]
         if not report["segments"]:
@@ -207,7 +311,7 @@ def rollout_allowed(
         return False
     bucket = (
         int.from_bytes(
-            hashlib.sha256(f"{TASK}:{cohort_key}".encode()).digest()[:8], "big"
+            hashlib.sha256(f"{task}:{cohort_key}".encode()).digest()[:8], "big"
         )
         % 100
     )

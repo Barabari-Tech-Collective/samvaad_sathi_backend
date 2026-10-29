@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import fastapi
+from src.api.dependencies.rate_limit import student_action_limit
 from src.services.interview_course_access import require_interview_course_access
 from fastapi import File, Form, UploadFile
 
@@ -105,6 +106,7 @@ async def _require_active_interview(
 
 @router.post(
     path="/transcribe-whisper",
+    dependencies=[fastapi.Depends(student_action_limit("transcribe", limit=240))],
     name="audio:transcribe-whisper",
     response_model=AudioTranscriptionResponse,
     status_code=fastapi.status.HTTP_202_ACCEPTED,

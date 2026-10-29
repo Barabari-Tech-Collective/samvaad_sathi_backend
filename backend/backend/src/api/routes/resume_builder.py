@@ -1,7 +1,9 @@
+import fastapi
 import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from src.api.dependencies.rate_limit import student_action_limit
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 import io
@@ -24,6 +26,7 @@ from src.models.schemas.resume_builder import (
 from src.repository.crud.ai_resume_analysis import AIResumeAnalysisCRUDRepository
 from src.services.ai_resume.template_service import generate_structured_resume_data
 from src.repository.crud.user import UserCRUDRepository
+from src.services.resume.safe_rendering import safe_resume_markup_data, deny_resume_resource
 
 router = APIRouter(prefix="/resume-builder", tags=["Resume Builder V2"])
 
@@ -42,7 +45,8 @@ async def get_template_detail(template_id: str, current_user: User = Depends(get
         raise HTTPException(status_code=404, detail="Template context specification not matching active baseline.")
     return DEFAULT_TEMPLATE_DETAIL
 
-@router.post("/from-template", response_model=ResumeInstanceResponse)
+@router.post("/from-template",
+    dependencies=[fastapi.Depends(student_action_limit("resume_builder", limit=40))], response_model=ResumeInstanceResponse)
 async def create_resume_from_template(
     payload: CreateResumeFromTemplateRequest,
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -131,7 +135,7 @@ async def download_resume_pdf(
         raise HTTPException(status_code=404, detail="Resume targeted dataset reference point not located.")
 
     try:
-        data = resume.resume_data
+        data = safe_resume_markup_data(resume.resume_data)
         header = data.get('header', {})
         
         contact_items = []
@@ -241,7 +245,7 @@ async def download_resume_pdf(
         
         from xhtml2pdf import pisa
         pdf_buffer = io.BytesIO()
-        pisa_status = pisa.CreatePDF(io.StringIO(html_content), dest=pdf_buffer)
+        pisa_status = pisa.CreatePDF(io.StringIO(html_content), dest=pdf_buffer, link_callback=deny_resume_resource)
         
         if pisa_status.err:
             raise HTTPException(status_code=500, detail="PDF engine failure processing structured markup text stream.")
@@ -253,8 +257,10 @@ async def download_resume_pdf(
             headers={"Content-Disposition": f"attachment; filename=SamvaadSathi_Resume_{resume_id}.pdf"}
         )
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Document transmission process exception intercept: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not generate the resume PDF. Please try again.")
 
 @router.post("/{resume_id}/sync-to-profile")
 async def sync_resume_to_profile(
@@ -317,6 +323,8 @@ async def sync_resume_to_profile(
         )
         
         return {"status": "SYNCED"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to sync resume to profile for user_id=%s", current_user.id)
         raise HTTPException(status_code=500, detail="Failed to sync resume to profile. Please try again.")

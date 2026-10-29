@@ -179,6 +179,8 @@ class BackendBaseSettings(BaseSettings):
     # ------------------------------
     # Public origin of the barabari-auth-service, e.g. https://barabari-auth-service.onrender.com
     AUTH_SERVICE_BASE_URL: str = decouple.config("AUTH_SERVICE_BASE_URL", cast=str, default="")  # type: ignore
+    # Optional browser-facing origin when server-to-server auth uses a private TLS endpoint.
+    AUTH_SERVICE_PUBLIC_BASE_URL: str = decouple.config("AUTH_SERVICE_PUBLIC_BASE_URL", cast=str, default="")
     # Same value as auth-service's JWT_SECRET env var (a Base64 string decoded to raw HMAC key
     # bytes on both sides - see src/securities/authorizations/sso_jwt.py). Shares auth-service's
     # own local-dev default so both services validate each other's tokens out of the box.
@@ -199,6 +201,11 @@ class BackendBaseSettings(BaseSettings):
     # yields http:// unless uvicorn is told to trust X-Forwarded-Proto, which silently
     # produces a value that will never match the registered https:// entry. Set this
     # explicitly per environment; it falls back to url_for() only for local dev.
+    PRODUCT_COOKIE_API_ENABLED: bool = decouple.config("PRODUCT_COOKIE_API_ENABLED", cast=bool, default=False)
+    PRODUCT_SESSION_ENABLED: bool = decouple.config("PRODUCT_SESSION_ENABLED", cast=bool, default=False)
+    PRODUCT_SESSION_ENCRYPTION_KEYS: str = decouple.config("PRODUCT_SESSION_ENCRYPTION_KEYS", default="")
+    SSO_V2_ENABLED: bool = decouple.config("SSO_V2_ENABLED", cast=bool, default=False)
+    SSO_TRANSACTION_ENABLED: bool = decouple.config("SSO_TRANSACTION_ENABLED", cast=bool, default=False)
     SSO_REDIRECT_URI: str = decouple.config("SSO_REDIRECT_URI", cast=str, default="")  # type: ignore
     # auth-service issues one token type across every Barabari product using a shared
     # JWT secret, and the token carries no audience/product claim - so a token minted
@@ -326,6 +333,12 @@ class BackendBaseSettings(BaseSettings):
     JEV_BULK_ATS_EVALUATION_PATH: str = decouple.config("JEV_BULK_ATS_EVALUATION_PATH", cast=str, default="")  # type: ignore
     JEV_BULK_ATS_EVALUATION_SHA256: str = decouple.config("JEV_BULK_ATS_EVALUATION_SHA256", cast=str, default="")  # type: ignore
 
+    # Practice-only rubric feedback; separately evaluated and disabled by default.
+    JEV_PRACTICE_ROLLOUT_PERCENT: int = decouple.config("JEV_PRACTICE_ROLLOUT_PERCENT", cast=int, default=0)  # type: ignore
+    JEV_PRACTICE_EVALUATION_PATH: str = decouple.config("JEV_PRACTICE_EVALUATION_PATH", cast=str, default="")  # type: ignore
+    JEV_PRACTICE_EVALUATION_SHA256: str = decouple.config("JEV_PRACTICE_EVALUATION_SHA256", cast=str, default="")  # type: ignore
+    JEV_PRACTICE_TIMEOUT_SECONDS: float = decouple.config("JEV_PRACTICE_TIMEOUT_SECONDS", cast=float, default=8.0)  # type: ignore
+
     # Bulk ATS ingestion limits.
     BULK_ATS_MAX_FILES_PER_BATCH: int = decouple.config("BULK_ATS_MAX_FILES_PER_BATCH", cast=int, default=100)  # type: ignore
     BULK_ATS_MAX_FILE_SIZE_MB: int = decouple.config("BULK_ATS_MAX_FILE_SIZE_MB", cast=int, default=10)  # type: ignore
@@ -392,7 +405,10 @@ class BackendBaseSettings(BaseSettings):
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
     # Auth-service Central Student Registry. Product backends use this server-side key to
     # hydrate common profile fields; it must match auth-service CENTRAL_PROFILE_API_KEY.
-    CENTRAL_IDENTITY_CHECK_ENABLED: bool = decouple.config("CENTRAL_IDENTITY_CHECK_ENABLED", cast=bool, default=False)  # type: ignore
+    CENTRAL_IDENTITY_CHECK_ENABLED: bool = decouple.config("CENTRAL_IDENTITY_CHECK_ENABLED", cast=bool, default=True)  # type: ignore
+    # Seconds a verified central identity is reused. 0 (default) keeps fresh per-request verification;
+    # any positive value trades that guarantee for fewer auth-service calls (bounded staleness).
+    CENTRAL_IDENTITY_CACHE_SECONDS: int = decouple.config("CENTRAL_IDENTITY_CACHE_SECONDS", cast=int, default=0)  # type: ignore
     PRODUCT_IDENTITY_API_KEY: str = decouple.config("PRODUCT_IDENTITY_API_KEY", cast=str, default="")  # type: ignore
     CENTRAL_PROFILE_API_KEY: str = decouple.config("CENTRAL_PROFILE_API_KEY", cast=str, default="")  # type: ignore
 
@@ -425,6 +441,11 @@ class BackendBaseSettings(BaseSettings):
     # Per-user rate limits on endpoints calling metered third-party APIs
     # (OpenAI/ElevenLabs) - protects the API bill from runaway usage by a
     # single user or a client-side bug, not primarily a security control.
+    RATE_LIMIT_TRANSCRIBE_PER_HOUR: int = decouple.config("RATE_LIMIT_TRANSCRIBE_PER_HOUR", cast=int, default=240)  # type: ignore
+    RATE_LIMIT_GENERATE_QUESTIONS_PER_HOUR: int = decouple.config("RATE_LIMIT_GENERATE_QUESTIONS_PER_HOUR", cast=int, default=60)  # type: ignore
+    RATE_LIMIT_SUMMARY_REPORT_PER_HOUR: int = decouple.config("RATE_LIMIT_SUMMARY_REPORT_PER_HOUR", cast=int, default=60)  # type: ignore
+    RATE_LIMIT_RESUME_BUILDER_PER_HOUR: int = decouple.config("RATE_LIMIT_RESUME_BUILDER_PER_HOUR", cast=int, default=40)  # type: ignore
+    RATE_LIMIT_PRACTICE_SESSION_PER_HOUR: int = decouple.config("RATE_LIMIT_PRACTICE_SESSION_PER_HOUR", cast=int, default=120)  # type: ignore
     RATE_LIMIT_TTS_PER_MINUTE: int = decouple.config("RATE_LIMIT_TTS_PER_MINUTE", cast=int, default=20)  # type: ignore
     RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR: int = decouple.config("RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR", cast=int, default=10)  # type: ignore
 

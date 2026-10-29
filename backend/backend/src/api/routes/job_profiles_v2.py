@@ -126,7 +126,13 @@ async def list_job_profiles(
     profiles = await job_profile_repo.list_profiles(
         category=category, limit=limit, is_admin=is_admin
     )
-    return JobProfileListResponse(items=profiles, total=len(profiles))
+    if is_admin:
+        return JobProfileListResponse(items=profiles, total=len(profiles))
+    # Students only see published templates, without reviewer notes meant for authors.
+    items = [JobProfileResponse.model_validate(profile) for profile in profiles]
+    for item in items:
+        item.adminComment = None
+    return JobProfileListResponse(items=items, total=len(items))
 
 
 @router.post(

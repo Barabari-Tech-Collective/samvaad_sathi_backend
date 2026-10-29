@@ -16,22 +16,44 @@ optional_security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = fastapi.Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = fastapi.Depends(optional_security),
     user_repo: UserCRUDRepository = fastapi.Depends(
         get_repository(repo_type=UserCRUDRepository)
     ),
+    request: fastapi.Request = None,
 ) -> User:
+    if request is not None:
+        from src.api.routes.product_session import COOKIE
+        has_cookie = COOKIE in request.cookies
+        if has_cookie and getattr(settings, "PRODUCT_COOKIE_API_ENABLED", False):
+            if request.url.path in {"/me", f"{getattr(settings, 'API_PREFIX', '/api').rstrip('/')}/me"}:
+                raise fastapi.HTTPException(409, "Use the session profile endpoint.")
+            # Never choose silently between two potentially different accounts.
+            if request.headers.get("authorization") is not None:
+                raise fastapi.HTTPException(400, "Use one authentication method per request.")
+            from src.api.dependencies.product_session import get_session_user
+            return await get_session_user(request=request, user_repo=user_repo)
+    if credentials is None:
+        raise fastapi.HTTPException(403, "Not authenticated")
     token = credentials.credentials
+    if token.startswith("upload_grant_"):
+        if request is None:
+            raise fastapi.HTTPException(401, "Upload request required.")
+        from src.services.upload_grant import consume
+        cached = getattr(request.state, "resolved_upload_grant", None)
+        if cached and cached[0] == token:
+            token = cached[1]
+        else:
+            grant = token
+            token = await consume(grant, request.url.path, request.method)
+            request.state.resolved_upload_grant = (grant, token)
 
-    # Tokens now come from auth-service (student-login/SSO) rather than this service's own
-    # Cognito/local-password flow. Tried first since that's the path all new logins take;
-    # falls back to the legacy verifier below so sessions minted before this migration (and
-    # not yet re-authenticated through Sampark Saathi) keep working until they expire.
-    claims = None
-    token_source = "local"
+    # Central authentication is the only identity source. Tokens are issued by
+    # auth-service; there is no locally signed fallback, so an unverifiable token is a
+    # plain 401 rather than a second way in.
+    token_source = "central_sso"
     try:
         claims = decode_sso_access_token(token)
-        token_source = "central_sso"
         from src.services.central_identity_access import current_identity
         claims = await current_identity(claims, token=token)
         email = claims.get("sub")
@@ -51,27 +73,12 @@ async def get_current_user(
                 detail="Access to Samvaad Saathi has been revoked",
             )
     except SsoTokenError:
-        try:
-            from jose import jwt as jose_jwt
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-            payload = jose_jwt.decode(
-                token=token,
-                key=settings.JWT_SECRET_KEY,
-                algorithms=[settings.JWT_ALGORITHM],
-            )
-            email = payload.get("email") or payload.get("username")
-            if not email:
-                raise ValueError("Missing email in token payload")
-            claims = payload
-        except Exception:
-            raise fastapi.HTTPException(
-                status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication credentials",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-
-    if settings.CENTRAL_IDENTITY_CHECK_ENABLED and token_source != "central_sso":
-        raise fastapi.HTTPException(401, "Sign in through central authentication.")
     try:
         if settings.CENTRAL_IDENTITY_CHECK_ENABLED:
             try:
@@ -139,11 +146,16 @@ async def get_optional_current_user(
     user_repo: UserCRUDRepository = fastapi.Depends(
         get_repository(repo_type=UserCRUDRepository)
     ),
+    request: fastapi.Request = None,
 ) -> User | None:
     """Like get_current_user but returns None instead of 401 when no token is provided."""
+    if request is not None:
+        from src.api.routes.product_session import COOKIE
+        if COOKIE in request.cookies and getattr(settings, "PRODUCT_COOKIE_API_ENABLED", False):
+            return await get_current_user(credentials=credentials, user_repo=user_repo, request=request)
     if not credentials:
         return None
     try:
-        return await get_current_user(credentials=credentials, user_repo=user_repo)
+        return await get_current_user(credentials=credentials, user_repo=user_repo, request=request)
     except fastapi.HTTPException:
         return None

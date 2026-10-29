@@ -24,6 +24,8 @@ from src.models.schemas.user import (
     UserLogin,
     UserInResponse,
     UserWithToken,
+    SessionUserProfile,
+    SessionUserResponse,
     UserProfileUpdate,
     UserProfileOut,
 )
@@ -312,6 +314,13 @@ async def get_me(
     summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
     session=fastapi.Depends(get_async_session),
 ) -> UserInResponse:
+    profile, _claims = await build_user_profile(current_user, summary_repo, session)
+    return UserInResponse(user_id=current_user.id,
+        authorized_user=UserWithToken(**profile.model_dump(), token=None, refresh_token=None))
+
+
+async def build_user_profile(current_user, summary_repo, session):
+    # Shared profile assembly contains no credential issuance.
     # Get total interview attempts count
     total_attempts = await summary_repo.count_by_user(user_id=current_user.id)
 
@@ -341,16 +350,7 @@ async def get_me(
     memberships = await get_user_active_memberships(current_user.id, session)
     claims_data = _extract_primary_membership_and_claims(current_user, memberships)
 
-    token = jwt_generator.generate_access_token_for_user(
-        user=current_user,
-        extra_claims=claims_data["extra_claims"],
-    )
-
-    return UserInResponse(
-        user_id=current_user.id,
-        authorized_user=UserWithToken(
-            token=token,
-            refresh_token=None,
+    profile = SessionUserProfile(
             email=current_user.email,
             name=current_user.name,
             created_at=current_user.created_at,
@@ -382,8 +382,39 @@ async def get_me(
             ats_resume_id=ats_resume_id,
             skills=current_user.skills.get("items", []) if isinstance(getattr(current_user, "skills", None), dict) else [],
             company=current_user.company,
-        ),
     )
+    return profile, claims_data
+
+
+from src.api.dependencies.product_session import get_session_user
+from src.api.routes.product_session import SessionRoute
+
+session_profile_router = fastapi.APIRouter(route_class=SessionRoute)
+
+
+@session_profile_router.get("/auth/profile", response_model=SessionUserResponse)
+async def get_credential_free_profile(
+    current_user=fastapi.Depends(get_current_user),
+    summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
+    session=fastapi.Depends(get_async_session),
+):
+    # Server-session BFFs authenticate with their server-held central bearer.
+    # Profile reads must never mint an unrelated legacy product credential.
+    profile, _ = await build_user_profile(current_user, summary_repo, session)
+    return SessionUserResponse(user_id=current_user.id, authorized_user=profile)
+
+
+@session_profile_router.get("/auth/session/me", response_model=SessionUserResponse)
+async def get_session_me(
+    current_user=fastapi.Depends(get_session_user),
+    summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
+    session=fastapi.Depends(get_async_session),
+):
+    profile, _ = await build_user_profile(current_user, summary_repo, session)
+    return SessionUserResponse(user_id=current_user.id, authorized_user=profile)
+
+
+router.include_router(session_profile_router)
 
 @router.put(
     path="/users/profile",
@@ -440,3 +471,23 @@ async def update_profile(
     )
 
 
+
+
+@router.post("/auth/upload-grant")
+async def create_upload_grant(
+    request: fastapi.Request,
+    payload: dict,
+    current_user=fastapi.Depends(get_current_user),
+):
+    from src.services.upload_grant import issue
+    from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTokenError
+    bearer = request.headers.get("authorization", "")
+    token = bearer[7:] if bearer.startswith("Bearer ") else ""
+    try:
+        claims = decode_sso_access_token(token)
+    except SsoTokenError:
+        raise fastapi.HTTPException(403, "Central authentication required.") from None
+    if claims.get("role") == "STUDENT":
+        raise fastapi.HTTPException(403, "Staff upload access required.")
+    grant = await issue(token, payload.get("path"), payload.get("method"))
+    return fastapi.responses.JSONResponse({"grant": grant, "expires_in": 60}, headers={"Cache-Control":"no-store"})

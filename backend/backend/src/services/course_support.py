@@ -28,7 +28,7 @@ async def can_open(user, course_id, session):
 
     memberships = await get_user_active_memberships(user.id, session)
     return any(
-        resolve_dashboard_role(user, [item]) == "facilitator"
+        resolve_dashboard_role(user, [item], preferred="facilitator") == "facilitator"
         and any(course_id in grant.course_ids for grant in membership_grants([item]))
         for item in memberships
     )

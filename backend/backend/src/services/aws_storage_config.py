@@ -33,13 +33,28 @@ def load_storage_configuration(read: Callable = config) -> StorageConfiguration:
         options.update(aws_access_key_id=access, aws_secret_access_key=secret)
         if token:
             options["aws_session_token"] = token
+    endpoint = read("AWS_S3_LOCAL_ENDPOINT_URL", default="").strip()
+    if endpoint:
+        parsed_endpoint = urlsplit(endpoint)
+        if (
+            read("ENVIRONMENT", default="PROD").strip().upper() != "DEV"
+            or parsed_endpoint.scheme != "http"
+            or parsed_endpoint.hostname != "127.0.0.1"
+            or not parsed_endpoint.port
+            or parsed_endpoint.username or parsed_endpoint.password
+            or parsed_endpoint.query or parsed_endpoint.fragment
+            or parsed_endpoint.path not in ("", "/")
+            or not access
+        ):
+            raise ValueError("Local S3 endpoint requires DEV, explicit local credentials and an HTTP loopback origin")
+        options["endpoint_url"] = endpoint.rstrip("/")
     # With no explicit keys, boto3 resolves a role, web identity or named profile
     # through its normal provider chain, including credential refresh.
     public_base = read("AWS_S3_PUBLIC_BASE_URL", default="").strip().rstrip("/")
     if public_base:
         parsed = urlsplit(public_base)
         if (
-            parsed.scheme != "https" or not parsed.hostname
+            (parsed.scheme != "https" and not (endpoint and public_base == f"{endpoint.rstrip('/')}/{bucket}")) or not parsed.hostname
             or parsed.username or parsed.password or parsed.query or parsed.fragment
         ):
             raise ValueError("AWS_S3_PUBLIC_BASE_URL must be an HTTPS origin/path without credentials or query")

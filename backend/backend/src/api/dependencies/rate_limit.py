@@ -131,3 +131,19 @@ def anonymous_rate_limiter(*, key_prefix: str, limit: int, window_seconds: int):
         await _enforce(f"ratelimit:{key_prefix}:{client_ip}", limit, window_seconds)
 
     return _check
+
+
+def student_action_limit(action: str, *, limit: int, window_seconds: int = 3600):
+    """Per-user ceiling for metered student actions (LLM, speech, row creation).
+
+    Defaults are far above normal use; they exist so one runaway client or script cannot
+    burn provider quota or flood the database. Override with RATE_LIMIT_<ACTION>_PER_HOUR.
+    """
+    from src.config.manager import settings
+
+    configured = getattr(settings, f"RATE_LIMIT_{action.upper()}_PER_HOUR", None)
+    return rate_limiter(
+        key_prefix=f"student:{action}",
+        limit=int(configured) if configured else limit,
+        window_seconds=window_seconds,
+    )

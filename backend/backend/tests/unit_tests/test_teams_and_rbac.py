@@ -58,6 +58,13 @@ def _make_user(
 # --- RBAC & Super Admin Permission Tests -------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _local_membership_mode(monkeypatch):
+    """These tests cover membership logic itself; central-verification behaviour has its own tests."""
+    from src.config.manager import settings as _settings
+    monkeypatch.setattr(_settings, "CENTRAL_IDENTITY_CHECK_ENABLED", False)
+
+
 def test_is_super_admin_user_with_db_flag():
     user = _make_user(1, email="lead@example.com", is_super_admin=True)
     assert is_super_admin_user(user) is True

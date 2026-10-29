@@ -80,7 +80,8 @@ class JobProfile(Base):
     __mapper_args__ = {"eager_defaults": True}
 
     questions = sqlalchemy.orm.relationship(
-        "JobProfileQuestion", 
+        "JobProfileQuestion",
+        back_populates="job_profile",
         primaryjoin="JobProfile.id == foreign(JobProfileQuestion.job_profile_id)",
         lazy="selectin",
         cascade="all, delete",

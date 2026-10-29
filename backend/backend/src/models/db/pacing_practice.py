@@ -13,6 +13,9 @@ class PacingPracticeSession(Base):  # type: ignore
     """Model for speech pacing practice sessions."""
     __tablename__ = "pacing_practice_session"
 
+    __table_args__ = (sqlalchemy.UniqueConstraint("user_id", "client_request_id", name="uq_pacing_user_request"),)
+    client_request_id: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(36), nullable=True)
+
     id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(primary_key=True, autoincrement="auto")
     user_id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(
         sqlalchemy.ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True

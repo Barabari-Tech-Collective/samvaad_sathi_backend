@@ -4,7 +4,7 @@ import re
 import os
 import time
 import hashlib
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Annotated
 
 import fastapi
 import PyPDF2
@@ -67,7 +67,7 @@ from src.repository.crud.user import UserCRUDRepository
 from src.services.llm import extract_resume_entities_with_llm, extract_resume_entities_v2_with_llm
 
 from src.api.dependencies.auth import get_current_user
-from src.models.schemas.resume import ResumeExtractionResponse, MyResumeResponse, KnowledgeSetResponse
+from src.models.schemas.resume import ResumeExtractionResponse, MyResumeResponse, KnowledgeSetResponse, ResumeStorageReceipt
 
 
 from src.services.s3_service import _background_upload_and_enforce_limit
@@ -96,7 +96,24 @@ async def extract_resume(
     ),
     current_user=fastapi.Depends(get_current_user),
     user_repo: UserCRUDRepository = fastapi.Depends(get_repository(repo_type=UserCRUDRepository)),
+    idempotency_key: Annotated[str | None, fastapi.Header(alias="Idempotency-Key")] = None,
 ):
+    # Optional for compatibility with existing clients. New clients must retain a UUID
+    # across retries; a new key explicitly represents a new extraction attempt.
+    if idempotency_key is None:
+        return await _extract_resume_content(background_tasks, file, current_user, user_repo)
+    from src.services.resume_operation import operation_key, run_resume_operation
+    key = operation_key(idempotency_key)
+    raw = await file.read(5 * 1024 * 1024 + 1)
+    if len(raw) > 5 * 1024 * 1024:
+        raise fastapi.HTTPException(413, "Uploaded file exceeds 5 MB limit")
+    await file.seek(0)
+    async def work():
+        return await _extract_resume_content(background_tasks, file, current_user, user_repo)
+    return await run_resume_operation(current_user.id, key, hashlib.sha256(raw).hexdigest(), work)
+
+
+async def _extract_resume_content(background_tasks, file, current_user, user_repo):
     allowed_types = {"application/pdf", "text/plain"}
     content_type = file.content_type or ""
 
@@ -124,6 +141,8 @@ async def extract_resume(
         buffer.extend(chunk)
 
     raw_bytes = bytes(buffer)
+    import hashlib
+    file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
 
     if content_type == "application/pdf":
         _verify_pdf_magic_bytes(raw_bytes)
@@ -227,6 +246,7 @@ async def extract_resume(
             "warnings": warnings,
         },
         "message": "File received and text extracted.",
+        "file_sha256": file_sha256,
     }
 
     # Persist validated data to User model
@@ -258,28 +278,152 @@ async def extract_resume(
         )
         response["saved"] = True
         
-        import hashlib
         size_bytes = len(raw_bytes)
-        file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
         
-        # Queue the background task to upload the original PDF to S3 only if DB update succeeds
-        background_tasks.add_task(
-            _background_upload_and_enforce_limit,
-            raw_bytes,
-            current_user.id,
-            file.filename or "resume.pdf",
-            content_type,
-            normalized if normalized else None,
-            "onboarding",
-            size_bytes,
-            file_sha256
-        )
+        # Commit original bytes before acknowledging extraction. Worker cron can
+        # recover delivery after API restart without repeating extraction.
+        from src.services.resume_storage_delivery import stage_resume_file, deliver_resume_files
+        await stage_resume_file(raw_bytes, current_user.id, file.filename,
+            content_type, normalized if normalized else None, file_sha256)
+        background_tasks.add_task(deliver_resume_files, user_id=current_user.id, fingerprint=file_sha256)
     except Exception as e:
         response["saved"] = False
         response["save_error"] = str(e)
 
     return response
 
+
+
+@router.post("/me/resume-operations/{request_key}/restore-file")
+async def restore_resume_file(request_key: str, response: fastapi.Response,
+    file: fastapi.UploadFile = fastapi.File(...),
+    current_user=fastapi.Depends(get_current_user),
+    session: AsyncSession = fastapi.Depends(get_async_session)):
+    """Re-supply exact bytes for storage only; never re-run AI or profile writes."""
+    from src.services.resume_operation import operation_key, validate_storage_repair
+    from src.models.db.resume_operation import ResumeOperation
+    response.headers["Cache-Control"] = "no-store"
+    key = operation_key(request_key)
+    row = (await session.execute(sqlalchemy.select(ResumeOperation).where(
+        ResumeOperation.user_id == current_user.id, ResumeOperation.request_key == key
+    ))).scalar_one_or_none()
+    if row is None:
+        raise fastapi.HTTPException(404, "Resume operation not found")
+    raw = await file.read(5 * 1024 * 1024 + 1)
+    validate_storage_repair(row, raw, file.content_type)
+    # Serialize repairs for this account, without blocking unrelated students.
+    # Transaction-scoped lock releases on disconnect/rollback as well as success.
+    await session.execute(sqlalchemy.text("SELECT pg_advisory_xact_lock(73124, :user_id)"), {"user_id": current_user.id})
+    existing = (await session.execute(sqlalchemy.select(UserResume.id).where(
+        UserResume.user_id == current_user.id, UserResume.file_sha256 == row.file_sha256
+    ))).scalar_one_or_none()
+    if existing is not None:
+        return {"fileSha256": row.file_sha256, "status": "registered", "resumeId": existing}
+    if file.content_type == "application/pdf":
+        _verify_pdf_magic_bytes(raw)
+        text = _extract_text_from_pdf(raw)
+    else:
+        text = raw.decode("utf-8", errors="ignore")
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if not normalized:
+        raise fastapi.HTTPException(422, "No readable text found in this file")
+    try:
+        await _background_upload_and_enforce_limit(raw, current_user.id,
+            file.filename or "resume.pdf", file.content_type, normalized,
+            "onboarding", len(raw), row.file_sha256)
+    except Exception:
+        raise fastapi.HTTPException(503, "File storage was not confirmed. Check file storage before retrying.") from None
+    saved = (await session.execute(sqlalchemy.select(UserResume.id).where(
+        UserResume.user_id == current_user.id, UserResume.file_sha256 == row.file_sha256
+    ))).scalar_one_or_none()
+    if saved is None:
+        raise fastapi.HTTPException(503, "File storage was not confirmed. Check again before retrying.")
+    return {"fileSha256": row.file_sha256, "status": "registered", "resumeId": saved}
+
+
+@router.post("/me/resume-operations/{request_key}/recovery")
+async def prepare_resume_recovery(request_key: str, response: fastapi.Response,
+    current_user=fastapi.Depends(get_current_user),
+    session: AsyncSession = fastapi.Depends(get_async_session)):
+    from src.services.resume_operation import operation_key, recovery_key
+    from src.models.db.resume_operation import ResumeOperation
+    response.headers["Cache-Control"] = "no-store"
+    key = operation_key(request_key)
+    row = (await session.execute(sqlalchemy.select(ResumeOperation).where(
+        ResumeOperation.user_id == current_user.id, ResumeOperation.request_key == key
+    ))).scalar_one_or_none()
+    if row is None:
+        raise fastapi.HTTPException(404, "Resume operation not found")
+    return {"operationKey": recovery_key(current_user.id, row), "fileSha256": row.file_sha256}
+
+
+@router.get("/me/resume-operations/{request_key}")
+async def get_resume_operation(request_key: str, response: fastapi.Response,
+    current_user=fastapi.Depends(get_current_user),
+    session: AsyncSession = fastapi.Depends(get_async_session)):
+    from src.services.resume_operation import operation_key
+    from src.models.db.resume_operation import ResumeOperation
+    response.headers["Cache-Control"] = "no-store"
+    key = operation_key(request_key)
+    row = (await session.execute(sqlalchemy.select(ResumeOperation).where(
+        ResumeOperation.user_id == current_user.id, ResumeOperation.request_key == key
+    ))).scalar_one_or_none()
+    if row is None:
+        raise fastapi.HTTPException(404, "Resume operation not found")
+    return {"operationKey": key, "state": row.state, "fileSha256": row.file_sha256,
+            "dataSaved": row.receipt.get("saved") is True if row.state == "completed" and row.receipt else False}
+
+
+@router.get(
+    "/me/resume-storage/{file_sha256}",
+    response_model=ResumeStorageReceipt,
+    summary="Reconcile an exact resume file against your saved records",
+)
+async def get_resume_storage_receipt(
+    file_sha256: str,
+    response: fastapi.Response,
+    current_user=fastapi.Depends(get_current_user),
+    session: AsyncSession = fastapi.Depends(get_async_session),
+):
+    # No shared cache: this response is specific to the authenticated account.
+    response.headers["Cache-Control"] = "no-store"
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", file_sha256):
+        raise fastapi.HTTPException(status_code=422, detail="Invalid file fingerprint")
+    fingerprint = file_sha256.lower()
+    result = await session.execute(
+        sqlalchemy.select(UserResume.id).where(
+            UserResume.user_id == current_user.id,
+            UserResume.file_sha256 == fingerprint,
+        )
+    )
+    resume_id = result.scalar_one_or_none()
+    # Project only metadata: never load staged résumé bytes for a status check.
+    delivery_status = None
+    if resume_id is None:
+        import datetime
+        from src.models.db.resume_storage_job import ResumeStorageJob
+        job = (await session.execute(
+            sqlalchemy.select(ResumeStorageJob.state, ResumeStorageJob.expires_at).where(
+                ResumeStorageJob.user_id == current_user.id,
+                ResumeStorageJob.file_sha256 == fingerprint,
+            )
+        )).one_or_none()
+        if job is not None:
+            if job.state == "pending":
+                delivery_status = (
+                    "expired" if job.expires_at <= datetime.datetime.now(datetime.timezone.utc)
+                    else "pending"
+                )
+            elif job.state in ("failed", "expired"):
+                delivery_status = job.state
+    # Registry evidence takes precedence; historical delivery success cannot
+    # prove current storage when a file has subsequently been removed.
+    return ResumeStorageReceipt(
+        file_sha256=fingerprint,
+        status="registered" if resume_id is not None else "unconfirmed",
+        resume_id=resume_id,
+        delivery_status=delivery_status,
+    )
 
 
 @router.get(

@@ -1,9 +1,74 @@
 """Fresh central identity/product checks, explicitly enabled after bridge rollout."""
 
+import contextlib
+import hashlib
+import time
 from urllib.parse import urlsplit, quote
 import fastapi
 import httpx
 from src.config.manager import settings
+
+# One pooled client per process: a fresh client per request paid a TCP+TLS handshake to
+# auth-service on every authenticated call.
+_shared_client: httpx.AsyncClient | None = None
+
+# Optional short positive cache of *verified* identities (off by default, see
+# CENTRAL_IDENTITY_CACHE_SECONDS). Failures are never cached and an outage still fails closed,
+# but while enabled a central revoke is only seen after the TTL unless the Redis flag arrives.
+_identity_cache: dict[str, tuple[float, dict]] = {}
+_CACHE_MAX_ENTRIES = 4096
+
+
+def _pooled_client() -> httpx.AsyncClient:
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0, connect=2.0),
+            follow_redirects=False,
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+        )
+    return _shared_client
+
+
+@contextlib.asynccontextmanager
+async def _client_for(transport):
+    if transport is not None:  # tests inject a transport; keep that path isolated
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False, transport=transport) as client:
+            yield client
+    else:
+        yield _pooled_client()
+
+
+async def close_identity_client() -> None:
+    global _shared_client
+    if _shared_client is not None and not _shared_client.is_closed:
+        await _shared_client.aclose()
+    _shared_client = None
+
+
+def _cache_key(uid: str, token: str | None) -> str:
+    return hashlib.sha256(f"{uid}\x00{token or ''}".encode()).hexdigest()
+
+
+def _cache_get(key: str):
+    hit = _identity_cache.get(key)
+    if hit and hit[0] > time.monotonic():
+        return dict(hit[1])
+    _identity_cache.pop(key, None)
+    return None
+
+
+def _cache_put(key: str, value: dict) -> None:
+    ttl = float(getattr(settings, "CENTRAL_IDENTITY_CACHE_SECONDS", 0) or 0)
+    if ttl <= 0:
+        return
+    if len(_identity_cache) >= _CACHE_MAX_ENTRIES:
+        now = time.monotonic()
+        for stale in [k for k, (exp, _) in _identity_cache.items() if exp <= now]:
+            _identity_cache.pop(stale, None)
+        if len(_identity_cache) >= _CACHE_MAX_ENTRIES:
+            _identity_cache.clear()
+    _identity_cache[key] = (time.monotonic() + ttl, dict(value))
 
 
 async def current_identity(claims, *, token=None, transport=None):
@@ -28,10 +93,11 @@ async def current_identity(claims, *, token=None, transport=None):
         raise fastapi.HTTPException(
             401, "Sign in again through central authentication."
         )
+    cache_key = _cache_key(uid, token) if transport is None else None
+    if cache_key and (cached := _cache_get(cache_key)) is not None:
+        return cached
     try:
-        async with httpx.AsyncClient(
-            timeout=5.0, follow_redirects=False, transport=transport
-        ) as client:
+        async with _client_for(transport) as client:
             response = await client.get(
                 base
                 + "/barabari-auth/api/auth/internal/v1/product-identities/"
@@ -78,7 +144,10 @@ async def current_identity(claims, *, token=None, transport=None):
             raise fastapi.HTTPException(
                 403, "Central account role is not permitted for this product."
             )
-        return {**claims, "role": role, "userUniqueId": uid}
+        verified = {**claims, "role": role, "userUniqueId": uid}
+        if cache_key:
+            _cache_put(cache_key, verified)
+        return verified
     except (httpx.HTTPError, ValueError, KeyError, TypeError):
         raise fastapi.HTTPException(
             503, "Central identity verification is unavailable."

@@ -72,10 +72,14 @@ def receipt(interview, questions, attempts, *, now=None):
     if total is None:
         return None
     ids = {q.id for q in questions}
+    if len(questions) != total or len(ids) != total:
+        raise fastapi.HTTPException(409, "The saved question set does not match this interview plan. Request recovery before submitting.")
+    if any(getattr(q, "interview_id", interview.id) != interview.id for q in questions):
+        raise fastapi.HTTPException(409, "The saved question set belongs to a different interview.")
     latest = {
         a.question_id: a
         for a in sorted(attempts, key=lambda a: a.id)
-        if a.question_id in ids
+        if a.question_id in ids and getattr(a, "interview_id", interview.id) == interview.id
     }
     answered = {qid for qid, attempt in latest.items() if has_durable_answer(attempt)}
     skipped = {

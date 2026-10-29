@@ -28,9 +28,32 @@ def cases():
     ]
 
 
+def label_review(
+    model="pinned-test-model",
+    dataset_id="synthetic-unit-only",
+    task="bulk_ats_semantics_v1",
+):
+    return {
+        "datasetId": dataset_id,
+        "model": model,
+        "task": task,
+        "cases_sha256": "0" * 64,
+        "case_count": 60,
+        "reviewer_ids": ["synthetic-a", "synthetic-b"],
+        "adjudicator_id": None,
+        "disagreement_count": 0,
+        "agreement_rate": 1.0,
+        "reviewedAt": NOW.isoformat(),
+    }
+
+
 def artifact(tmp_path, **changes):
     report = evaluate_cases(
-        cases(), model="pinned-test-model", dataset_id="synthetic-unit-only", now=NOW
+        cases(),
+        model="pinned-test-model",
+        dataset_id="synthetic-unit-only",
+        now=NOW,
+        label_review=label_review(),
     )
     report.update(changes)
     raw = json.dumps(report).encode()
@@ -292,6 +315,10 @@ def test_cli_report_checksum_no_overwrite_and_no_raw_cases(
     )["main"]
     source, output = tmp_path / "cases.json", tmp_path / "report.json"
     source.write_text(json.dumps(cases()))
+    manifest = tmp_path / "review-manifest.json"
+    review = label_review("test", "synthetic-test-only")
+    review["cases_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest.write_text(json.dumps(review))
     monkeypatch.setattr(
         sys,
         "argv",
@@ -304,6 +331,8 @@ def test_cli_report_checksum_no_overwrite_and_no_raw_cases(
             "synthetic-test-only",
             "--output",
             str(output),
+            "--review-manifest",
+            str(manifest),
         ],
     )
     assert main() == 0

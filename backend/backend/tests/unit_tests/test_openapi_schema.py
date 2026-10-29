@@ -13,17 +13,22 @@ def test_openapi_includes_report_and_analysis_paths_without_startup():
     assert "/api/final-report" in paths
     assert "/api/final-report/{interview_id}" in paths
     assert "/api/complete-analysis" in paths
-    assert "/api/domain-base-analysis" in paths
-    assert "/api/communication-based-analysis" in paths
+    assert "/api/domain-base-analysis" not in paths  # retired v1 route
+    assert "/api/communication-based-analysis" not in paths  # retired v1 route
     assert "/api/analytics/student/{user_id}" in paths
     assert "/api/analytics/interview/{interview_id}" in paths
-    assert "/api/analytics/segment/role" in paths
-    assert "/api/analytics/segment/difficulty" in paths
-    assert "/api/analytics/segment/college" in paths
-    assert "/api/analytics/system" in paths
-    assert "/api/analytics/scoring" in paths
+    assert "/api/analytics/segment/role" not in paths  # retired v1 route
+    assert "/api/analytics/segment/difficulty" not in paths  # retired v1 route
+    assert "/api/analytics/segment/college" not in paths  # retired v1 route
+    assert "/api/analytics/system" not in paths  # retired v1 route
+    assert "/api/analytics/scoring" not in paths  # retired v1 route
     assert "/api/analytics/alerts" in paths
-    assert "/api/analytics/report-engagement" in paths
+    assert "/api/analytics/report-engagement" not in paths  # retired v1 route
+
+    # Local password auth is retired: central auth is the only way in.
+    assert "post" not in paths.get("/api/users", {})
+    assert "/api/login" not in paths
+    assert "/api/refresh" not in paths
 
     tags = schema.get("tags", [])
     tag_names = {t.get("name") for t in tags}

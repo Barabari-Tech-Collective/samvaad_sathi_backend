@@ -102,11 +102,10 @@ async def test_multi_team_scope_change_is_audited_and_does_not_change_other_memb
 
 
 @pytest.mark.asyncio
-async def test_local_admin_role_token_cannot_elevate_an_ordinary_account(
-    db, monkeypatch
-):
+async def test_locally_signed_token_is_rejected_outright(db, monkeypatch):
+    """Central auth is the only identity source: a token signed with the local secret,
+    however privileged its claims, is a 401 and never reaches account lookup."""
     _, factory, user_id = db
-    monkeypatch.setattr(settings, "CENTRAL_IDENTITY_CHECK_ENABLED", False)
     async with factory() as session:
         user = await session.get(User, user_id)
         token = jwt.encode(
@@ -118,11 +117,12 @@ async def test_local_admin_role_token_cannot_elevate_an_ordinary_account(
             "src.api.dependencies.auth.decode_sso_access_token",
             side_effect=SsoTokenError("local token"),
         ):
-            actor = await get_current_user(
-                HTTPAuthorizationCredentials(scheme="Bearer", credentials=token),
-                UserCRUDRepository(async_session=session),
-            )
-        assert not is_admin_user(actor) and not is_super_admin_user(actor)
+            with pytest.raises(fastapi.HTTPException) as rejected:
+                await get_current_user(
+                    HTTPAuthorizationCredentials(scheme="Bearer", credentials=token),
+                    UserCRUDRepository(async_session=session),
+                )
+        assert rejected.value.status_code == 401
 
 
 @pytest.mark.asyncio

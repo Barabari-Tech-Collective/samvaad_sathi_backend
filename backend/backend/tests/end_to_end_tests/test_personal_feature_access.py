@@ -66,3 +66,39 @@ async def test_permissions_cannot_target_administrators(db):
         with pytest.raises(fastapi.HTTPException) as error:
             await update(person_id,PermissionUpdate(expected_version=0,permissions={},reason="Attempt privilege overwrite"),person,session)
         assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_concurrent_permission_edits_have_one_winner_and_one_audit_event(db):
+    """Two administrators' stale screens must not silently overwrite each other."""
+    import asyncio
+    _, factory, person_id = db
+    async with factory() as session:
+        admin = User(email="race-admin@example.test",name="Admin",password_hash="test",is_admin=True)
+        team = Team(name="Race Program")
+        session.add_all([admin,team]); await session.flush()
+        session.add(TeamMember(team_id=team.id,user_id=person_id,access_role="facilitator"))
+        await session.commit(); admin_id=admin.id
+    app=fastapi.FastAPI(); app.include_router(router)
+    async def identity():
+        async with factory() as session:
+            return await session.get(User,admin_id)
+    async def database():
+        async with factory() as session:
+            yield session
+    app.dependency_overrides[get_current_admin_user]=identity
+    app.dependency_overrides[get_async_session]=database
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test") as client:
+        bodies=[{"expected_version":0,"permissions":p,"reason":"Concurrent permission acceptance"}
+                for p in ({"course_workspace":["read"]},{})]
+        responses=await asyncio.gather(*(client.put(f"/v2/feature-access/people/{person_id}",json=b) for b in bodies))
+        assert sorted(r.status_code for r in responses)==[200,409]
+        winner=next(r.json() for r in responses if r.status_code==200)
+        async with factory() as session:
+            person=await session.get(User,person_id)
+            assert person.feature_permissions_version==1
+            assert person.feature_permissions==winner['permissions']
+            events=(await session.execute(sa.select(PracticeDashboardAuditEvent).where(
+                PracticeDashboardAuditEvent.action=='personal_feature_access_updated',
+                PracticeDashboardAuditEvent.target_id==str(person_id)))).scalars().all()
+            assert len(events)==1

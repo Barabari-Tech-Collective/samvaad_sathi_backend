@@ -78,3 +78,17 @@ router.include_router(router=course_shortlists_router)
 
 from src.api.routes.human_interviews import router as human_interviews_router
 router.include_router(router=human_interviews_router)
+
+from src.api.routes.integrity_review import router as integrity_review_router
+router.include_router(router=integrity_review_router)
+
+from src.api.routes.product_session import router as product_session_router
+router.include_router(router=product_session_router)
+
+from src.api.routes.graduation import router as graduation_router
+router.include_router(graduation_router)
+
+# Keep this last: unmounts v1 routes that no frontend uses (see legacy_routes.py).
+from src.api.legacy_routes import drop_retired_routes
+
+drop_retired_routes(router)

@@ -114,7 +114,7 @@ def _membership_parts(item: Any) -> tuple[Any, Any]:
         return item, getattr(item, "team", None)
 
 
-def resolve_dashboard_role(user: User, memberships: list[Any]) -> DashboardRole | None:
+def resolve_dashboard_role(user: User, memberships: list[Any], *, preferred: str | None = None) -> DashboardRole | None:
     """Resolve the narrowest dashboard persona from trusted server-side data."""
 
     if is_super_admin_user(user):
@@ -132,7 +132,24 @@ def resolve_dashboard_role(user: User, memberships: list[Any]) -> DashboardRole 
         member, team = _membership_parts(item)
         team_name = (getattr(team, "name", "") or "").casefold()
         role = normalize_role(getattr(member, "access_role", ""))
-        if role in _PLACEMENT_ROLES or any(word in team_name for word in ("placement", "partnership")):
+        raw_purposes = getattr(member, "purposes", None)
+        domain = getattr(member, "domain", None)
+        purposes = {value.strip().casefold() for value in raw_purposes if isinstance(value, str)} if isinstance(raw_purposes, list) else set()
+        if isinstance(domain, str) and domain.strip():
+            purposes.add(domain.strip().casefold())
+        # Explicit assigned responsibility precedes a display name. Course and
+        # college clauses remain paired with this specific membership.
+        placement = bool(purposes & {"placement", "placements", "partnership"})
+        coaching = bool(purposes & {"program", "programme", "coaching"})
+        if preferred == "facilitator" and coaching:
+            return "facilitator"
+        if placement:
+            return "placements"
+        if coaching:
+            return "facilitator"
+        if role in _PLACEMENT_ROLES:
+            return "placements"
+        if not purposes and any(word in team_name for word in ("placement", "partnership")):
             return "placements"
         if role in _FACILITATOR_ROLES:
             return "facilitator"
