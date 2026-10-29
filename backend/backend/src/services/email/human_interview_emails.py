@@ -1,7 +1,7 @@
 """Branded emails to students about human interview rounds.
 
 Brand: white canvas, navy #1F285B, blue #344499 for links, yellow #FFCC33 only as a thin
-accent (never as text or behind white text), black primary button, plain calm language.
+accent and as the button fill with black text (never yellow text, never white on yellow), plain calm language.
 Built with tables and inline styles so it renders in Gmail, Outlook and phone mail apps.
 """
 
@@ -98,8 +98,8 @@ def render(
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:8px 0 0">{_rows(details)}</table>
 {note_html}
 <table role="presentation" cellpadding="0" cellspacing="0" style="margin:26px 0 8px"><tr>
-<td style="background:#000000;border-radius:10px">
-<a href="{escape(url)}" style="display:inline-block;padding:14px 26px;font:600 16px/20px {FONT};color:#FFFFFF;text-decoration:none">{escape(button)}</a>
+<td style="background:{YELLOW};border-radius:10px">
+<a href="{escape(url)}" style="display:inline-block;padding:14px 26px;font:700 16px/20px {FONT};color:#000000;text-decoration:none">{escape(button)}</a>
 </td></tr></table>
 <p style="margin:12px 0 24px;font:13px/19px {FONT};color:{MUTED}">The Join button on that page opens 15 minutes before the start. If the button above does not work, copy this address into your browser: <a href="{escape(url)}" style="color:{BLUE}">{escape(url)}</a></p>
 </td></tr>
