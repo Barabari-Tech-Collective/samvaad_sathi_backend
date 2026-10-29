@@ -13,7 +13,7 @@ from src.services.feature_access import permits
 
 UTC = dt.timezone.utc
 POLICY = "human-integrity-review-v1"
-NOTICE = "Browser events are unverified observations, not proof of cheating. Review outcomes do not automatically change interview scores. You may provide context and appeal a decision within 14 days."
+NOTICE = "A flag is not proof of cheating. A review does not change a score by itself. You can explain what happened within 14 days."
 
 
 def permitted(user, operation):

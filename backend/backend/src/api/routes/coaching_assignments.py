@@ -116,7 +116,7 @@ async def assignment_page(session, predicate, page, limit):
         "total": total,
         "page": page,
         "limit": limit,
-        "notice": "Completion records student-reported speaking practice, not a verified skill score. Due dates are reminders; late practice is accepted.",
+        "notice": "This records practice only. It is not a score. Dates are reminders; late practice is fine.",
     }
 
 
