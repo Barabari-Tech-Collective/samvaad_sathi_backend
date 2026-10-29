@@ -500,7 +500,7 @@ async def test_add_team_member_does_not_overwrite_existing_user_password():
     await repo.add_team_member(team_id=1, member_data=member_data_admin)
     assert existing_admin.password_hash == "original_secret_hash"
 
-    # 2. Attempt to overwrite regular user credentials by adding user to team
+    # 2. Synchronize explicit credentials when provisioning a non-admin team member
     current_lookup_user = existing_student
     member_data_student = TeamMemberCreate(
         name="Student",
@@ -509,6 +509,20 @@ async def test_add_team_member_does_not_overwrite_existing_user_password():
         access_role="member",
     )
     await repo.add_team_member(team_id=1, member_data=member_data_student)
+    assert existing_student.password_hash != "student_secret_hash"
+    assert pwd_generator.is_password_authenticated(
+        hash_salt="", password="hacker_password_456", hashed_password=existing_student.password_hash
+    )
+
+    # 3. Preserves password when no password is provided
+    existing_student.password_hash = "student_secret_hash"
+    member_data_no_pwd = TeamMemberCreate(
+        name="Student",
+        email="student@barabari.org",
+        password=None,
+        access_role="member",
+    )
+    await repo.add_team_member(team_id=1, member_data=member_data_no_pwd)
     assert existing_student.password_hash == "student_secret_hash"
 
 

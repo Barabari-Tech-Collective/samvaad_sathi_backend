@@ -242,10 +242,10 @@ class TeamCRUDRepository(BaseCRUDRepository):
                 if not user.student_id:
                     user.student_id = central_user_id
 
-                # If user has no password yet and an initial password was provided, initialize it
+                # Synchronize local password hash when an explicit password is provided by Admin,
+                # while protecting administrative accounts from credential resets via team provisioning.
                 if member_data.password and member_data.password.strip():
-                    is_uninitialized = not user.password_hash or user.password_hash.strip() == ""
-                    if is_uninitialized and not (is_admin_user(user) or is_super_admin_user(user)):
+                    if not (is_admin_user(user) or is_super_admin_user(user)):
                         user.password_hash = pwd_generator.generate_hashed_password(
                             hash_salt="", new_password=member_data.password.strip()
                         )
