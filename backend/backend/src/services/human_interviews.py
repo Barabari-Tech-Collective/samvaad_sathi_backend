@@ -81,7 +81,13 @@ def joinable(row, now):
     )
 
 
-def metadata(row, now, *, can_manage=False):
+def metadata(row, now, *, can_manage=False, staff=False):
+    released = row.result_released_at is not None
+    outcome = {
+        "result": row.result if staff or released else None,
+        "feedback": row.feedback if staff or released else None,
+        "result_released": released,
+    }
     return {
         key: getattr(row, key)
         for key in (
@@ -94,12 +100,17 @@ def metadata(row, now, *, can_manage=False):
             "ends_at",
             "status",
             "version",
+            "role_name",
+            "instructions",
+            "interviewer_name",
+            "reschedule_count",
         )
-    } | {
+    } | outcome | {
         "format": "human_google_meet",
         "can_join": joinable(row, now),
         "join_opens_at": row.starts_at - dt.timedelta(minutes=15),
         "can_manage": can_manage and row.status == "scheduled",
+        "can_record_result": can_manage and row.status == "completed" and not released,
         "attendance": "not_verified",
         "outcome_source": "host_reported" if row.closed_at else None,
     }

@@ -27,6 +27,16 @@ class Create(BaseModel):
     meet_url: str
     starts_at: dt.datetime
     ends_at: dt.datetime
+    role_name: str | None = Field(None, max_length=160)
+    instructions: str | None = Field(None, max_length=2000)
+    interviewer_name: str | None = Field(None, max_length=120)
+
+    @field_validator("role_name", "instructions", "interviewer_name", mode="before")
+    @classmethod
+    def blank_to_none(cls, value):
+        if isinstance(value, str):
+            value = value.strip()
+        return value or None
 
     @field_validator("title", mode="before")
     @classmethod
@@ -53,6 +63,45 @@ class Close(BaseModel):
     reason: str = Field(min_length=10, max_length=1000)
 
     @field_validator("reason", mode="before")
+    @classmethod
+    def trim(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class Reschedule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=1)
+    starts_at: dt.datetime
+    ends_at: dt.datetime
+    meet_url: str | None = None
+    reason: str = Field(min_length=5, max_length=1000)
+
+    @field_validator("meet_url", mode="before")
+    @classmethod
+    def validate_link(cls, value):
+        return None if value in (None, "") else service.meet_url(value)
+
+    @field_validator("starts_at", "ends_at")
+    @classmethod
+    def aware(cls, value):
+        if value.tzinfo is None:
+            raise ValueError("An explicit timezone is required.")
+        return value.astimezone(service.UTC)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def trim(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class Outcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=1)
+    result: Literal["selected", "next_round", "on_hold", "not_selected"]
+    feedback: str = Field(min_length=10, max_length=4000)
+    release: bool = False
+
+    @field_validator("feedback", mode="before")
     @classmethod
     def trim(cls, value):
         return value.strip() if isinstance(value, str) else value
@@ -137,7 +186,7 @@ async def staff_list(
     no_store(response)
     return {
         "items": [
-            service.metadata(row, now, can_manage=service.permitted(user, "update"))
+            service.metadata(row, now, can_manage=service.permitted(user, "update"), staff=True)
             | {
                 "student_name": name,
                 "can_join": bool(current) and service.joinable(row, now),
@@ -230,7 +279,7 @@ async def create(
             )
         response.status_code = 200
         return service.metadata(
-            existing, now, can_manage=service.permitted(user, "update")
+            existing, now, can_manage=service.permitted(user, "update"), staff=True
         )
     if not now < body.starts_at <= now + dt.timedelta(days=180):
         raise fastapi.HTTPException(422, "Choose a future start within 180 days.")
@@ -274,7 +323,7 @@ async def create(
             )
         response.status_code = 200
         return service.metadata(
-            existing, now, can_manage=service.permitted(user, "update")
+            existing, now, can_manage=service.permitted(user, "update"), staff=True
         )
     if overlap is not None:
         raise fastapi.HTTPException(
@@ -303,7 +352,7 @@ async def create(
         "Host scheduled an external Google Meet interview; no attendance inferred.",
     )
     await session.commit()
-    return service.metadata(row, now, can_manage=service.permitted(user, "update"))
+    return service.metadata(row, now, can_manage=service.permitted(user, "update"), staff=True)
 
 
 @router.post("/courses/{course_id}/{appointment_id}/close")
@@ -347,7 +396,124 @@ async def close(
     service.audit(session, user, row, "human_interview_host_reported", body.reason)
     await session.commit()
     no_store(response)
-    return service.metadata(row, now)
+    return service.metadata(row, now, staff=True)
+
+
+@router.post("/courses/{course_id}/{appointment_id}/reschedule")
+async def reschedule(
+    course_id: str,
+    appointment_id: int,
+    body: Reschedule,
+    response: fastapi.Response,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    row = await staff_row(session, user, course_id, appointment_id, "update", lock=True)
+    if row.version != body.expected_version or row.status != "scheduled":
+        raise fastapi.HTTPException(
+            409, "This appointment changed or is closed. Refresh before acting."
+        )
+    now = dt.datetime.now(service.UTC)
+    if not now < body.starts_at <= now + dt.timedelta(days=180):
+        raise fastapi.HTTPException(422, "Choose a future start within 180 days.")
+    if (
+        not dt.timedelta(minutes=5)
+        <= body.ends_at - body.starts_at
+        <= dt.timedelta(hours=3)
+    ):
+        raise fastapi.HTTPException(
+            422, "Choose a duration between 5 minutes and 3 hours."
+        )
+    await session.execute(
+        sa.select(User.id)
+        .where(User.id.in_([row.host_id, row.student_id]))
+        .order_by(User.id)
+        .with_for_update()
+    )
+    overlap = (
+        await session.execute(
+            sa.select(HumanInterview.id)
+            .where(
+                HumanInterview.id != row.id,
+                HumanInterview.status == "scheduled",
+                HumanInterview.starts_at < body.ends_at,
+                HumanInterview.ends_at > body.starts_at,
+                sa.or_(
+                    HumanInterview.student_id.in_([row.host_id, row.student_id]),
+                    HumanInterview.host_id.in_([row.host_id, row.student_id]),
+                ),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if overlap is not None:
+        raise fastapi.HTTPException(
+            409,
+            "The student or host already has a scheduled interview in this time window.",
+        )
+    previous = f"{row.starts_at.isoformat()} to {row.ends_at.isoformat()}"
+    row.starts_at, row.ends_at = body.starts_at, body.ends_at
+    if body.meet_url:
+        row.meet_url = body.meet_url
+    row.reschedule_count += 1
+    row.version += 1
+    service.audit(
+        session,
+        user,
+        row,
+        "human_interview_rescheduled",
+        f"{body.reason} (was {previous})",
+    )
+    await session.commit()
+    no_store(response)
+    return service.metadata(
+        row, now, can_manage=service.permitted(user, "update"), staff=True
+    )
+
+
+@router.post("/courses/{course_id}/{appointment_id}/outcome")
+async def record_outcome(
+    course_id: str,
+    appointment_id: int,
+    body: Outcome,
+    response: fastapi.Response,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    row = await staff_row(
+        session, user, course_id, appointment_id, "update", lock=True, historical=True
+    )
+    if row.version != body.expected_version:
+        raise fastapi.HTTPException(
+            409, "This appointment changed. Refresh before acting."
+        )
+    if row.status != "completed":
+        raise fastapi.HTTPException(
+            409, "Mark the interview as completed before recording a result."
+        )
+    if row.result_released_at is not None:
+        raise fastapi.HTTPException(
+            409, "This result was already shared with the student."
+        )
+    now = dt.datetime.now(service.UTC)
+    row.result, row.feedback = body.result, body.feedback
+    if body.release:
+        row.result_released_at = now
+    row.version += 1
+    service.audit(
+        session,
+        user,
+        row,
+        "human_interview_result_released"
+        if body.release
+        else "human_interview_result_saved",
+        f"Result {body.result}",
+    )
+    await session.commit()
+    no_store(response)
+    return service.metadata(
+        row, now, can_manage=service.permitted(user, "update"), staff=True
+    )
 
 
 @router.get("/courses/{course_id}/{appointment_id}/join")
