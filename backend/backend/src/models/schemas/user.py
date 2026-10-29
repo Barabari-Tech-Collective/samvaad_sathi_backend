@@ -90,6 +90,7 @@ class SessionUserProfile(BaseSchemaModel):
     can_access_colleges: bool = False
     can_access_interviews: bool = False
     can_access_practice_interview: bool = False
+    course_limited: bool = False
     # company removed from response
 
 

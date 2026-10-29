@@ -144,6 +144,10 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
     can_access_colleges = perms.get("can_access_colleges", False)
     can_access_interviews = perms.get("can_access_interviews", False)
     can_access_practice_interview = perms.get("can_access_practice_interview", False)
+    # Staff holding an explicit course assignment work in the course workspace; the dashboards
+    # built on legacy, course-blind analytics are not offered to them.
+    from src.services.course_access import membership_grants
+    course_limited = (not is_admin_flag) and bool(membership_grants(memberships))
 
     role_claim = (
         "SUPER_ADMIN" if is_super_admin_flag
@@ -188,6 +192,7 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
         "can_access_colleges": can_access_colleges,
         "can_access_interviews": can_access_interviews,
         "can_access_practice_interview": can_access_practice_interview,
+        "course_limited": course_limited,
         "effective_role": effective_role,
         "role_claim": role_claim,
         "extra_claims": extra_claims,
@@ -261,6 +266,7 @@ async def login_user(
             can_access_colleges=claims_data.get("can_access_colleges", False),
             can_access_interviews=claims_data.get("can_access_interviews", False),
             can_access_practice_interview=claims_data.get("can_access_practice_interview", False),
+            course_limited=claims_data.get("course_limited", False),
             team_name=claims_data["team_name"],
             membership_roles=claims_data["membership_roles"],
             can_use_bulk_ats=is_bulk_ats_user(user),
@@ -395,6 +401,7 @@ async def build_user_profile(current_user, summary_repo, session):
             can_access_colleges=claims_data.get("can_access_colleges", False),
             can_access_interviews=claims_data.get("can_access_interviews", False),
             can_access_practice_interview=claims_data.get("can_access_practice_interview", False),
+            course_limited=claims_data.get("course_limited", False),
             team_name=claims_data["team_name"],
             membership_roles=claims_data["membership_roles"],
             can_use_bulk_ats=is_bulk_ats_user(current_user),
