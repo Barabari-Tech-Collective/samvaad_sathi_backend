@@ -80,6 +80,8 @@ from src.api.routes.human_interviews import router as human_interviews_router
 router.include_router(router=human_interviews_router)
 from src.api.routes.staff_tasks import router as staff_tasks_router
 router.include_router(router=staff_tasks_router)
+from src.api.routes.opportunity_selection import router as opportunity_selection_router
+router.include_router(router=opportunity_selection_router)
 from src.api.routes.opportunities import router as opportunities_router
 router.include_router(router=opportunities_router)
 

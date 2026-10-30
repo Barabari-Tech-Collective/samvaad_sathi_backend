@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field, field_validator
 from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.session import get_async_session
 from src.models.db.user import User
-from src.models.db.opportunity import Opportunity
 from src.models.db.practice_governance import PracticeShortlist, PracticeShortlistEntry
 from src.services import course_shortlists as service
 from src.services.course_reporting import RosterFilters, roster_predicate
@@ -221,9 +220,10 @@ async def create(
         return service.metadata(existing)
     now = datetime.datetime.now(service.UTC)
     if body.opportunity_id is not None:
-        opening = await session.get(Opportunity, body.opportunity_id)
-        if opening is None or opening.course_id != course_id or opening.status != "open":
-            raise fastapi.HTTPException(422, "Choose an open opportunity from this course.")
+        raise fastapi.HTTPException(
+            409,
+            "Use the opening selection review for formal opportunity decisions. Learning shortlists remain separate.",
+        )
     if not now < body.expires_at <= now + datetime.timedelta(days=365):
         raise fastapi.HTTPException(422, "Choose an expiry in the next 365 days.")
     rules = {

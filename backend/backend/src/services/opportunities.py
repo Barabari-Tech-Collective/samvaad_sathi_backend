@@ -21,6 +21,7 @@ from src.models.db.interview import Interview
 from src.models.db.practice_governance import PracticeConsent
 from src.models.db.user import User
 from src.services import course_shortlists as shortlists
+from src.services.opportunity_selection import evidence as selection_evidence
 from src.services.course_access import student_predicate
 from src.services.people import student_only
 
@@ -69,7 +70,7 @@ async def evidence(session, opportunity, student_ids, now):
         Interview.course_id == opportunity.course_id,
         Interview.interview_mode == "assessment",
         Interview.status == "completed",
-        Interview.completed_at >= since,
+        Interview.completed_at.between(since, now),
     ]
     counts = {
         uid: (int(n), latest)
@@ -118,20 +119,18 @@ async def evidence(session, opportunity, student_ids, now):
                 "result_released": row.result_released_at is not None,
             }
         )
+    qualifying = await selection_evidence(session, opportunity, student_ids, now)
     out = {}
     for uid in student_ids:
         n, latest = counts.get(uid, (0, None))
         out[uid] = {
             "assessments": n,
+            "qualifying_formal_rounds": qualifying[uid]["count"],
             "assessments_for_role": for_role.get(uid) if opportunity.job_profile_id else None,
             "latest_assessment_at": latest.isoformat() if latest else None,
             "human_rounds": rounds.get(uid, []),
             # "missing" (none at all) and "needs_more" (some, below the rule) are different
             # states; neither is a rejection.
-            "state": (
-                "ready"
-                if n >= opportunity.min_assessments
-                else "needs_more" if n else "missing"
-            ),
+            "state": qualifying[uid]["state"],
         }
     return out

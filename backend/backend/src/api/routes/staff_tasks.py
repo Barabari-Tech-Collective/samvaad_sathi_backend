@@ -208,6 +208,68 @@ async def _operations_tasks(user, session, now):
     )]
 
 
+async def _selection_tasks(user, session):
+    from src.models.db.opportunity import Opportunity
+    from src.services import course_shortlists, opportunity_selection, opportunities
+
+    if not course_shortlists.permission(user, "read"):
+        return []
+    courses = await course_shortlists.placement_course_ids(user, session)
+    stmt = sa.select(Opportunity).where(Opportunity.status.in_(("open", "closed")))
+    if courses is not None:
+        stmt = stmt.where(Opportunity.course_id.in_(courses))
+    tasks = []
+    for opening in (
+        await session.execute(stmt.order_by(Opportunity.id.desc()))
+    ).scalars():
+        predicate = await opportunities.authorize(
+            user, opening.course_id, session, "read"
+        )
+        selection = await opportunity_selection.latest(session, opening.id)
+        view = await opportunity_selection.detail(
+            session, user, opening, selection, predicate
+        )
+        if not view["items"] or view["status"] == "released":
+            continue
+        if view["can_release"]:
+            title, count, action = (
+                "Opportunity outcomes awaiting release",
+                len(view["items"]),
+                "Review and release",
+            )
+        elif view["can_decide"]:
+            count = sum(not i["decision"] for i in view["items"])
+            title, action = (
+                ("Opportunity decisions awaiting review", "Review decisions")
+                if count
+                else (
+                    ("Opportunity review needs attention", "Resolve review blockers")
+                    if view["lock_blockers"]
+                    else ("Opportunity ready for lock review", "Review and lock")
+                )
+            )
+            count = count or 1
+        elif view["can_recommend"]:
+            count = sum(not i["recommendation"] for i in view["items"])
+            title, action = "Opportunity recommendations pending", "Review candidates"
+        else:
+            continue
+        if count:
+            tasks.append(
+                _task(
+                    f"selection_{opening.id}",
+                    title,
+                    count,
+                    opening.title,
+                    "You",
+                    action,
+                    f"/dashboard/samvaad/opportunities/{opening.id}#selection",
+                    True,
+                )
+            )
+    return tasks
+
+
 @router.get("/tasks")
 async def my_tasks(
     response: fastapi.Response,
@@ -217,6 +279,7 @@ async def my_tasks(
     now = dt.datetime.now(dt.timezone.utc)
     tasks = [
         *await _human_tasks(user, session, now),
+        *await _selection_tasks(user, session),
         *await _review_tasks(user, session),
         *await _operations_tasks(user, session, now),
     ]
