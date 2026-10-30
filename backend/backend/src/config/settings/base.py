@@ -55,6 +55,10 @@ class BackendBaseSettings(BaseSettings):
     DB_POSTGRES_PASSWORD: str = decouple.config("POSTGRES_PASSWORD", cast=str)  # type: ignore
     DB_POOL_SIZE: int = decouple.config("DB_POOL_SIZE", cast=int)  # type: ignore
     DB_POOL_OVERFLOW: int = decouple.config("DB_POOL_OVERFLOW", cast=int)  # type: ignore
+    # Ping each pooled connection before use. Safe but costs three database round trips
+    # per request; with a far-away database turn it off and lower the recycle time.
+    DB_POOL_PRE_PING: bool = decouple.config("DB_POOL_PRE_PING", cast=bool, default=True)  # type: ignore
+    DB_POOL_RECYCLE_SECONDS: int = decouple.config("DB_POOL_RECYCLE_SECONDS", cast=int, default=3600)  # type: ignore
     # The arq worker keeps its own, smaller pool. It is sized for concurrent
     # jobs - a number we choose - rather than concurrent HTTP requests, and it
     # is spent from the same server-wide connection ceiling as the API pool
