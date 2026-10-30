@@ -39,3 +39,9 @@ def test_untimed_request_reports_total_only():
 def test_step_is_a_no_op_outside_a_request():
     with step("anything"):
         pass
+
+
+def test_enabled_only_inside_a_timed_request():
+    from src.utilities.server_timing import enabled
+
+    assert enabled() is False

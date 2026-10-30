@@ -29,6 +29,11 @@ def step(name: str):
         steps[name] = steps.get(name, 0.0) + (time.perf_counter() - started) * 1000
 
 
+def enabled() -> bool:
+    """True inside a request when timing is on."""
+    return _steps.get() is not None
+
+
 def install(app) -> None:
     @app.middleware("http")
     async def server_timing(request, call_next):
