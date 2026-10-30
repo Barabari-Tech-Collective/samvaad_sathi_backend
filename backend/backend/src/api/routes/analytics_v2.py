@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import decimal
 import math
 import re
 from collections import defaultdict
@@ -210,6 +211,10 @@ def _safe_avg(values: Sequence[float | int | None]) -> float | None:
 
 
 def _metric_or_zero(value: Any, *, digits: int | None = None) -> int | float:
+    # SQL AVG() comes back as Decimal; treating it as "not a number" showed every
+    # average duration as 0.
+    if isinstance(value, decimal.Decimal):
+        value = float(value)
     if isinstance(value, (int, float)):
         if isinstance(value, float) and not math.isfinite(value):
             return 0
@@ -1534,7 +1539,10 @@ async def get_interviews_summary(
     completed_interviews = (await session.execute(completed_stmt)).scalar() or 0
 
     duration_stmt = _apply_interview_filters(
-        sqlalchemy.select(sqlalchemy.func.avg(Interview.duration_seconds)),
+        # Finished interviews only: an abandoned session left open for days is not a duration.
+        sqlalchemy.select(sqlalchemy.func.avg(Interview.duration_seconds)).where(
+            Interview.status == "completed"
+        ),
         start_date=None,
         end_date=None,
         role=None,
@@ -2300,6 +2308,7 @@ async def get_difficulty_metrics(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -2308,7 +2317,13 @@ async def get_difficulty_metrics(
         return TablePageResponse(table_type="difficulty_metrics", items=[], page=1, limit=1, total=0)
     service = AnalyticsService(session)
     clean_role = role.strip() if role and role.strip() else None
-    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date, role=clean_role, allowed_colleges=allowed_colleges)
+    items = await service.get_difficulty_segment_analytics(
+        start_date=start_date,
+        end_date=end_date,
+        role=clean_role,
+        allowed_colleges=allowed_colleges,
+        interview_mode=interview_mode,
+    )
     items = _sort_difficulty_items(items)
     normalized_items = _zero_fill_metric_nulls(items)
     return TablePageResponse(table_type="difficulty_metrics", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))

@@ -475,6 +475,7 @@ class AnalyticsService:
         difficulty: str | None = None,
         college: str | None = None,
         allowed_colleges: Sequence[str] | set[str] | None = None,
+        interview_mode: str | None = None,
     ) -> list[dict[str, Any]]:
         interviews = await self._list_interviews_all(
             start_date=start_date,
@@ -484,6 +485,8 @@ class AnalyticsService:
             college=college,
             allowed_colleges=allowed_colleges,
         )
+        if interview_mode is not None:
+            interviews = [i for i in interviews if i.interview_mode == interview_mode]
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
         grouped: dict[str, list[Interview]] = defaultdict(list)
@@ -492,7 +495,12 @@ class AnalyticsService:
 
         output: list[dict[str, Any]] = []
         for level, level_interviews in grouped.items():
-            scores = [_extract_overall_score(reports.get(i.id), summaries.get(i.id)) for i in level_interviews]
+            # Same rule as every other average: finished interviews only.
+            scores = [
+                _extract_overall_score(reports.get(i.id), summaries.get(i.id))
+                for i in level_interviews
+                if i.status == "completed"
+            ]
             clean_scores = [s for s in scores if s is not None]
             completed = len([i for i in level_interviews if i.status == "completed"])
             retry_rate = await self._retry_rate_for_interviews([i.id for i in level_interviews])
