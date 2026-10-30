@@ -10,6 +10,7 @@ from src.models.db.team_member import TeamMember
 from src.models.db.practice_governance import PracticeDashboardAuditEvent
 from src.services.course_access import grants_for, require_course, student_predicate
 from src.services.feature_access import permits
+from src.services.people import student_only  # noqa: F401  (routes call service.student_only)
 
 UTC = dt.timezone.utc
 NOTICE = "Human interview on Google Meet in a separate tab. Your host manages admission, camera and audio there. Samvaad does not detect attendance or record the meeting, generate an AI score, or switch to AI automatically."
@@ -58,20 +59,6 @@ async def authorize(user, course_id, session, operation, *, historical=False):
                 )
         return sa.or_(*clauses) if clauses else sa.false()
     return student_predicate(course_id, grants, global_access=is_admin_user(user))
-
-
-def student_only():
-    staff = sa.exists(
-        sa.select(TeamMember.id).where(
-            TeamMember.user_id == User.id, TeamMember.status == "active"
-        )
-    )
-    return sa.and_(
-        ~staff,
-        User.role.is_(None),
-        User.is_admin.is_(False),
-        User.is_super_admin.is_(False),
-    )
 
 
 def joinable(row, now):

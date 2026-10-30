@@ -25,6 +25,7 @@ from src.models.db.job_profile import JobProfile
 # Why it was made: Decouples static role/domain category mappings from core analytics logic, keeping
 # this service file focused strictly on business logic as requested during PR review.
 from src.services.mappings import TRACK_TO_CATEGORY
+from src.services.people import student_interview, student_only
 def _ensure_utc(dt: datetime.datetime | None) -> datetime.datetime:
     """Return dt as UTC-aware; if None, return datetime.min UTC."""
     if not dt:
@@ -529,7 +530,7 @@ class AnalyticsService:
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
 
-        users_stmt = sqlalchemy.select(User)
+        users_stmt = sqlalchemy.select(User).where(student_only())
         if college:
             users_stmt = users_stmt.where(User.university == college)
         elif allowed_colleges is not None:
@@ -635,7 +636,7 @@ class AnalyticsService:
         scoped_user_ids = {i.user_id for i in interviews}
         reports = await self._reports_by_interview(interview_ids)
         summaries = await self._summary_reports_by_interview(interview_ids)
-        users_stmt = sqlalchemy.select(User)
+        users_stmt = sqlalchemy.select(User).where(student_only())
         if college:
             users_stmt = users_stmt.where(User.university == college)
         elif allowed_colleges is not None:
@@ -1100,7 +1101,8 @@ class AnalyticsService:
         category: str | None = None,
         allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[Interview]:
-        stmt = sqlalchemy.select(Interview)
+        # Staff test interviews never count toward student numbers.
+        stmt = sqlalchemy.select(Interview).where(student_interview())
         if college:
             stmt = stmt.join(User, User.id == Interview.user_id).where(User.university == college)
         elif allowed_colleges is not None:
@@ -1378,7 +1380,7 @@ class AnalyticsService:
         if user_ids is not None:
             candidate_user_ids = [uid for uid in user_ids if uid is not None]
         else:
-            users = list((await self._db.execute(sqlalchemy.select(User.id))).all())
+            users = list((await self._db.execute(sqlalchemy.select(User.id).where(student_only()))).all())
             candidate_user_ids = [int(r[0]) for r in users if r and r[0] is not None]
 
         if not candidate_user_ids:
@@ -1683,7 +1685,7 @@ class AnalyticsService:
         }
 
     async def _global_improvement_percent(self) -> float:
-        users = list((await self._db.execute(sqlalchemy.select(User.id))).all())
+        users = list((await self._db.execute(sqlalchemy.select(User.id).where(student_only()))).all())
         improvements: list[float] = []
         for row in users:
             user_id = row[0]
@@ -1709,12 +1711,38 @@ class AnalyticsService:
         avg = _avg_non_null(improvements)
         return avg if avg is not None else 0.0
 
+    async def average_completed_score(
+        self,
+        *,
+        allowed_colleges: Sequence[str] | set[str] | None = None,
+        interview_mode: str | None = None,
+    ) -> float | None:
+        """The one definition of "average score": finished student interviews only, read the
+        same way as every other score. Unfinished or terminated attempts have no score."""
+        interviews = [
+            i
+            for i in await self._list_interviews_all(allowed_colleges=allowed_colleges)
+            if i.status == "completed"
+            and (interview_mode is None or i.interview_mode == interview_mode)
+        ]
+        ids = [i.id for i in interviews]
+        reports = await self._reports_by_interview(ids)
+        summaries = await self._summary_reports_by_interview(ids)
+        scores = [
+            s
+            for s in (_extract_overall_score(reports.get(i), summaries.get(i)) for i in ids)
+            if s is not None
+        ]
+        return _round_opt(_avg_non_null(scores), 2) if scores else None
+
     async def _candidate_users(self, *, user_id: int | None, allowed_colleges: Sequence[str] | set[str] | None = None) -> list[User]:
         if allowed_colleges is not None and not allowed_colleges:
             return []
         stmt = sqlalchemy.select(User)
         if user_id is not None:
             stmt = stmt.where(User.id == user_id)
+        else:
+            stmt = stmt.where(student_only())
         if allowed_colleges is not None:
             stmt = stmt.where(User.university.in_(list(allowed_colleges)))
         users = list((await self._db.execute(stmt)).scalars().all())
