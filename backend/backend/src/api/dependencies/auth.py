@@ -9,6 +9,7 @@ from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTo
 from src.securities.authorizations.access_revocation import is_access_revoked
 from src.api.dependencies.repository import get_repository
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
+from src.utilities.server_timing import step
 
 # Create HTTPBearer security scheme for Swagger UI
 security = HTTPBearer()
@@ -55,7 +56,8 @@ async def get_current_user(
     try:
         claims = decode_sso_access_token(token)
         from src.services.central_identity_access import current_identity
-        claims = await current_identity(claims, token=token)
+        with step("central_auth"):
+            claims = await current_identity(claims, token=token)
         email = claims.get("sub")
         if not email:
             raise SsoTokenError("Missing sub claim")
@@ -67,7 +69,9 @@ async def get_current_user(
         # src/mqconsumer/user_access_revoked_consumer.py) closes that window without
         # adding a synchronous cross-service call to every request.
         unique_id = claims.get("userUniqueId")
-        if unique_id and await is_access_revoked(unique_id):
+        with step("redis_revoked"):
+            revoked = bool(unique_id) and await is_access_revoked(unique_id)
+        if revoked:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_403_FORBIDDEN,
                 detail="Access to Samvaad Saathi has been revoked",
@@ -79,6 +83,8 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    timer = step("db_user")
+    timer.__enter__()
     try:
         if settings.CENTRAL_IDENTITY_CHECK_ENABLED:
             try:
@@ -116,6 +122,8 @@ async def get_current_user(
             user = await user_repo.bind_central_identity(user, claims["userUniqueId"])
         except EntityAlreadyExists:
             raise fastapi.HTTPException(409, "Central account binding needs administrator review.")
+    # Covers lookup, first-time creation and central binding; an error path is not timed.
+    timer.__exit__(None, None, None)
     setattr(user, "_token_source", token_source)
 
     # Attach token claims and synchronize role metadata on non-persistent attributes

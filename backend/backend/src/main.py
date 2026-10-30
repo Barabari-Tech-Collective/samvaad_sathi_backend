@@ -188,6 +188,12 @@ def initialize_backend_application() -> fastapi.FastAPI:
     if settings.TRUST_PROXY_HEADERS:
         app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
+    # Step timings for finding slow requests on staging; never on unless asked for.
+    if settings.SERVER_TIMING_ENABLED:
+        from src.utilities import server_timing
+
+        server_timing.install(app)
+
     startup_handler = execute_backend_server_event_handler(backend_app=app)
     shutdown_handler = terminate_backend_server_event_handler(backend_app=app)
     if hasattr(app, "add_event_handler"):

@@ -467,6 +467,10 @@ class BackendBaseSettings(BaseSettings):
     # of split host/port/password fields. When present it takes precedence.
     REDIS_URL: str = decouple.config("REDIS_URL", cast=str, default="")  # type: ignore
 
+    # Adds a Server-Timing header (central auth, Redis, user lookup, total) to every
+    # response. For diagnosing slow requests on staging; leave off in production.
+    SERVER_TIMING_ENABLED: bool = decouple.config("SERVER_TIMING_ENABLED", cast=bool, default=False)  # type: ignore
+
     # Per-user rate limits on endpoints calling metered third-party APIs
     # (OpenAI/ElevenLabs) - protects the API bill from runaway usage by a
     # single user or a client-side bug, not primarily a security control.
