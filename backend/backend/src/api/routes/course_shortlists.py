@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.session import get_async_session
 from src.models.db.user import User
+from src.models.db.opportunity import Opportunity
 from src.models.db.practice_governance import PracticeShortlist, PracticeShortlistEntry
 from src.services import course_shortlists as service
 from src.services.course_reporting import RosterFilters, roster_predicate
@@ -29,6 +30,8 @@ class Create(BaseModel):
     maximum_evidence_age_days: int = Field(default=90, ge=1, le=365)
     minimum_completed_interviews: int = Field(default=1, ge=1, le=20)
     expires_at: datetime.datetime
+    # The opening this shortlist decides, when started from one (pack F25).
+    opportunity_id: int | None = Field(None, ge=1)
 
     @field_validator("name", "opportunity", "role", mode="before")
     @classmethod
@@ -217,6 +220,10 @@ async def create(
         response.status_code = 200
         return service.metadata(existing)
     now = datetime.datetime.now(service.UTC)
+    if body.opportunity_id is not None:
+        opening = await session.get(Opportunity, body.opportunity_id)
+        if opening is None or opening.course_id != course_id or opening.status != "open":
+            raise fastapi.HTTPException(422, "Choose an open opportunity from this course.")
     if not now < body.expires_at <= now + datetime.timedelta(days=365):
         raise fastapi.HTTPException(422, "Choose an expiry in the next 365 days.")
     rules = {
@@ -234,6 +241,7 @@ async def create(
                 evidence_rules=rules,
                 created_by=user.id,
                 expires_at=body.expires_at,
+                opportunity_id=body.opportunity_id,
                 request_key=str(body.request_key),
                 request_hash=fingerprint,
                 status="draft",

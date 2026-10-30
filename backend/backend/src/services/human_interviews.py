@@ -100,6 +100,8 @@ def metadata(row, now, *, can_manage=False, staff=False):
         "can_record_result": can_manage and row.status == "completed" and not released,
         "attendance": "not_verified",
         "outcome_source": "host_reported" if row.closed_at else None,
+        # Which opening the round belongs to is a staff concern; students are not told.
+        "opportunity_id": getattr(row, "opportunity_id", None) if staff else None,
     }
 
 

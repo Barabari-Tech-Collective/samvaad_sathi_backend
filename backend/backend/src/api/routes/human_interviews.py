@@ -13,6 +13,7 @@ from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.session import get_async_session
 from src.models.db.human_interview import HumanInterview
+from src.models.db.opportunity import Opportunity
 from src.models.db.user import User
 from src.services import human_interviews as service
 from src.services.email.human_interview_emails import build as build_email
@@ -32,6 +33,8 @@ class Create(BaseModel):
     role_name: str | None = Field(None, max_length=160)
     instructions: str | None = Field(None, max_length=2000)
     interviewer_name: str | None = Field(None, max_length=120)
+    # The opening this round is for, when scheduled from one (pack F25).
+    opportunity_id: int | None = Field(None, ge=1)
 
     @field_validator("role_name", "instructions", "interviewer_name", mode="before")
     @classmethod
@@ -107,6 +110,13 @@ class Outcome(BaseModel):
     @classmethod
     def trim(cls, value):
         return value.strip() if isinstance(value, str) else value
+
+
+async def open_opportunity_in_course(session, opportunity_id, course_id):
+    """A round can only be tied to an open opportunity of the same course."""
+    row = await session.get(Opportunity, opportunity_id)
+    if row is None or row.course_id != course_id or row.status != "open":
+        raise fastapi.HTTPException(422, "Choose an open opportunity from this course.")
 
 
 async def email_payload(session, row) -> dict:
@@ -293,6 +303,8 @@ async def create(
     ).scalar_one_or_none()
     if student is None or student == user.id:
         raise fastapi.HTTPException(404, "Eligible student not found.")
+    if body.opportunity_id is not None:
+        await open_opportunity_in_course(session, body.opportunity_id, course_id)
     canonical = {
         "course_id": course_id,
         **body.model_dump(mode="json", exclude={"request_key"}),

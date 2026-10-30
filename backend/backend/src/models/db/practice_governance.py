@@ -90,6 +90,10 @@ class PracticeShortlist(Base):  # type: ignore
     )
     request_key: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(36))
     request_hash: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(64))
+    # The opening this shortlist decides, when it was started from one (pack F25).
+    opportunity_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.ForeignKey("opportunity.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(primary_key=True)
     name: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(160))

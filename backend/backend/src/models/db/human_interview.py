@@ -31,6 +31,10 @@ class HumanInterview(Base):
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     course_id: Mapped[str] = mapped_column(sa.String(128), index=True)
+    # The opening this round belongs to, if it was scheduled for one (pack F25).
+    opportunity_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("opportunity.id", ondelete="SET NULL"), index=True
+    )
     student_id: Mapped[int] = mapped_column(
         sa.ForeignKey("user.id", ondelete="CASCADE"), index=True
     )

@@ -98,7 +98,12 @@ async def test_tasks_follow_ownership_and_omit_empty(factory):
         assert await _tasks(session, nobody) == {}
 
         # Today's interviews: an interview starting in 10 minutes is joinable, in order.
-        soon = _interview(5, student, host, now + dt.timedelta(minutes=10))
+        # Joinable and within today's Indian day, whatever time the test runs.
+        ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+        start = now + dt.timedelta(minutes=10)
+        if start.astimezone(ist).date() != now.astimezone(ist).date():
+            start = now - dt.timedelta(minutes=5)
+        soon = _interview(5, student, host, start)
         session.add(soon)
         await session.commit()
         today = await _today(session, host)

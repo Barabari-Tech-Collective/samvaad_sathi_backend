@@ -60,6 +60,12 @@ class BulkATSBatch(Base):  # type: ignore
         nullable=True,
         index=True,
     )
+    # The opening this screening run was for, if linked (pack F25).
+    opportunity_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.ForeignKey("opportunity.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     role_name: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=160), nullable=False
     )

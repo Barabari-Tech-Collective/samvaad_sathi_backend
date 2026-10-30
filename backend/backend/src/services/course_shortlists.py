@@ -112,6 +112,7 @@ def metadata(row):
             "version",
             "expires_at",
             "created_at",
+            "opportunity_id",
         )
     } | {"rules": row.evidence_rules}
 
