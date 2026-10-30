@@ -45,8 +45,11 @@ class AnalyticsService:
         user_id: int,
         start_date: datetime.date | None = None,
         end_date: datetime.date | None = None,
+        interview_mode: str | None = None,
     ) -> dict[str, Any]:
-        interviews = await self._list_interviews(user_id=user_id, start_date=start_date, end_date=end_date)
+        interviews = await self._list_interviews(
+            user_id=user_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+        )
         if not interviews:
             return {
                 "performance": {},
@@ -1089,8 +1092,11 @@ class AnalyticsService:
         user_id: int,
         start_date: datetime.date | None = None,
         end_date: datetime.date | None = None,
+        interview_mode: str | None = None,
     ) -> list[Interview]:
         stmt = sqlalchemy.select(Interview).where(Interview.user_id == user_id).order_by(Interview.created_at.asc())
+        if interview_mode is not None:
+            stmt = stmt.where(Interview.interview_mode == interview_mode)
         if start_date is not None:
             stmt = stmt.where(Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
         if end_date is not None:

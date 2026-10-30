@@ -84,6 +84,8 @@ from src.api.routes.opportunity_selection import router as opportunity_selection
 router.include_router(router=opportunity_selection_router)
 from src.api.routes.opportunities import router as opportunities_router
 router.include_router(router=opportunities_router)
+from src.api.routes.learners import router as learners_router
+router.include_router(router=learners_router)
 
 from src.api.routes.integrity_review import router as integrity_review_router
 router.include_router(router=integrity_review_router)

@@ -1127,12 +1127,15 @@ async def get_student_summary(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     performance = metrics.get("performance", {})
     attempts = metrics.get("attempt_behavior", {})
     practice = metrics.get("practice_compliance", {})
@@ -1162,12 +1165,15 @@ async def get_student_score_history(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     points = metrics.get("performance", {}).get("score_history", [])
     return StudentScoreHistoryResponse(student_id=student_id, chart_type="line", points=points)
 
@@ -1177,12 +1183,15 @@ async def get_student_speech_vs_knowledge_history(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     history = metrics.get("performance", {}).get("score_history", [])
     points = [
         {
@@ -1201,12 +1210,15 @@ async def get_student_skill_averages(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     speech_metrics = metrics.get("skill_breakdown", {}).get("speech", {})
     knowledge_metrics = metrics.get("skill_breakdown", {}).get("knowledge", {})
 
@@ -1228,12 +1240,15 @@ async def get_student_practice_completion(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     practice = metrics.get("practice_compliance", {})
     kpis = [
         KpiCard(key="recommended_exercises", label="Recommended Exercises", value=_metric_or_zero(practice.get("recommended_exercises"))),
@@ -1254,11 +1269,14 @@ async def get_student_interviews(
     student_id: int,
     page: int = fastapi.Query(default=1, ge=1),
     limit: int = fastapi.Query(default=20, ge=1, le=100),
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
-    total_stmt = sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.user_id == student_id)
+    total_stmt = sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(
+        Interview.user_id == student_id, _mode(interview_mode)
+    )
     total = (await session.execute(total_stmt)).scalar() or 0
     offset = (page - 1) * limit
 
@@ -1266,7 +1284,7 @@ async def get_student_interviews(
         sqlalchemy.select(Interview, Report, SummaryReport)
         .outerjoin(Report, Report.interview_id == Interview.id)
         .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
-        .where(Interview.user_id == student_id)
+        .where(Interview.user_id == student_id, _mode(interview_mode))
         .order_by(Interview.created_at.desc())
         .offset(offset)
         .limit(limit)
@@ -1307,6 +1325,7 @@ async def get_student_interviews(
 )
 async def get_student_latest_feedback(
     student_id: int,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -1314,7 +1333,11 @@ async def get_student_latest_feedback(
     stmt = (
         sqlalchemy.select(SummaryReport)
         .join(Interview, Interview.id == SummaryReport.interview_id)
-        .where(Interview.user_id == student_id, SummaryReport.report_json.is_not(None))
+        .where(
+            Interview.user_id == student_id,
+            SummaryReport.report_json.is_not(None),
+            _mode(interview_mode),
+        )
         .order_by(SummaryReport.created_at.desc())
         .limit(1)
     )
