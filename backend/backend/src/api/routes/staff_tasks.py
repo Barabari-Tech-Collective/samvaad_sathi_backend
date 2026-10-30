@@ -24,7 +24,11 @@ router = fastapi.APIRouter(prefix="/v2/staff", tags=["staff-tasks"])
 HUMAN = "/dashboard/samvaad/human-interviews"
 
 
-def _task(id, title, count, detail, owner, action, href, attention):
+# Staff are in India: "today" is an Indian day.
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+
+
+def _task(id, title, count, detail, owner, action, href, attention, oldest_at=None):
     return {
         "id": id,
         "title": title,
@@ -33,41 +37,55 @@ def _task(id, title, count, detail, owner, action, href, attention):
         "owner": owner,
         "action": {"label": action, "href": href},
         "attention": attention,
+        # When the oldest pending item became due, so the Overview can say how long it waited.
+        "oldest_at": oldest_at.isoformat() if oldest_at else None,
     }
+
+
+def _interview_scope(user):
+    """Admins see every interview; anyone else only those they host."""
+    scope = [interviews.student_only()]
+    if not is_admin_user(user):
+        scope.append(HumanInterview.host_id == user.id)
+    return scope
+
+
+def _day_bounds(now):
+    local = now.astimezone(IST)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start, start + dt.timedelta(days=1)
 
 
 async def _human_tasks(user, session, now):
     """Interviews this person runs: admins see all, others only the ones they host."""
     if not interviews.permitted(user, "read"):
         return []
-    scope = [interviews.student_only()]
-    if not is_admin_user(user):
-        scope.append(HumanInterview.host_id == user.id)
     base = (
-        sa.select(sa.func.count(HumanInterview.id))
+        sa.select(sa.func.count(HumanInterview.id), sa.func.min(HumanInterview.ends_at))
         .join(User, User.id == HumanInterview.student_id)
-        .where(*scope)
+        .where(*_interview_scope(user))
     )
 
-    async def count(*where):
-        return int((await session.execute(base.where(*where))).scalar_one() or 0)
+    async def stats(*where):
+        n, oldest = (await session.execute(base.where(*where))).one()
+        return int(n or 0), oldest
 
-    end_of_today = now.replace(hour=23, minute=59, second=59)
+    day_start, day_end = _day_bounds(now)
     scheduled = HumanInterview.status == "scheduled"
-    upcoming = await count(
+    upcoming, _ = await stats(
         scheduled,
         HumanInterview.starts_at >= now,
         HumanInterview.starts_at < now + dt.timedelta(days=7),
     )
-    today = await count(
-        scheduled, HumanInterview.starts_at >= now, HumanInterview.starts_at <= end_of_today
+    today, _ = await stats(
+        scheduled, HumanInterview.starts_at >= now, HumanInterview.starts_at < day_end
     )
     # Meeting time passing is not proof of attendance (pack sec 12).
-    overdue = await count(scheduled, HumanInterview.ends_at < now)
-    no_feedback = await count(
+    overdue, overdue_since = await stats(scheduled, HumanInterview.ends_at < now)
+    no_feedback, feedback_since = await stats(
         HumanInterview.status == "completed", HumanInterview.result.is_(None)
     )
-    unreleased = await count(
+    unreleased, unreleased_since = await stats(
         HumanInterview.result.is_not(None), HumanInterview.result_released_at.is_(None)
     )
     owner = "You" if not is_admin_user(user) else "The interviewer"
@@ -76,19 +94,19 @@ async def _human_tasks(user, session, now):
         tasks.append(_task(
             "interviews_awaiting_attendance", "Awaiting attendance update", overdue,
             "The meeting time has passed but nobody recorded whether it happened.",
-            owner, "Record what happened", HUMAN, True,
+            owner, "Record what happened", HUMAN, True, overdue_since,
         ))
     if no_feedback:
         tasks.append(_task(
             "interviews_awaiting_feedback", "Feedback awaiting submission", no_feedback,
             "The interview took place; the result and feedback are not in yet.",
-            owner, "Add the result", HUMAN, True,
+            owner, "Add the result", HUMAN, True, feedback_since,
         ))
     if unreleased:
         tasks.append(_task(
             "interviews_release_pending", "Result not shared yet", unreleased,
             "A result is recorded but the student cannot see it until it is shared.",
-            "Placement lead", "Review and share", HUMAN, True,
+            "Placement lead", "Review and share", HUMAN, True, unreleased_since,
         ))
     if upcoming:
         tasks.append(_task(
@@ -99,18 +117,57 @@ async def _human_tasks(user, session, now):
     return tasks
 
 
+async def _today(user, session, now):
+    """Today's scheduled human interviews, in order, for the people who may see them.
+    Same scope as the human-interview list: the student's name is already visible there."""
+    if not interviews.permitted(user, "read"):
+        return []
+    day_start, day_end = _day_bounds(now)
+    rows = (
+        await session.execute(
+            sa.select(HumanInterview, User.name)
+            .join(User, User.id == HumanInterview.student_id)
+            .where(
+                *_interview_scope(user),
+                HumanInterview.status == "scheduled",
+                HumanInterview.starts_at >= day_start,
+                HumanInterview.starts_at < day_end,
+            )
+            .order_by(HumanInterview.starts_at)
+            .limit(8)
+        )
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "starts_at": row.starts_at.isoformat(),
+            "ends_at": row.ends_at.isoformat(),
+            "student_name": name,
+            "round": row.role_name or row.title,
+            "can_join": interviews.joinable(row, now),
+            "href": HUMAN,
+        }
+        for row, name in rows
+    ]
+
+
 async def _review_tasks(user, session):
     """Templates waiting for a reviewer. Only admins may review and publish them."""
     if not is_admin_user(user):
         return []
     rows = (
         await session.execute(
-            sa.select(JobProfile.interview_mode, sa.func.count(JobProfile.id))
+            sa.select(
+                JobProfile.interview_mode,
+                sa.func.count(JobProfile.id),
+                sa.func.min(sa.func.coalesce(JobProfile.submitted_at, JobProfile.updated_at)),
+            )
             .where(JobProfile.status == "under_review")
             .group_by(JobProfile.interview_mode)
         )
     ).all()
-    counts = {mode: int(n) for mode, n in rows}
+    counts = {mode: int(n) for mode, n, _ in rows}
+    since = {mode: oldest for mode, _, oldest in rows}
     tasks = []
     if counts.get("assessment"):
         tasks.append(_task(
@@ -118,6 +175,7 @@ async def _review_tasks(user, session):
             counts["assessment"],
             "Students cannot take these until someone approves and publishes them.",
             "Reviewer", "Review and publish", "/dashboard/samvaad/roles", True,
+            since["assessment"],
         ))
     if counts.get("practice"):
         tasks.append(_task(
@@ -125,7 +183,7 @@ async def _review_tasks(user, session):
             counts["practice"],
             "Students cannot practise with these until they are published.",
             "Reviewer", "Review and publish", "/dashboard/samvaad/practice-templates",
-            True,
+            True, since["practice"],
         ))
     return tasks
 
@@ -141,11 +199,12 @@ async def _operations_tasks(user, session, now):
     if not stuck:
         return []
     failed = sum(a["count"] for a in alerts if a["severity"] == "high")
+    oldest = now - dt.timedelta(minutes=max(a["oldest_age_minutes"] for a in alerts))
     return [_task(
         "processing_failures", "Answers waiting on processing", stuck,
         f"{failed} failed, {stuck - failed} stalled for over 10 minutes. "
         "Answers are saved; feedback needs recovery.",
-        "Operations", "Open failures", "/dashboard/samvaad/alerts", True,
+        "Operations", "Open failures", "/dashboard/samvaad/alerts", True, oldest,
     )]
 
 
@@ -164,4 +223,8 @@ async def my_tasks(
     # Things to act on first, then things to know about.
     tasks.sort(key=lambda t: not t["attention"])
     response.headers["Cache-Control"] = "no-store"
-    return {"tasks": tasks, "generated_at": now.isoformat()}
+    return {
+        "tasks": tasks,
+        "today": await _today(user, session, now),
+        "generated_at": now.isoformat(),
+    }

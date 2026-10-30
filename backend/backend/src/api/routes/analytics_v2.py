@@ -57,7 +57,7 @@ from src.models.schemas.analytics_v2 import (
     TimeSeriesPoint,
     TimeSeriesResponse,
 )
-from src.services.analytics import AnalyticsService
+from src.services.analytics import AnalyticsService, _extract_overall_score
 from src.services.people import student_interview, student_only
 from src.services.course_access import legacy_analytics_guard
 
@@ -82,6 +82,9 @@ router = fastapi.APIRouter(
     dependencies=[Depends(get_current_admin_user), Depends(legacy_analytics_guard)],
 )
 
+
+# Staff and students are in India; a "day" on the Overview is an Indian day.
+_IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 _DIFFICULTY_ORDER = {"easy": 0, "medium": 1, "hard": 2, "expert": 3}
 
@@ -2566,3 +2569,88 @@ async def get_forecasting(
             )
         )
     return ForecastResponse(chart_type="line", points=points)
+
+
+@router.get(
+    "/dashboard/pulse",
+    summary="Programme pulse for the staff Overview",
+    description="Four headline figures for the chosen period with the previous period and a"
+    " per-day series for sparklines, plus mock and assessment interviews per day."
+    " Students only; averages use finished assessments only.",
+)
+async def get_dashboard_pulse(
+    days: Literal[7, 30] = fastapi.Query(default=7),
+    current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    today = datetime.datetime.now(_IST).date()
+    start = today - datetime.timedelta(days=days - 1)
+    previous_start = start - datetime.timedelta(days=days)
+    dates = [start + datetime.timedelta(days=i) for i in range(days)]
+
+    service = AnalyticsService(session)
+    fetched = (
+        []
+        if allowed_colleges is not None and not allowed_colleges
+        else await service._list_interviews_all(
+            # One extra day each side: the list filters by UTC dates, the pulse groups by
+            # Indian days, and only interviews inside an Indian day range are counted below.
+            start_date=previous_start - datetime.timedelta(days=1),
+            end_date=today + datetime.timedelta(days=1),
+            allowed_colleges=allowed_colleges,
+        )
+    )
+    interviews = [
+        i for i in fetched if previous_start <= i.created_at.astimezone(_IST).date() <= today
+    ]
+    finished = [i for i in interviews if i.status == "completed" and i.interview_mode == "assessment"]
+    reports = await service._reports_by_interview([i.id for i in finished])
+    summaries = await service._summary_reports_by_interview([i.id for i in finished])
+    score = {i.id: _extract_overall_score(reports.get(i.id), summaries.get(i.id)) for i in finished}
+
+    def day_of(i):
+        return i.created_at.astimezone(_IST).date()
+
+    def in_range(i, lo, hi):
+        return lo <= day_of(i) <= hi
+
+    def figures(lo, hi):
+        rows = [i for i in interviews if in_range(i, lo, hi)]
+        done = [i for i in rows if i.status == "completed" and i.interview_mode == "assessment"]
+        scores = [score[i.id] for i in done if score.get(i.id) is not None]
+        return {
+            "active_learners": len({i.user_id for i in rows}),
+            "assessments_taken": len(done),
+            "average_assessment_score": round(sum(scores) / len(scores), 1) if scores else None,
+            "mock_interviews": sum(1 for i in rows if i.interview_mode == "practice"),
+        }
+
+    current = figures(start, today)
+    previous = figures(previous_start, start - datetime.timedelta(days=1))
+    per_day = [figures(d, d) for d in dates]
+
+    def metric(key):
+        now_value, before = current[key], previous[key]
+        return {
+            "value": now_value,
+            "previous": before,
+            "change": None if now_value is None or before is None else round(now_value - before, 1),
+            # A day with no finished assessment has no average: None, never a zero.
+            "series": [p[key] for p in per_day],
+        }
+
+    return {
+        "days": days,
+        "start": start.isoformat(),
+        "end": today.isoformat(),
+        "metrics": {key: metric(key) for key in current},
+        "interviews_by_day": [
+            {
+                "date": d.isoformat(),
+                "mock": sum(1 for i in interviews if day_of(i) == d and i.interview_mode == "practice"),
+                "assessment": sum(1 for i in interviews if day_of(i) == d and i.interview_mode == "assessment"),
+            }
+            for d in dates
+        ],
+    }

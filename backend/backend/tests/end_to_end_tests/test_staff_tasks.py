@@ -50,6 +50,10 @@ async def _tasks(session, user):
     return {t["id"]: t for t in (await my_tasks(fastapi.Response(), user, session))["tasks"]}
 
 
+async def _today(session, user):
+    return (await my_tasks(fastapi.Response(), user, session))["today"]
+
+
 async def test_tasks_follow_ownership_and_omit_empty(factory):
     now = dt.datetime.now(dt.timezone.utc)
     async with factory() as session:
@@ -73,6 +77,7 @@ async def test_tasks_follow_ownership_and_omit_empty(factory):
         await session.commit()
 
         mine = await _tasks(session, host)
+        assert mine["interviews_awaiting_attendance"]["oldest_at"] is not None
         assert mine["interviews_upcoming"]["count"] == 1
         assert mine["interviews_awaiting_attendance"]["count"] == 1
         assert mine["interviews_release_pending"]["count"] == 1
@@ -91,6 +96,16 @@ async def test_tasks_follow_ownership_and_omit_empty(factory):
 
         # No human-interview permission and not an admin: an empty queue.
         assert await _tasks(session, nobody) == {}
+
+        # Today's interviews: an interview starting in 10 minutes is joinable, in order.
+        soon = _interview(5, student, host, now + dt.timedelta(minutes=10))
+        session.add(soon)
+        await session.commit()
+        today = await _today(session, host)
+        joinable = [t for t in today if t["id"] == soon.id]
+        assert joinable and joinable[0]["can_join"] is True
+        assert joinable[0]["student_name"] == "student"
+        assert await _today(session, nobody) == []
 
         # Things to act on come before things to know about.
         order = [t["id"] for t in (await my_tasks(fastapi.Response(), host, session))["tasks"]]
