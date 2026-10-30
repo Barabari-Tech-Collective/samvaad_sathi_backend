@@ -78,6 +78,8 @@ router.include_router(router=course_shortlists_router)
 
 from src.api.routes.human_interviews import router as human_interviews_router
 router.include_router(router=human_interviews_router)
+from src.api.routes.staff_tasks import router as staff_tasks_router
+router.include_router(router=staff_tasks_router)
 
 from src.api.routes.integrity_review import router as integrity_review_router
 router.include_router(router=integrity_review_router)
