@@ -459,6 +459,10 @@ class BackendBaseSettings(BaseSettings):
     REDIS_PORT: int = decouple.config("REDIS_PORT", cast=int, default=6379)  # type: ignore
     REDIS_DB: int = decouple.config("REDIS_DB", cast=int, default=0)  # type: ignore
     REDIS_PASSWORD: str = decouple.config("REDIS_PASSWORD", cast=str, default="")  # type: ignore
+    # Managed Redis (Upstash) needs a username and only accepts TLS. Without these the
+    # client spoke plain text, every call timed out and Redis features failed open.
+    REDIS_USERNAME: str = decouple.config("REDIS_USERNAME", cast=str, default="")  # type: ignore
+    REDIS_SSL_ENABLED: bool = decouple.config("REDIS_SSL_ENABLED", cast=bool, default=False)  # type: ignore
     # Hosted environments such as Render expose one connection string instead
     # of split host/port/password fields. When present it takes precedence.
     REDIS_URL: str = decouple.config("REDIS_URL", cast=str, default="")  # type: ignore

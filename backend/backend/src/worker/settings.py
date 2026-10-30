@@ -11,7 +11,9 @@ def build_redis_settings(*, fail_fast: bool = False) -> RedisSettings:
             host=settings.REDIS_HOST,
             port=settings.REDIS_PORT,
             database=settings.REDIS_DB,
+            username=settings.REDIS_USERNAME or None,
             password=settings.REDIS_PASSWORD or None,
+            ssl=settings.REDIS_SSL_ENABLED,
         )
     if fail_fast:
         result.conn_timeout = 1

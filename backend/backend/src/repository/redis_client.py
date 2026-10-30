@@ -25,7 +25,9 @@ class AsyncRedis:
                 host=settings.REDIS_HOST,
                 port=settings.REDIS_PORT,
                 db=settings.REDIS_DB,
+                username=settings.REDIS_USERNAME or None,
                 password=settings.REDIS_PASSWORD or None,
+                ssl=settings.REDIS_SSL_ENABLED,
                 **options,
             )
 
