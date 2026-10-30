@@ -48,6 +48,20 @@ async def can_open(user, course_id, session):
     )
 
 
+async def placement_course_ids(user, session):
+    """Courses this person may review shortlists in: None means every course (admins)."""
+    if is_admin_user(user):
+        return None
+    memberships = await get_user_active_memberships(user.id, session)
+    return {
+        course_id
+        for item in memberships
+        if resolve_dashboard_role(user, [item]) == "placements"
+        for grant in membership_grants([item])
+        for course_id in grant.course_ids
+    }
+
+
 async def authorize(user, course_id, session, operation):
     if not permission(user, operation):
         raise fastapi.HTTPException(

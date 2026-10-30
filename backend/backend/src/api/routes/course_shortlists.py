@@ -88,6 +88,66 @@ def capabilities(user, row=None):
     }
 
 
+@router.get("")
+async def all_lists(
+    response: fastapi.Response,
+    status: Literal["draft", "locked", "archived"] | None = None,
+    page: int = fastapi.Query(1, ge=1),
+    limit: int = fastapi.Query(25, ge=1, le=100),
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Every shortlist this person may read, across their courses, for the Opportunities
+    module. The same rule as the per-course list: the shortlist permission plus a placement
+    responsibility on the course (admins see all)."""
+    if not service.permission(user, "read"):
+        raise fastapi.HTTPException(
+            403, "An administrator must enable shortlists for your account."
+        )
+    response.headers["Cache-Control"] = "no-store"
+    courses = await service.placement_course_ids(user, session)
+    if courses is not None and not courses:
+        return {"items": [], "total": 0, "page": page, **capabilities(user)}
+    where = [PracticeShortlist.course_id.is_not(None)]
+    if courses is not None:
+        where.append(PracticeShortlist.course_id.in_(sorted(courses)))
+    if status:
+        where.append(PracticeShortlist.status == status)
+    total = (
+        await session.execute(
+            sa.select(sa.func.count()).select_from(PracticeShortlist).where(*where)
+        )
+    ).scalar_one()
+    counts = (
+        sa.select(
+            PracticeShortlistEntry.shortlist_id,
+            sa.func.count().filter(PracticeShortlistEntry.decision == "include").label("included"),
+            sa.func.count().filter(PracticeShortlistEntry.decision == "exclude").label("excluded"),
+        )
+        .group_by(PracticeShortlistEntry.shortlist_id)
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            sa.select(PracticeShortlist, counts.c.included, counts.c.excluded)
+            .outerjoin(counts, counts.c.shortlist_id == PracticeShortlist.id)
+            .where(*where)
+            .order_by(PracticeShortlist.created_at.desc(), PracticeShortlist.id.desc())
+            .offset((page - 1) * limit)
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "items": [
+            service.metadata(row) | {"included": int(inc or 0), "excluded": int(exc or 0)}
+            for row, inc, exc in rows
+        ],
+        "total": total,
+        "page": page,
+        **capabilities(user),
+    }
+
+
 @router.get("/courses/{course_id}")
 async def lists(
     course_id: str,
