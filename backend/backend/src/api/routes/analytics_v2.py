@@ -1539,10 +1539,11 @@ async def get_interviews_summary(
     completed_interviews = (await session.execute(completed_stmt)).scalar() or 0
 
     duration_stmt = _apply_interview_filters(
-        # Finished interviews only: an abandoned session left open for days is not a duration.
-        sqlalchemy.select(sqlalchemy.func.avg(Interview.duration_seconds)).where(
-            Interview.status == "completed"
-        ),
+        # Median of finished interviews. Some sessions were left open for days (one for
+        # 135), which made any mean meaningless; the median is the typical interview.
+        sqlalchemy.select(
+            sqlalchemy.func.percentile_cont(0.5).within_group(Interview.duration_seconds)
+        ).where(Interview.status == "completed", Interview.duration_seconds > 0),
         start_date=None,
         end_date=None,
         role=None,
@@ -1595,7 +1596,7 @@ async def get_interviews_summary(
         KpiCard(key="total_interviews", label="Total Interviews", value=total_interviews),
         KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(average_score, digits=2)),
         KpiCard(key="completion_rate", label="Completion Rate", value=_safe_percent(completed_interviews, total_interviews), unit="percent"),
-        KpiCard(key="average_duration", label="Average Duration", value=int(_metric_or_zero(average_duration)), unit="seconds"),
+        KpiCard(key="average_duration", label="Typical duration", value=int(_metric_or_zero(average_duration)), unit="seconds"),
         KpiCard(key="most_popular_role", label="Most Popular Role", value=popular_role[0] if popular_role else None),
         KpiCard(key="most_popular_difficulty", label="Most Popular Difficulty", value=popular_difficulty[0] if popular_difficulty else None),
     ]
