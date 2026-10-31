@@ -30,6 +30,7 @@ from src.models.db.learning_plan import (
     LearningPlanStepProgress,
 )
 from src.models.db.practice_governance import PracticeDashboardAuditEvent
+from src.models.db.practice_drill_completion import PracticeDrillCompletion
 from src.services import learning_plans as service
 from src.services.coaching_assignments import authorize_staff, lock_student, require_owned_enrollment
 from src.services.feature_access import permits
@@ -76,6 +77,10 @@ class Step(BaseModel):
         if (self.kind == "mock") != (self.job_profile_id is not None):
             raise ValueError("A mock step needs a mock template, and only a mock step has one.")
         return self
+
+
+class DrillReceipt(BaseModel):
+    completion_id: int = Field(ge=1)
 
 
 class Steps(BaseModel):
@@ -588,5 +593,29 @@ async def write_reflection(
             reflection=body.text, completed_at=dt.datetime.now(UTC),
         )
     )
+    await session.commit()
+    return (await service.assignment_views(session, [row]))[0]
+
+
+@router.post("/me/{assignment_id}/steps/{step_id}/drill-completion")
+async def bind_drill_completion(assignment_id: int, step_id: int, body: DrillReceipt, user=fastapi.Depends(get_current_user), session=fastapi.Depends(get_async_session)):
+    """Bind one owned, verified drill receipt to exactly the current plan step."""
+    row = (await session.execute(sa.select(LearningPlanAssignment).where(LearningPlanAssignment.id == assignment_id, LearningPlanAssignment.student_id == user.id).with_for_update())).scalar_one_or_none()
+    if row is None:
+        raise fastapi.HTTPException(404, "Learning plan not found.")
+    await require_owned_enrollment(session, user.id, row.course_id)
+    if row.status != "active":
+        raise fastapi.HTTPException(409, "This plan is no longer in progress.")
+    view = (await service.assignment_views(session, [row]))[0]
+    current = next((s for s in view["steps"] if s["status"] == "current"), None)
+    if current is None or current["id"] != step_id or current["kind"] != "drill":
+        raise fastapi.HTTPException(409, "This is not the drill step you are on.")
+    receipt = await session.get(PracticeDrillCompletion, body.completion_id)
+    if receipt is None or receipt.user_id != user.id or receipt.module != current["module"] or receipt.completed_at < row.created_at:
+        raise fastapi.HTTPException(409, "This drill receipt cannot complete this plan step.")
+    used = (await session.execute(sa.select(LearningPlanStepProgress.id).where(LearningPlanStepProgress.evidence_kind == "drill_completion", LearningPlanStepProgress.evidence_id == receipt.id))).scalar_one_or_none()
+    if used is not None:
+        raise fastapi.HTTPException(409, "This drill receipt was already used by a learning plan.")
+    session.add(LearningPlanStepProgress(assignment_id=row.id, step_id=step_id, evidence_kind="drill_completion", evidence_id=receipt.id, completed_at=receipt.completed_at))
     await session.commit()
     return (await service.assignment_views(session, [row]))[0]

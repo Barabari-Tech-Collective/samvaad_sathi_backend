@@ -83,19 +83,9 @@ def plan_view(plan, steps):
 
 async def _evidence(session, assignment, step, since):
     if step.kind == "drill":
-        row = (
-            await session.execute(
-                sa.select(PracticeDrillCompletion.id, PracticeDrillCompletion.completed_at)
-                .where(
-                    PracticeDrillCompletion.user_id == assignment.student_id,
-                    PracticeDrillCompletion.module == step.module,
-                    PracticeDrillCompletion.completed_at >= since,
-                )
-                .order_by(PracticeDrillCompletion.completed_at)
-                .limit(1)
-            )
-        ).first()
-        return ("drill_completion", row.id, row.completed_at) if row else None
+        # A generic drill receipt is not enough: it has no course/plan identity. The learner
+        # must explicitly bind an owned receipt to the current step through the guarded route.
+        return None
     if step.kind == "mock":
         row = (
             await session.execute(
