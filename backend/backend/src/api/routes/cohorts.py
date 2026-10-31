@@ -363,10 +363,11 @@ class Assign(BaseModel):
     """One action for every member of a cohort that this person may act for."""
 
     request_key: UUID
-    kind: Literal["drill", "mock", "opening"]
+    kind: Literal["drill", "mock", "opening", "plan"]
     module: Literal["warm_up", "think_fast"] | None = None
     job_profile_id: int | None = Field(None, ge=1)
     opportunity_id: int | None = Field(None, ge=1)
+    plan_id: int | None = Field(None, ge=1)
     reason: str = Field(min_length=10, max_length=1000)
     note: str | None = Field(None, max_length=2000)
     due_date: dt.date | None = None
@@ -417,7 +418,29 @@ async def assign_to_cohort(
     names = {m.id: m.name for m in members}
     done, skipped = [], []
 
-    if body.kind in ("drill", "mock"):
+    if body.kind == "plan":
+        from src.api.routes import learning_plans
+        from src.api.routes.course_workspace import _shared_student_predicate
+
+        if body.plan_id is None:
+            raise fastapi.HTTPException(422, "Choose a learning plan.")
+        learning_plans.require(user, "create")
+        coaching = await _shared_student_predicate(course_id, user, session, coaching_only=True)
+        allowed = set(
+            (await session.execute(sa.select(User.id).where(User.id.in_(names), coaching))).scalars()
+        )
+        for sid, name in names.items():
+            if sid not in allowed:
+                skipped.append({"id": sid, "name": name, "reason": "Not sharing practice for coaching in this course."})
+                continue
+            await learning_plans.create_assignment(
+                session, user, course_id, sid,
+                learning_plans.Assign(request_key=body.request_key, plan_id=body.plan_id,
+                                      reason=body.reason, due_date=body.due_date),
+                request_key=str(uuid5(body.request_key, str(sid))),
+            )
+            done.append({"id": sid, "name": name})
+    elif body.kind in ("drill", "mock"):
         if (body.kind == "drill") != (body.module is not None) or (
             (body.kind == "mock") != (body.job_profile_id is not None)
         ):
