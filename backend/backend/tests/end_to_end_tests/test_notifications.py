@@ -138,3 +138,43 @@ async def test_reschedule_and_cancel_supersede_old_reminders(world):
                                          send=lambda e, p: sent.append(e) or "sent")
     assert sent == ["cancelled"]
     assert all(d.status in ("superseded", "sent") for d in await deliveries(factory))
+
+
+async def test_operations_retries_a_failed_answer_once_with_the_same_recording(world, monkeypatch):
+    from src.models.db.interview import Interview
+    from src.models.db.question_attempt import QuestionAttempt
+    from src.worker import queue
+
+    c, factory, ids = world
+    now = dt.datetime.now(UTC)
+    async with factory() as s:
+        interview = Interview(user_id=ids["student"], track="Analyst", interview_mode="assessment", status="completed")
+        s.add(interview)
+        await s.flush()
+        attempt = QuestionAttempt(
+            interview_id=interview.id, question_text="Explain a join.", audio_url="s3://bucket/answer.webm",
+            answer_kind="audio", answer_checksum="a" * 64, answer_version=1, answer_saved_at=now,
+            transcription_status="failed", transcription_updated_at=now - dt.timedelta(minutes=30),
+            transcription_error="Speech feedback could not be completed.",
+        )
+        s.add(attempt)
+        await s.commit()
+        attempt_id = attempt.id
+    queued = []
+
+    async def fake_enqueue(name, **kwargs):
+        queued.append((name, kwargs))
+        return "job-1"
+
+    monkeypatch.setattr(queue, "enqueue_job", fake_enqueue)
+    listed = (await c.get("/v2/operations/answers", headers=as_("admin"))).json()["items"]
+    assert [(i["id"], i["state"]) for i in listed] == [(attempt_id, "failed")]
+    assert "audio" not in str(listed) and "s3://" not in str(listed)
+    assert (await c.get("/v2/operations/answers", headers=as_("plain"))).status_code == 403
+    r = await c.post(f"/v2/operations/answers/{attempt_id}/retry", headers=as_("admin"))
+    assert r.status_code == 200, r.text
+    assert queued[0][0] == "process_answer_transcription_task"
+    assert queued[0][1]["question_attempt_id"] == attempt_id and queued[0][1]["checksum"] == "a" * 64
+    # The state was reserved, so a second click cannot start a second job.
+    assert (await c.post(f"/v2/operations/answers/{attempt_id}/retry", headers=as_("admin"))).status_code == 409
+    assert len(queued) == 1
