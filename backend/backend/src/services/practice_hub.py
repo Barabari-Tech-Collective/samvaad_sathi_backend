@@ -21,6 +21,7 @@ from src.models.db.interview import Interview
 from src.models.db.interview_question import InterviewQuestion
 from src.models.db.pacing_practice import PacingPracticeSession
 from src.models.db.practice_drill_completion import PracticeDrillCompletion
+from src.models.db.pronunciation_practice import PronunciationPractice
 from src.models.db.question_attempt import QuestionAttempt
 from src.models.db.structure_practice import StructurePractice, StructurePracticeAnswer
 from src.models.db.summary_report import SummaryReport
@@ -487,7 +488,17 @@ async def build_practice_hub(
         for value in (await session.execute(completion_stmt)).scalars().all()
         if value
     ]
-    drill_times = pacing_times + structure_times + completion_times
+    pronunciation_stmt = sqlalchemy.select(PronunciationPractice.created_at).where(
+        PronunciationPractice.user_id == user_id,
+        PronunciationPractice.status == "completed",
+        PronunciationPractice.created_at >= activity_window_start,
+    )
+    pronunciation_times = [
+        value
+        for value in (await session.execute(pronunciation_stmt)).scalars().all()
+        if value
+    ]
+    drill_times = pacing_times + structure_times + completion_times + pronunciation_times
 
     return PracticeHubResponse(
         activity=PracticeHubActivity(

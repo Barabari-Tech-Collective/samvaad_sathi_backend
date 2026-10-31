@@ -16,6 +16,7 @@ from src.models.db.interview import Interview
 from src.models.db.job_profile import JobProfile
 from src.models.db.learning_plan import LearningPlanStepProgress
 from src.models.db.practice_drill_completion import PracticeDrillCompletion
+from src.models.db.pacing_practice import PacingPracticeSession
 from src.models.db.practice_governance import PracticeConsent
 from src.models.db.user import User
 from .test_fixed_question_rounds import db, pytestmark  # noqa: F401
@@ -259,3 +260,30 @@ async def test_mock_step_only_accepts_the_assigned_course_and_role(plans):
         await s.commit()
     advanced = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
     assert advanced["steps"][2]["status"] == "current"
+
+
+async def test_pacing_session_can_only_bind_to_its_current_pace_step(plans):
+    c, factory, ids = plans
+    plan = (await c.post("/v2/learning-plans", headers=as_("admin"), json={
+        "request_key": str(uuid.uuid4()), "title": "Control your pace",
+        "goal": "Use one recorded pacing session to practise a steady delivery.",
+    })).json()
+    plan = (await c.put(f"/v2/learning-plans/{plan['id']}/steps", headers=as_("admin"), json={
+        "expected_row_version": plan["row_version"],
+        "steps": [{"kind": "drill", "module": "pace", "title": "Record a pacing response"}],
+    })).json()
+    plan = (await c.post(f"/v2/learning-plans/{plan['id']}/publish", headers=as_("admin"), json={
+        "expected_row_version": plan["row_version"]
+    })).json()
+    assignment = await assign_plan(c, ids, plan)
+    async with factory() as s:
+        session = PacingPracticeSession(
+            user_id=ids["student"], level=1, prompt_text="Explain your project.",
+            prompt_index=0, status="completed", client_request_id=str(uuid.uuid4()),
+        )
+        s.add(session)
+        await s.commit()
+        session_id = session.id
+    url = f"/v2/learning-plans/me/{assignment['id']}/steps/{assignment['steps'][0]['id']}/drill-session"
+    assert (await c.post(url, headers=as_("student"), json={"session_id": session_id})).status_code == 200
+    assert (await c.post(url, headers=as_("student"), json={"session_id": session_id})).status_code == 409

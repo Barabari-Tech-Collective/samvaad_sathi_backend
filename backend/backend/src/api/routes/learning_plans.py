@@ -31,6 +31,9 @@ from src.models.db.learning_plan import (
 )
 from src.models.db.practice_governance import PracticeDashboardAuditEvent
 from src.models.db.practice_drill_completion import PracticeDrillCompletion
+from src.models.db.pronunciation_practice import PronunciationPractice
+from src.models.db.structure_practice import StructurePractice, StructurePracticeAnswer
+from src.models.db.pacing_practice import PacingPracticeSession
 from src.services import learning_plans as service
 from src.services.coaching_assignments import authorize_staff, lock_student, require_owned_enrollment
 from src.services.feature_access import permits
@@ -81,6 +84,10 @@ class Step(BaseModel):
 
 class DrillReceipt(BaseModel):
     completion_id: int = Field(ge=1)
+
+
+class DrillSession(BaseModel):
+    session_id: int = Field(ge=1)
 
 
 class Steps(BaseModel):
@@ -640,4 +647,107 @@ async def bind_drill_completion(assignment_id: int, step_id: int, body: DrillRec
     except sa.exc.IntegrityError:
         await session.rollback()
         raise fastapi.HTTPException(409, "This drill receipt was already used by a learning plan.")
+    return (await service.assignment_views(session, [row]))[0]
+
+
+@router.post("/me/{assignment_id}/steps/{step_id}/drill-session")
+async def bind_drill_session(
+    assignment_id: int,
+    step_id: int,
+    body: DrillSession,
+    user=fastapi.Depends(get_current_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Bind one completed, server-owned specialist drill session to its exact plan step."""
+    row = (
+        await session.execute(
+            sa.select(LearningPlanAssignment)
+            .where(LearningPlanAssignment.id == assignment_id, LearningPlanAssignment.student_id == user.id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise fastapi.HTTPException(404, "Learning plan not found.")
+    await require_owned_enrollment(session, user.id, row.course_id)
+    if row.status != "active":
+        raise fastapi.HTTPException(409, "This plan is no longer in progress.")
+    view = (await service.assignment_views(session, [row]))[0]
+    current = next((step for step in view["steps"] if step["status"] == "current"), None)
+    if current is None or current["id"] != step_id or current["kind"] != "drill":
+        raise fastapi.HTTPException(409, "This is not the drill step you are on.")
+    module = current["module"]
+    evidence_kind, completed_at = None, None
+    if module == "pronunciation":
+        record = (
+            await session.execute(
+                sa.select(PronunciationPractice)
+                .where(
+                    PronunciationPractice.id == body.session_id,
+                    PronunciationPractice.user_id == user.id,
+                    PronunciationPractice.status == "completed",
+                    PronunciationPractice.created_at >= row.created_at,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if record:
+            evidence_kind, completed_at = "pronunciation_session", record.created_at
+    elif module == "structure":
+        record = (
+            await session.execute(
+                sa.select(StructurePractice)
+                .where(
+                    StructurePractice.id == body.session_id,
+                    StructurePractice.user_id == user.id,
+                    StructurePractice.created_at >= row.created_at,
+                    sa.exists(
+                        sa.select(StructurePracticeAnswer.id).where(
+                            StructurePracticeAnswer.practice_id == StructurePractice.id,
+                            StructurePracticeAnswer.analyzed_at.is_not(None),
+                        )
+                    ),
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if record:
+            evidence_kind, completed_at = "structure_practice", record.updated_at
+    elif module == "pace":
+        record = (
+            await session.execute(
+                sa.select(PacingPracticeSession)
+                .where(
+                    PacingPracticeSession.id == body.session_id,
+                    PacingPracticeSession.user_id == user.id,
+                    PacingPracticeSession.status == "completed",
+                    PacingPracticeSession.updated_at >= row.created_at,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if record:
+            evidence_kind, completed_at = "pacing_session", record.updated_at
+    if evidence_kind is None or completed_at is None:
+        raise fastapi.HTTPException(409, "This completed session cannot finish this plan step.")
+    used = (
+        await session.execute(
+            sa.select(LearningPlanStepProgress.id).where(
+                LearningPlanStepProgress.evidence_kind == evidence_kind,
+                LearningPlanStepProgress.evidence_id == body.session_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if used is not None:
+        raise fastapi.HTTPException(409, "This practice session was already used by a learning plan.")
+    session.add(
+        LearningPlanStepProgress(
+            assignment_id=row.id, step_id=step_id, evidence_kind=evidence_kind,
+            evidence_id=body.session_id, completed_at=completed_at,
+        )
+    )
+    try:
+        await session.commit()
+    except sa.exc.IntegrityError:
+        await session.rollback()
+        raise fastapi.HTTPException(409, "This practice session was already used by a learning plan.")
     return (await service.assignment_views(session, [row]))[0]

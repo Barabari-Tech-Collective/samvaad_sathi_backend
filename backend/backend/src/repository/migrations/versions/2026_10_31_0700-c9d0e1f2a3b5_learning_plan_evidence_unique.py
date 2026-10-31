@@ -13,9 +13,12 @@ def upgrade():
     op.create_index(
         "uq_learning_plan_drill_evidence",
         "learning_plan_step_progress",
-        ["evidence_id"],
+        ["evidence_kind", "evidence_id"],
         unique=True,
-        postgresql_where="evidence_kind = 'drill_completion'",
+        postgresql_where=(
+            "evidence_kind IN ('drill_completion', 'pronunciation_session', "
+            "'structure_practice', 'pacing_session')"
+        ),
     )
 
 

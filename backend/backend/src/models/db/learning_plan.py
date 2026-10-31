@@ -97,12 +97,17 @@ class LearningPlanStepProgress(Base):
         sa.UniqueConstraint("assignment_id", "step_id", name="uq_learning_plan_step_progress"),
         sa.Index(
             "uq_learning_plan_drill_evidence",
+            "evidence_kind",
             "evidence_id",
             unique=True,
-            postgresql_where=sa.text("evidence_kind = 'drill_completion'"),
+            postgresql_where=sa.text(
+                "evidence_kind IN ('drill_completion', 'pronunciation_session', "
+                "'structure_practice', 'pacing_session')"
+            ),
         ),
         sa.CheckConstraint(
-            "evidence_kind IN ('drill_completion', 'interview', 'reflection')",
+            "evidence_kind IN ('drill_completion', 'pronunciation_session', "
+            "'structure_practice', 'pacing_session', 'interview', 'reflection')",
             name="ck_learning_plan_progress_evidence",
         ),
     )

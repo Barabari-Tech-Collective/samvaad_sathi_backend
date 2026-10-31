@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 from fastapi import Form, UploadFile, File
+import sqlalchemy as sa
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.dependencies.auth import get_current_user
@@ -43,6 +44,7 @@ from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.repository.crud.pronunciation_practice import (
     PronunciationPracticeCRUDRepository,
 )
+from src.models.db.pronunciation_practice import PronunciationPractice
 from src.repository.crud.structure_practice import (
     StructurePracticeCRUDRepository,
     StructurePracticeAnswerCRUDRepository,
@@ -1509,6 +1511,39 @@ async def create_pronunciation_practice(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create pronunciation practice session",
         )
+
+
+@router.post(
+    path="/pronunciation/{practice_id}/complete",
+    name="pronunciation:complete",
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Mark a completed pronunciation session after the learner reaches its final word",
+)
+async def complete_pronunciation_practice(
+    practice_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    pronunciation_repo: PronunciationPracticeCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=PronunciationPracticeCRUDRepository)
+    ),
+) -> dict[str, int | str]:
+    record = (
+        await pronunciation_repo.async_session.execute(
+            sa.select(PronunciationPractice)
+            .where(
+                PronunciationPractice.id == practice_id,
+                PronunciationPractice.user_id == current_user.id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        raise fastapi.HTTPException(404, "Pronunciation practice session not found.")
+    if record.status not in {"active", "completed"} or not isinstance(record.words, list) or not record.words:
+        raise fastapi.HTTPException(409, "This pronunciation session cannot be completed.")
+    if record.status == "active":
+        record.status = "completed"
+        await pronunciation_repo.async_session.commit()
+    return {"practice_id": record.id, "status": "completed"}
 
 
 @router.get(
