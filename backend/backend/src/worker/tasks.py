@@ -1108,3 +1108,18 @@ async def synchronize_sampark_enrollments_task(ctx: dict):
         raise
     finally:
         await session.close()
+
+
+async def dispatch_notification_deliveries_task(ctx: dict):
+    """Send due interview emails and reminders; retry failures; supersede stale ones."""
+    from src.repository.database import async_db
+    from src.services.notifications import dispatch_due
+
+    session = async_db.get_session()
+    try:
+        return await dispatch_due(session)
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()

@@ -35,6 +35,7 @@ from src.services.analytics import (
     _extract_speech_score,
 )
 from src.services.course_access import grants_for, student_predicate
+from src.services import notifications
 from src.services.feature_access import permits
 from src.services.people import student_interview, student_only
 from sqlalchemy.orm.attributes import flag_modified
@@ -492,6 +493,10 @@ async def release_ai_result(
     audit(
         session, user, "interview", interview.id, "assessment_result_released",
         body.reason, {"student_id": interview.user_id, "course_id": interview.course_id},
+    )
+    notifications.notify(
+        session, interview.user_id, "assessment_result_released", "Your assessment result is ready",
+        "Your feedback has been reviewed and released.", "/assessments", ("interview", interview.id),
     )
     await session.commit()
     return {"id": interview.id, "released_at": now}

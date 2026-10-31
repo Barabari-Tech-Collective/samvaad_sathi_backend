@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.session import get_async_session
-from src.api.routes.human_interviews import email_payload, queue_email, staff_row
+from src.api.routes.human_interviews import staff_row
+from src.services import notifications
 from src.models.db.human_interview import HumanInterview
 from src.models.db.human_scorecard import HumanScorecard
 from src.models.db.user import User
@@ -263,6 +264,11 @@ async def review(
         "human_scorecard_approved" if body.decision == "approve" else "human_scorecard_returned",
         body.note,
     )
+    if body.decision == "return" and card.submitted_by:
+        notifications.notify(
+            session, card.submitted_by, "scorecard_returned", "A scorecard was returned to you",
+            None, f"/dashboard/samvaad/assessments/human/{row.id}", ("human_interview", row.id),
+        )
     await session.commit()
     await session.refresh(card)
     return view(card, row, user)
@@ -303,9 +309,8 @@ async def release(
     row.result_released_at = dt.datetime.now(UTC)
     row.version += 1
     service.audit(session, user, row, "human_interview_result_released", "Released the approved scorecard.")
-    payload = await email_payload(session, row)
+    await notifications.human_event(session, row, "result")
     await session.commit()
-    queue_email(background, "result", payload)
     await session.refresh(card)
     return view(card, row, user)
 
@@ -324,7 +329,7 @@ async def interviewers(
     await service.authorize(user, course_id, session, "create")
     people = (
         await session.execute(
-            sa.select(User.id, User.name, User.feature_permissions, User.is_admin, User.is_super_admin)
+            sa.select(User)
             .where(
                 User.id != user.id,
                 sa.or_(
@@ -342,12 +347,12 @@ async def interviewers(
             .order_by(User.name)
             .limit(100)
         )
-    ).all()
+    ).scalars().all()
     return {
         "items": [
             {"id": p.id, "name": p.name}
             for p in people
-            if p.is_admin or p.is_super_admin
+            if is_admin_user(p)
             or (isinstance(p.feature_permissions, dict)
                 and permits(p.feature_permissions, "human_interviews", "update"))
         ]

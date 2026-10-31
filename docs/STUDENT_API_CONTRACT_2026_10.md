@@ -128,3 +128,36 @@ Once released, the same calls return the full report.
 Staff may correct an AI assessment score. The report then carries the corrected percentages, and,
 if staff wrote one, `uncertaintyNotice` reads "Your score was updated after review. …". No new
 fields.
+
+---
+
+## 6. Notifications (new)
+
+Saved in-app messages. Nothing private is ever written into one; opening the link checks current access.
+Created for: a human interview scheduled, rescheduled, cancelled or its result released; an AI
+assessment result released; a mock interview, learning plan or coaching exercise assigned; an opening
+decision released.
+
+### `GET v2/notifications/me?unread_only=false&limit=30`
+```json
+{ "unread": 2, "items": [
+  { "id": 9, "kind": "human_interview_rescheduled", "title": "Interview time changed: Technical panel",
+    "body": "Your interview has a new time.", "href": "/human-interviews",
+    "created_at": "...", "read": false } ] }
+```
+`href` is a student-app path (`/human-interviews`, `/assessments`, `/mock-interviews`, `/coaching`,
+`/opportunity-outcomes`). Use `unread` for a badge; poll about once a minute.
+
+### `POST v2/notifications/me/{id}/read` and `POST v2/notifications/me/read-all`
+Marks one, or all, as read. Only the signed-in person's own can be changed.
+
+Add `v2/notifications/` to the student app's allowed path list in `session-axios.ts`.
+
+Emails about interviews are now sent by the worker (within about a minute), from the interview as it is
+at that moment. A reminder goes out about 24 hours and 1 hour before the start, and is dropped if the
+time changed or the interview was cancelled. The dashboard card is correct whether or not an email
+arrived.
+
+## 7. Human interview scorecards (staff only; no student change)
+Students still see only the released `result` and `feedback`, exactly as before. Private notes and
+the reviewer's note are never returned by any student endpoint.

@@ -170,6 +170,22 @@ def build(event: str, data: dict) -> tuple[str, str, str]:
             note=data.get("instructions"),
             button="See the new time",
         )
+    elif event == "reminder":
+        subject = f"Reminder: your interview {data['title']} is coming up"
+        html, text = render(
+            preheader=f"{day}, {time}. Join from Samvaad Saathi.",
+            eyebrow="Interview reminder",
+            heading="Your interview is coming up",
+            greeting_name=name,
+            paragraphs=[
+                "This is a reminder of your interview. Use the date and time below.",
+                "Open Samvaad Saathi and press Join when it is time. If anything has changed, the Samvaad page always shows the current details.",
+            ],
+            details=details,
+            note_title="What to prepare",
+            note=data.get("instructions"),
+            button="See interview and join",
+        )
     elif event == "cancelled":
         subject = f"Interview cancelled: {data['title']}"
         html, text = render(

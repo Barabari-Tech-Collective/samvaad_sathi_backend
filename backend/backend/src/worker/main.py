@@ -12,6 +12,7 @@ from arq.worker import func
 
 from src.worker.settings import redis_settings
 from src.worker.tasks import (
+    dispatch_notification_deliveries_task,
     generate_bulk_ats_feedback_task,
     generate_questions_task,
     process_answer_transcription_task,
@@ -34,6 +35,7 @@ class WorkerSettings:
         purge_expired_bulk_ats_batches_task,
     ]
     cron_jobs = [
+        cron(dispatch_notification_deliveries_task, minute=set(range(60)), run_at_startup=False, timeout=120),
         cron(deliver_resume_files, minute=set(range(60)), run_at_startup=True, timeout=300),
         cron(synchronize_sampark_enrollments_task,minute=set(range(0,60,5)),run_at_startup=False),
         cron(

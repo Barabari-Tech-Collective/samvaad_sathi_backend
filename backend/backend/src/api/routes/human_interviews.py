@@ -18,6 +18,7 @@ from src.models.db.user import User
 from src.services import human_interviews as service
 from src.services.email.human_interview_emails import build as build_email
 from src.services.email.sender import send_email
+from src.services import notifications
 
 router = fastapi.APIRouter(prefix="/v2/human-interviews", tags=["human-interviews"])
 
@@ -423,9 +424,8 @@ async def create(
         "human_interview_scheduled",
         "Host scheduled an external Google Meet interview; no attendance inferred.",
     )
-    payload = await email_payload(session, row)
+    await notifications.human_event(session, row, "scheduled")
     await session.commit()
-    queue_email(background, "scheduled", payload)
     return service.metadata(row, now, can_manage=service.permitted(user, "update"), staff=True)
 
 
@@ -469,10 +469,9 @@ async def close(
     )
     row.version += 1
     service.audit(session, user, row, "human_interview_host_reported", body.reason)
-    payload = await email_payload(session, row)
-    await session.commit()
     if body.status == "cancelled":
-        queue_email(background, "cancelled", payload)
+        await notifications.human_event(session, row, "cancelled")
+    await session.commit()
     no_store(response)
     return service.metadata(row, now, staff=True)
 
@@ -543,9 +542,8 @@ async def reschedule(
         "human_interview_rescheduled",
         f"{body.reason} (was {previous})",
     )
-    payload = await email_payload(session, row)
+    await notifications.human_event(session, row, "rescheduled")
     await session.commit()
-    queue_email(background, "rescheduled", payload)
     no_store(response)
     return service.metadata(
         row, now, can_manage=service.permitted(user, "update"), staff=True
@@ -601,10 +599,9 @@ async def record_outcome(
         else "human_interview_result_saved",
         f"Result {body.result}",
     )
-    payload = await email_payload(session, row)
-    await session.commit()
     if body.release:
-        queue_email(background, "result", payload)
+        await notifications.human_event(session, row, "result")
+    await session.commit()
     no_store(response)
     return service.metadata(
         row, now, can_manage=service.permitted(user, "update"), staff=True

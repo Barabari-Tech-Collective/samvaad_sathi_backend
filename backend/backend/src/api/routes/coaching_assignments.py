@@ -16,6 +16,7 @@ from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.services.feature_access import permits
 from src.api.dependencies.session import get_async_session
 from src.models.db.coaching_assignment import CoachingAssignment
+from src.services import notifications
 from src.services.coaching_assignments import (
     authorize_staff,
     serialize,
@@ -209,6 +210,10 @@ async def create_assignment(
     try:
         await session.flush()
         audit(session, user.id, row, "coaching_assignment_created", body.reason)
+        notifications.notify(
+            session, student_id, "coaching_assigned", "Your teacher gave you practice to do",
+            None, "/coaching", ("coaching_assignment", row.id),
+        )
         await session.commit()
     except IntegrityError:
         await session.rollback()

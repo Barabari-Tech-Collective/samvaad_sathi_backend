@@ -23,6 +23,7 @@ from src.models.db.interview import Interview
 from src.models.db.job_profile import JobProfile
 from src.models.db.mock_assignment import MockInterviewAssignment
 from src.models.db.practice_governance import PracticeDashboardAuditEvent
+from src.services import notifications
 from src.services.coaching_assignments import authorize_staff, lock_student
 from src.services.feature_access import permits
 
@@ -242,6 +243,11 @@ async def create_mock_assignment(
     try:
         await session.flush()
         audit(session, user.id, row, "mock_assignment_created", body.reason)
+        notifications.notify(
+            session, student_id, "mock_assigned", "A mock interview was assigned to you",
+            "Your teacher asked you to take a mock interview.", "/mock-interviews",
+            ("mock_assignment", row.id),
+        )
         await session.commit()
     except IntegrityError:
         await session.rollback()

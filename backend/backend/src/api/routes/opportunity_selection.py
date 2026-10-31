@@ -368,6 +368,14 @@ async def release(
     service.audit(
         session, user, opening, row, "opportunity_outcomes_released", body.reason
     )
+    from src.services import notifications
+
+    for item in (row.snapshot or {}).get("items", []):
+        notifications.notify(
+            session, item["student_id"], "opportunity_outcome_released",
+            "An opening decision is ready", None, "/opportunity-outcomes",
+            ("opportunity", opening.id),
+        )
     await session.commit()
     return service.metadata(row, opening)
 

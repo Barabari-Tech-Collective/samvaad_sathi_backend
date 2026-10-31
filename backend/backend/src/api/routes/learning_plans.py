@@ -35,6 +35,7 @@ from src.models.db.pronunciation_practice import PronunciationPractice
 from src.models.db.structure_practice import StructurePractice, StructurePracticeAnswer
 from src.models.db.pacing_practice import PacingPracticeSession
 from src.services import learning_plans as service
+from src.services import notifications
 from src.services.coaching_assignments import authorize_staff, lock_student, require_owned_enrollment
 from src.services.feature_access import permits
 
@@ -434,6 +435,10 @@ async def create_assignment(session, user, course_id, student_id, body, *, reque
     await session.flush()
     audit(session, user.id, "learning_plan_assignment", row.id, "learning_plan_assigned", body.reason,
           {"course_id": course_id, "student_id": student_id, "plan_id": plan.id, "plan_version": plan.version})
+    notifications.notify(
+        session, student_id, "learning_plan_assigned", "A learning plan was given to you",
+        plan.title, "/coaching", ("learning_plan_assignment", row.id),
+    )
     return row, True
 
 
