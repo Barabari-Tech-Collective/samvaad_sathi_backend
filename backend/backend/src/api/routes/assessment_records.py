@@ -8,9 +8,11 @@ reasons are separate fields. Access follows the rules of the page each record ca
 """
 
 import datetime as dt
+from typing import Literal
 
 import fastapi
 import sqlalchemy as sa
+from pydantic import BaseModel, Field, field_validator
 
 from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.session import get_async_session
@@ -33,11 +35,90 @@ from src.services.analytics import (
     _extract_speech_score,
 )
 from src.services.course_access import grants_for, student_predicate
+from src.services.feature_access import permits
 from src.services.people import student_interview, student_only
+from src.services.result_release import withheld
 
 router = fastapi.APIRouter(prefix="/v2/assessment-records", tags=["assessment-records"])
 
 NOT_FOUND = "Assessment not found within your access."
+
+RELEASE_RULES = {
+    "immediate": "Shown to the student as soon as scoring finishes.",
+    "review": "Held until someone with permission to publish assessments releases it.",
+}
+
+
+class Reasoned(BaseModel):
+    reason: str = Field(min_length=10, max_length=1000)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def trim(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class ReleaseRule(Reasoned):
+    result_release: Literal["immediate", "review"]
+
+
+def may_release(user):
+    """Releasing a held AI result belongs to people who may publish assessments."""
+    return is_admin_user(user) or (
+        isinstance(user.feature_permissions, dict)
+        and permits(user.feature_permissions, "interview_authoring", "publish")
+    )
+
+
+def audit(session, user, target_type, target_id, action, reason, details):
+    session.add(
+        PracticeDashboardAuditEvent(
+            actor_id=user.id,
+            action=action,
+            purpose="assessment_release",
+            target_type=target_type,
+            target_id=str(target_id),
+            reason=reason,
+            event_metadata=details,
+        )
+    )
+
+
+async def ai_history(session, interview_id):
+    rows = (
+        await session.execute(
+            sa.select(PracticeDashboardAuditEvent, User.name)
+            .outerjoin(User, User.id == PracticeDashboardAuditEvent.actor_id)
+            .where(
+                PracticeDashboardAuditEvent.target_type == "interview",
+                PracticeDashboardAuditEvent.target_id == str(interview_id),
+            )
+            .order_by(PracticeDashboardAuditEvent.id)
+        )
+    ).all()
+    return [
+        {"action": e.action, "by": name, "at": e.created_at, "reason": e.reason}
+        for e, name in rows
+    ]
+
+
+async def next_held(session, after_id):
+    """The oldest other result still waiting, so a reviewer can move straight on."""
+    return (
+        await session.execute(
+            sa.select(Interview.id)
+            .where(
+                Interview.interview_mode == "assessment",
+                Interview.result_release == "review",
+                Interview.result_released_at.is_(None),
+                Interview.status == "completed",
+                Interview.id != after_id,
+                student_interview(),
+            )
+            .order_by(Interview.completed_at.asc().nullslast(), Interview.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 # Truthful, small statuses (pack sec 12).
 AI_STATUS = {
@@ -190,12 +271,18 @@ async def ai_record(
             if scored
             else None,
             # AI feedback reaches the student when scoring finishes; nothing holds it back.
-            "released": scored,
-            "release_rule": "Shown to the student as soon as scoring finishes.",
+            "released": scored and not withheld(interview),
+            "released_at": interview.result_released_at,
+            "held": interview.status == "completed" and withheld(interview),
+            "release_rule": RELEASE_RULES[interview.result_release],
         },
         "student_feedback": None,
         "integrity": await integrity(user, interview, session),
-        "history": None,
+        "history": await ai_history(session, interview.id),
+        "can_release": interview.status == "completed"
+        and withheld(interview)
+        and may_release(user),
+        "next_held": await next_held(session, interview.id) if may_release(user) else None,
         "links": {"scores": f"/dashboard/samvaad/interviews/{interview.id}"},
     }
 
@@ -298,4 +385,96 @@ async def human_record(
         "links": {
             "manage": f"/dashboard/samvaad/human-interviews?course={row.course_id}",
         },
+    }
+
+
+@router.post("/ai/{interview_id}/release")
+async def release_ai_result(
+    interview_id: int,
+    body: Reasoned,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    row = (
+        await session.execute(
+            sa.select(Interview, User)
+            .join(User, User.id == Interview.user_id)
+            .where(
+                Interview.id == interview_id,
+                Interview.interview_mode == "assessment",
+                student_interview(),
+            )
+            .with_for_update(of=Interview)
+        )
+    ).first()
+    if row is None or not await ai_reachable(user, row[0], row[1], session):
+        raise fastapi.HTTPException(404, NOT_FOUND)
+    interview = row[0]
+    if not may_release(user):
+        raise fastapi.HTTPException(
+            403, "Releasing results needs permission to publish assessments."
+        )
+    if interview.status != "completed" or not withheld(interview):
+        raise fastapi.HTTPException(409, "This result is not waiting to be released.")
+    now = dt.datetime.now(dt.timezone.utc)
+    interview.result_released_at, interview.result_released_by = now, user.id
+    audit(
+        session, user, "interview", interview.id, "assessment_result_released",
+        body.reason, {"student_id": interview.user_id, "course_id": interview.course_id},
+    )
+    await session.commit()
+    return {"id": interview.id, "released_at": now}
+
+
+@router.put("/templates/{job_profile_id}/release-rule")
+async def set_release_rule(
+    job_profile_id: int,
+    body: ReleaseRule,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    if not (
+        is_admin_user(user)
+        or (
+            isinstance(user.feature_permissions, dict)
+            and permits(user.feature_permissions, "interview_authoring", "update")
+        )
+    ):
+        raise fastapi.HTTPException(403, "Changing this needs permission to edit templates.")
+    profile = (
+        await session.execute(
+            sa.select(JobProfile).where(JobProfile.id == job_profile_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if profile is None or profile.interview_mode != "assessment":
+        raise fastapi.HTTPException(404, "Assessment template not found.")
+    previous = profile.result_release
+    profile.result_release = body.result_release
+    # Applies to sittings that start from now on; started ones keep the rule they began with.
+    audit(
+        session, user, "job_profile", profile.id, "assessment_release_rule_changed",
+        body.reason, {"from": previous, "to": body.result_release},
+    )
+    await session.commit()
+    return {"id": profile.id, "result_release": profile.result_release}
+
+
+@router.get("/templates/{job_profile_id}/release-rule")
+async def get_release_rule(
+    job_profile_id: int,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    profile = await session.get(JobProfile, job_profile_id)
+    if profile is None or profile.interview_mode != "assessment":
+        raise fastapi.HTTPException(404, "Assessment template not found.")
+    return {
+        "id": profile.id,
+        "result_release": profile.result_release,
+        "explanation": RELEASE_RULES[profile.result_release],
+        "can_change": is_admin_user(user)
+        or (
+            isinstance(user.feature_permissions, dict)
+            and permits(user.feature_permissions, "interview_authoring", "update")
+        ),
     }

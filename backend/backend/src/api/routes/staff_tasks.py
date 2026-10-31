@@ -156,6 +156,39 @@ async def _today(user, session, now):
     ]
 
 
+async def _release_tasks(user, session):
+    """AI assessment results held for review (pack F16), for people who may release them."""
+    from src.api.routes.assessment_records import may_release
+    from src.models.db.interview import Interview
+    from src.services.people import student_interview
+
+    if not may_release(user):
+        return []
+    n, oldest, first = (
+        await session.execute(
+            sa.select(
+                sa.func.count(Interview.id),
+                sa.func.min(Interview.completed_at),
+                sa.func.min(Interview.id),
+            ).where(
+                Interview.interview_mode == "assessment",
+                Interview.result_release == "review",
+                Interview.result_released_at.is_(None),
+                Interview.status == "completed",
+                student_interview(),
+            )
+        )
+    ).one()
+    if not n:
+        return []
+    return [_task(
+        "assessment_results_to_release", "Assessment results to release", int(n),
+        "Students see “Feedback needs review” until a result is released.",
+        "Reviewer", "Review and release",
+        f"/dashboard/samvaad/assessments/ai/{first}", True, oldest,
+    )]
+
+
 async def _review_tasks(user, session):
     """Templates waiting for a reviewer. Only admins may review and publish them."""
     if not is_admin_user(user):
@@ -285,6 +318,7 @@ async def my_tasks(
     tasks = [
         *await _human_tasks(user, session, now),
         *await _selection_tasks(user, session),
+        *await _release_tasks(user, session),
         *await _review_tasks(user, session),
         *await _operations_tasks(user, session, now),
     ]

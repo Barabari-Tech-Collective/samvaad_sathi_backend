@@ -141,7 +141,8 @@ async def test_ai_record_for_analytics_staff_only(records):
     assert body["kind"] == "ai" and body["status_label"] == "Completed"
     assert body["participants"]["student"]["id"] == users["student"]
     assert body["result"]["release_rule"].startswith("Shown to the student")
-    assert body["integrity"] is None and body["history"] is None
+    assert body["integrity"] is None and body["history"] == []
+    assert body["result"]["held"] is False and body["can_release"] is False
     assert (await get(c, f"/v2/assessment-records/ai/{ids['assessment']}", "outsider")).status_code == 404
 
 

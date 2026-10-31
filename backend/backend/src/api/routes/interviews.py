@@ -3,6 +3,7 @@ import json
 import logging
 
 import fastapi
+from src.services.result_release import withheld
 from src.api.dependencies.rate_limit import student_action_limit
 from src.services.interview_course_access import require_interview_course_access
 from src.services.interview_question_plan import planned_count, snapshotted_questions
@@ -1590,6 +1591,10 @@ async def list_my_interviews_with_summary(
                         f"Error parsing report_json for interview {interview.id}: {e}"
                     )
 
+            # A held assessment result shows no scores or advice until it is released.
+            if withheld(interview):
+                knowledge_percentage = speech_fluency_percentage = None
+                top_action_items = []
             item = InterviewItemWithSummary(
                 interview_id=interview.id,
                 track=interview.track,

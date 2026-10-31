@@ -151,6 +151,18 @@ class Interview(Base):  # type: ignore
     proctoring_violation_reason: SQLAlchemyMapped[str | None] = (
         sqlalchemy_mapped_column(sqlalchemy.String(length=32), nullable=True)
     )
+    # The template's release rule, frozen when the sitting starts (architecture pack F16).
+    result_release: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=16), nullable=False, server_default="immediate"
+    )
+    result_released_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(
+        sqlalchemy.DateTime(timezone=True), nullable=True
+    )
+    # Who released it; a plain id so Interview keeps one path to its student. The audit
+    # event carries the full record.
+    result_released_by: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.Integer, nullable=True
+    )
 
     user = relationship("User", back_populates="interviews")
     job_profile = relationship("JobProfile")

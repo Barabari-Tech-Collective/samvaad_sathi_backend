@@ -49,6 +49,11 @@ class JobProfile(Base):
     interview_mode: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=16), nullable=False, server_default="assessment", index=True
     )
+    # "immediate": the student sees the AI result when scoring finishes. "review": it waits
+    # for an authorized person to release it (architecture pack F16).
+    result_release: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=16), nullable=False, server_default="immediate"
+    )
     # Null identifies a legacy template. New authoring explicitly sets a count.
     questions_per_interview: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
         sqlalchemy.Integer, nullable=True

@@ -169,6 +169,7 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         # the non-tech flow - gets a correct snapshot without each having to
         # remember to look it up and pass it through themselves.
         interview_mode = "practice"
+        result_release = "immediate"
         question_plan = None
         from src.services.interview_question_plan import (
             configured_count,
@@ -182,6 +183,7 @@ class InterviewCRUDRepository(BaseCRUDRepository):
             profile = await self.async_session.get(JobProfile, job_profile_id)
             if profile is not None:
                 interview_mode = profile.interview_mode
+                result_release = getattr(profile, "result_release", "immediate")
                 if question_count is not None:
                     raise ValueError("The creator controls a curated interview's count")
                 if (
@@ -224,6 +226,8 @@ class InterviewCRUDRepository(BaseCRUDRepository):
             status="active",
             job_profile_id=job_profile_id,
             interview_mode=interview_mode,
+            # Only formal assessments can be held; practice is always the student's.
+            result_release=result_release if interview_mode == "assessment" else "immediate",
             question_plan=question_plan,
             expires_at=(
                 datetime.datetime.now(datetime.timezone.utc) + PRACTICE_SESSION_TTL

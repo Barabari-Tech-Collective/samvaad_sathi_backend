@@ -21,6 +21,7 @@ from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.repository.crud.summary_report import SummaryReportCRUDRepository
 from src.services.analysis import analysis_service
 from src.services.analytics_events import track_analytics_event
+from src.services.result_release import held_report, withheld
 from src.services.summary_report_v2 import SummaryReportServiceV2
 from src.services.practice_feature_controls import require_practice_feature
 
@@ -91,6 +92,8 @@ async def generate_summary_report_v2(
             interview.id,
             existing.report_json.get("reportStatus"),
         )
+        if withheld(interview):
+            return SummaryReportResponseLite(**held_report(existing.report_json))
         return SummaryReportResponseLite(**existing.report_json)
     attempt_start = time.perf_counter()
     # Fetch all question attempts for interview
@@ -196,6 +199,9 @@ async def generate_summary_report_v2(
         time.perf_counter() - request_start,
     )
 
+    # Scored and saved either way; a held result reaches staff, not yet the student.
+    if withheld(interview):
+        return SummaryReportResponseLite(**held_report(result))
     return SummaryReportResponseLite(**result)
 
 
@@ -255,4 +261,6 @@ async def get_summary_report_v2(
         interview_id,
     )
 
+    if withheld(interview):
+        return SummaryReportResponseLite(**held_report(record.report_json))
     return SummaryReportResponseLite(**record.report_json)
