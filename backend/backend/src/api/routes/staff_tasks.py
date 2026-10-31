@@ -145,7 +145,12 @@ async def _today(user, session, now):
             "student_name": name,
             "round": row.role_name or row.title,
             "can_join": interviews.joinable(row, now),
-            "href": HUMAN,
+            # Joining happens on the interviews list; otherwise open the one record.
+            "href": (
+                HUMAN
+                if interviews.joinable(row, now)
+                else f"/dashboard/samvaad/assessments/human/{row.id}"
+            ),
         }
         for row, name in rows
     ]
