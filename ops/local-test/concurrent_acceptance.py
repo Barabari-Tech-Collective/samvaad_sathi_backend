@@ -51,10 +51,19 @@ async def main():
             rows=await asyncio.gather(*(one(case) for _ in range(3) for case in cases))
             times=sorted(row['ms'] for row in rows)
             waves.append({'concurrency':concurrency,'requests':len(rows),'passed':sum(r['passed'] for r in rows),'p95Ms':times[int(.95*(len(times)-1))],'maxMs':max(times),'failures':[r for r in rows if not r['passed']]})
-    report={'scope':'Four real local identities, bounded read-only HTTP simulation; not browser, media, full journey or production capacity acceptance','apiOrigin':api_origin,'waves':waves}
+        async def today_read(_):
+            start=time.monotonic()
+            try:
+                response=await client.get(api_origin+'/api/v2/student-home/today',headers={'Authorization':'Bearer '+tokens['student']})
+                return response.status_code == 200, round((time.monotonic()-start)*1000,1)
+            except httpx.HTTPError:
+                return False, round((time.monotonic()-start)*1000,1)
+        today_rows=await asyncio.gather(*(today_read(index) for index in range(1000)))
+        today_times=sorted(row[1] for row in today_rows)
+    report={'scope':'Four real local identities, bounded read-only HTTP simulation plus 1,000 concurrent authenticated Today reads; not browser, media, full journey or production capacity acceptance','apiOrigin':api_origin,'waves':waves,'todayLoad':{'concurrency':1000,'requests':len(today_rows),'passed':sum(row[0] for row in today_rows),'p95Ms':today_times[int(.95*(len(today_times)-1))],'maxMs':max(today_times)}}
     Path('/tmp/samvaad-b21-concurrency.json').write_text(json.dumps(report,indent=2))
     print(json.dumps(report,indent=2))
-    if any(w['failures'] for w in waves):
+    if any(w['failures'] for w in waves) or report['todayLoad']['passed'] != 1000:
         raise RuntimeError('Concurrent acceptance had failures')
 
 if __name__=='__main__':
