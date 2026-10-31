@@ -25,6 +25,9 @@ class PronunciationPractice(Base):  # type: ignore
     status: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=32), nullable=False, index=True, default="active"
     )
+    completed_word_count: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(
+        sqlalchemy.Integer, nullable=False, server_default="0"
+    )
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True), nullable=False, server_default=sqlalchemy_functions.now()
     )

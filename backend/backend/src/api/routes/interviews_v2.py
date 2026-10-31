@@ -8,6 +8,7 @@ import re
 from typing import Any
 from fastapi import Form, UploadFile, File
 import sqlalchemy as sa
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.dependencies.auth import get_current_user
@@ -99,6 +100,12 @@ from src.services.analytics_events import track_analytics_event
 from src.services.practice_feature_controls import require_practice_feature
 
 logger = logging.getLogger(__name__)
+
+
+class PronunciationProgress(BaseModel):
+    word_index: int = Field(ge=0, le=99)
+
+
 FOLLOW_UP_STRATEGY = "llm_transcription_based"
 FULL_STACK_ROLE = "Full Stack Developer"
 #: Questions served from a facilitator's published bank per curated interview.
@@ -1514,6 +1521,48 @@ async def create_pronunciation_practice(
 
 
 @router.post(
+    path="/pronunciation/{practice_id}/advance",
+    name="pronunciation:advance",
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Record one ordered pronunciation-word interaction",
+)
+async def advance_pronunciation_practice(
+    practice_id: int,
+    payload: PronunciationProgress,
+    current_user=fastapi.Depends(get_current_user),
+    pronunciation_repo: PronunciationPracticeCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=PronunciationPracticeCRUDRepository)
+    ),
+) -> dict[str, int | str]:
+    record = (
+        await pronunciation_repo.async_session.execute(
+            sa.select(PronunciationPractice)
+            .where(
+                PronunciationPractice.id == practice_id,
+                PronunciationPractice.user_id == current_user.id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        raise fastapi.HTTPException(404, "Pronunciation practice session not found.")
+    total_words = len(record.words) if isinstance(record.words, list) else 0
+    if record.status != "active" or total_words == 0:
+        raise fastapi.HTTPException(409, "This pronunciation session cannot advance.")
+    if payload.word_index == record.completed_word_count - 1:
+        return {
+            "practice_id": record.id,
+            "completed_words": record.completed_word_count,
+            "status": "active",
+        }
+    if payload.word_index != record.completed_word_count or record.completed_word_count >= total_words:
+        raise fastapi.HTTPException(409, "Refresh this pronunciation session before continuing.")
+    record.completed_word_count += 1
+    await pronunciation_repo.async_session.commit()
+    return {"practice_id": record.id, "completed_words": record.completed_word_count, "status": "active"}
+
+
+@router.post(
     path="/pronunciation/{practice_id}/complete",
     name="pronunciation:complete",
     status_code=fastapi.status.HTTP_200_OK,
@@ -1538,8 +1587,11 @@ async def complete_pronunciation_practice(
     ).scalar_one_or_none()
     if record is None:
         raise fastapi.HTTPException(404, "Pronunciation practice session not found.")
-    if record.status not in {"active", "completed"} or not isinstance(record.words, list) or not record.words:
+    total_words = len(record.words) if isinstance(record.words, list) else 0
+    if record.status not in {"active", "completed"} or total_words == 0:
         raise fastapi.HTTPException(409, "This pronunciation session cannot be completed.")
+    if record.status == "active" and record.completed_word_count != total_words:
+        raise fastapi.HTTPException(409, "Complete every pronunciation word before finishing this session.")
     if record.status == "active":
         record.status = "completed"
         await pronunciation_repo.async_session.commit()
