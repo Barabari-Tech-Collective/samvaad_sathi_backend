@@ -27,6 +27,13 @@ REPORT = {
     "candidateInfo": {"interviewDate": "2026-10-30", "roleTopic": "Analyst"},
     "questionAnalysis": [],
     "finalTip": {"title": "Lead with the result", "description": "Then explain the query."},
+    "speechFluencyFeedback": {
+        "strengths": "Clear voice.",
+        "areasOfImprovement": "Fewer pauses.",
+        "ratingEmoji": "Good",
+        "ratingTitle": "Good delivery",
+        "ratingDescription": "Mostly fluent.",
+    },
     "scoreSummary": {
         "knowledgeCompetence": {
             "score": 15, "maxScore": 25, "average": 3.0, "maxAverage": 5.0,
@@ -218,6 +225,8 @@ async def test_corrections_keep_every_version_and_reach_the_student(held):
     assert kc["percentage"] == 75 and kc["score"] == 19 and kc["average"] == 3.75
     assert student["scoreSummary"]["speechAndStructure"]["percentage"] == 70
     assert student["uncertaintyNotice"].startswith("Your score was updated after review.")
+    # Speech stayed at 70 (still "Good"), so the AI's rating text is untouched.
+    assert student["speechFluencyFeedback"]["ratingDescription"] == "Mostly fluent."
 
     record = (await c.get(base, headers=as_("viewer"))).json()
     assert [v["previous"] for v in record["corrections"]] == [
@@ -229,3 +238,12 @@ async def test_corrections_keep_every_version_and_reach_the_student(held):
     assert [e["action"] for e in record["history"]][-2:] == [
         "assessment_score_corrected", "assessment_score_corrected",
     ]
+
+
+def test_rating_label_follows_a_band_change():
+    from src.services.result_release import corrected_report
+
+    out = corrected_report(REPORT, 60, 45, None)
+    assert out["speechFluencyFeedback"]["ratingEmoji"] == "Needs-Improvement"
+    assert out["speechFluencyFeedback"]["ratingDescription"].endswith("45%.")
+    assert REPORT["speechFluencyFeedback"]["ratingEmoji"] == "Good"

@@ -59,9 +59,34 @@ def current_scores(report_json: dict | None) -> dict | None:
     }
 
 
+# Speech rating bands, using the same five labels the AI is told to choose from.
+RATING_BANDS = (
+    (85, "Excellent", "Excellent delivery"),
+    (70, "Good", "Good delivery"),
+    (50, "Average", "Average delivery"),
+    (30, "Needs-Improvement", "Delivery needs improvement"),
+    (0, "Poor", "Delivery needs a lot of practice"),
+)
+
+
+def rating_for(pct: int) -> tuple[str, str]:
+    return next((emoji, title) for floor, emoji, title in RATING_BANDS if pct >= floor)
+
+
 def corrected_report(report_json: dict, knowledge: int | None, speech: int, note: str | None) -> dict:
-    """The report with corrected headline percentages; per-criterion detail is unchanged."""
+    """The report with corrected headline percentages; per-criterion detail is unchanged.
+    If the speech score moves into another rating band, the rating label follows it."""
     out = dict(report_json)
+    feedback = out.get("speechFluencyFeedback")
+    if isinstance(feedback, dict):
+        emoji, title = rating_for(speech)
+        if feedback.get("ratingEmoji") != emoji:
+            out["speechFluencyFeedback"] = {
+                **feedback,
+                "ratingEmoji": emoji,
+                "ratingTitle": title,
+                "ratingDescription": f"Updated after review: speech and structure {speech}%.",
+            }
     summary = dict(out["scoreSummary"])
     summary["speechAndStructure"] = rescale(summary["speechAndStructure"], speech)
     if knowledge is not None and summary.get("knowledgeCompetence"):
