@@ -674,6 +674,21 @@ async def generate_questions(
         resume_context = (
             getattr(current_user, "resume_text", None) if payload.use_resume else None
         )
+        if payload.use_resume:
+            # The student's confirmed project and experience notes come first so a long resume
+            # cannot push them out of the prompt (pack F10).
+            from src.services.learner_context import confirmed_text
+
+            context_session = getattr(interview_repo, "async_session", None)
+            confirmed = (
+                await confirmed_text(context_session, current_user.id)
+                if context_session is not None
+                else ""
+            )
+            if confirmed:
+                resume_context = confirmed + (
+                    "\n\nResume:\n" + resume_context if isinstance(resume_context, str) and resume_context.strip() else ""
+                )
         # Build influence knobs
         years = getattr(current_user, "years_experience", None)
         skills_json = getattr(current_user, "skills", None) or {}

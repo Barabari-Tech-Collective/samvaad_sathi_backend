@@ -50,3 +50,5 @@ from .mock_assignment import MockInterviewAssignment  # noqa: F401
 from .learning_plan import LearningPlan, LearningPlanAssignment, LearningPlanStep, LearningPlanStepProgress  # noqa: F401
 from .human_scorecard import HumanScorecard  # noqa: F401
 from .notification import Notification, NotificationDelivery  # noqa: F401
+from .learner_context import LearnerContext  # noqa: F401
+from .feedback_issue import FeedbackIssue  # noqa: F401

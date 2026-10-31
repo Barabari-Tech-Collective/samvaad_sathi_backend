@@ -243,6 +243,29 @@ async def _scorecard_tasks(user, session):
     )]
 
 
+async def _issue_tasks(user, session):
+    """Transcript or feedback problems students reported (pack F11), for content reviewers."""
+    from src.api.routes.feedback_issues import reviewer
+    from src.models.db.feedback_issue import FeedbackIssue
+
+    if not reviewer(user):
+        return []
+    n, oldest = (
+        await session.execute(
+            sa.select(sa.func.count(FeedbackIssue.id), sa.func.min(FeedbackIssue.created_at)).where(
+                FeedbackIssue.status == "open"
+            )
+        )
+    ).one()
+    if not n:
+        return []
+    return [_task(
+        "feedback_issues_open", "Reported transcript or feedback issues", int(n),
+        "A student says something looks wrong. Their saved answer is unchanged until you decide.",
+        "Content reviewer", "Review issues", "/dashboard/samvaad/issues", True, oldest,
+    )]
+
+
 async def _release_tasks(user, session):
     """AI assessment results held for review (pack F16), for people who may release them."""
     from src.api.routes.assessment_records import may_release
@@ -407,6 +430,7 @@ async def my_tasks(
         *await _selection_tasks(user, session),
         *await _support_tasks(user, session, now),
         *await _scorecard_tasks(user, session),
+        *await _issue_tasks(user, session),
         *await _release_tasks(user, session),
         *await _review_tasks(user, session),
         *await _operations_tasks(user, session, now),

@@ -161,3 +161,27 @@ arrived.
 ## 7. Human interview scorecards (staff only; no student change)
 Students still see only the released `result` and `feedback`, exactly as before. Private notes and
 the reviewer's note are never returned by any student endpoint.
+
+---
+
+## 8. Project and experience context (F10)
+
+Things a student writes and confirms about their own projects or experience. **Only confirmed items
+shape generated practice questions**, and editing a confirmed item sends it back to draft (confirm
+again). Questions already generated for an interview never change.
+
+- `GET v2/profile-context/me` → `{ items: [{id, kind: "project"|"experience", title, summary, status: "draft"|"confirmed", version, confirmed_at}], limit: 10, notice }`
+- `POST v2/profile-context/me` `{kind, title (3–120), summary (20–1500)}` → 201 item (draft). `409` past 10 items.
+- `PUT v2/profile-context/me/{id}` `{title, summary, expected_version}` → item (back to draft). `409` if stale.
+- `POST v2/profile-context/me/{id}/confirm` `{expected_version}` → item (confirmed).
+- `DELETE v2/profile-context/me/{id}` → 204.
+
+## 9. Report a transcript or feedback problem (F11)
+
+A report never changes the saved answer. A reviewer resolves it with a reason and the student gets a
+notification (kind `feedback_issue_reviewed`).
+
+- `POST v2/feedback-issues/me` `{request_key: uuid, interview_id, question_attempt_id?, kind: "transcription"|"feedback"|"language"|"other", explanation (10–2000)}` → 201 issue. Same `request_key` again → 200 with the existing one. `404` if the interview is not theirs; `422` if the answer is not part of it.
+- `GET v2/feedback-issues/me` → `{ items: [{id, interview_id, question_attempt_id, kind, explanation, status: "open"|"resolved"|"dismissed", resolution, created_at, resolved_at}] }`
+
+Add `v2/profile-context/` and `v2/feedback-issues/` to the allowed paths in `session-axios.ts`.
