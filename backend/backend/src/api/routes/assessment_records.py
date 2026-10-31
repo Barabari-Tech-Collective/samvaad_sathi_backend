@@ -37,7 +37,15 @@ from src.services.analytics import (
 from src.services.course_access import grants_for, student_predicate
 from src.services.feature_access import permits
 from src.services.people import student_interview, student_only
-from src.services.result_release import withheld
+from sqlalchemy.orm.attributes import flag_modified
+
+from src.models.db.assessment_correction import AssessmentScoreCorrection
+from src.services.result_release import (
+    rescale,
+    corrected_report,
+    current_scores,
+    withheld,
+)
 
 router = fastapi.APIRouter(prefix="/v2/assessment-records", tags=["assessment-records"])
 
@@ -56,6 +64,43 @@ class Reasoned(BaseModel):
     @classmethod
     def trim(cls, value):
         return value.strip() if isinstance(value, str) else value
+
+
+class Correction(Reasoned):
+    expected_version: int = Field(ge=0)
+    knowledge: int | None = Field(None, ge=0, le=100)
+    speech: int = Field(ge=0, le=100)
+    student_note: str | None = Field(None, max_length=500)
+
+    @field_validator("student_note", mode="before")
+    @classmethod
+    def blank(cls, value):
+        value = value.strip() if isinstance(value, str) else value
+        return value or None
+
+
+async def corrections(session, interview_id):
+    rows = (
+        await session.execute(
+            sa.select(AssessmentScoreCorrection, User.name)
+            .outerjoin(User, User.id == AssessmentScoreCorrection.corrected_by)
+            .where(AssessmentScoreCorrection.interview_id == interview_id)
+            .order_by(AssessmentScoreCorrection.version)
+        )
+    ).all()
+    return [
+        {
+            "version": c.version,
+            "knowledge": c.knowledge_pct,
+            "speech": c.speech_pct,
+            "previous": c.previous,
+            "reason": c.reason,
+            "student_note": c.student_note,
+            "by": name,
+            "at": c.created_at,
+        }
+        for c, name in rows
+    ]
 
 
 class ReleaseRule(Reasoned):
@@ -279,6 +324,8 @@ async def ai_record(
         "student_feedback": None,
         "integrity": await integrity(user, interview, session),
         "history": await ai_history(session, interview.id),
+        "corrections": await corrections(session, interview.id),
+        "can_correct": scored and may_release(user),
         "can_release": interview.status == "completed"
         and withheld(interview)
         and may_release(user),
@@ -478,3 +525,88 @@ async def get_release_rule(
             and permits(user.feature_permissions, "interview_authoring", "update")
         ),
     }
+
+
+@router.post("/ai/{interview_id}/corrections")
+async def correct_ai_score(
+    interview_id: int,
+    body: Correction,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    row = (
+        await session.execute(
+            sa.select(Interview, User)
+            .join(User, User.id == Interview.user_id)
+            .where(
+                Interview.id == interview_id,
+                Interview.interview_mode == "assessment",
+                student_interview(),
+            )
+            .with_for_update(of=Interview)
+        )
+    ).first()
+    if row is None or not await ai_reachable(user, row[0], row[1], session):
+        raise fastapi.HTTPException(404, NOT_FOUND)
+    interview = row[0]
+    if not may_release(user):
+        raise fastapi.HTTPException(
+            403, "Correcting scores needs permission to publish assessments."
+        )
+    summary = (
+        await session.execute(
+            sa.select(SummaryReport).where(SummaryReport.interview_id == interview.id)
+        )
+    ).scalar_one_or_none()
+    before = current_scores(summary.report_json if summary else None)
+    if interview.status != "completed" or before is None:
+        raise fastapi.HTTPException(409, "There is no score to correct yet.")
+    version = (
+        await session.execute(
+            sa.select(sa.func.count(AssessmentScoreCorrection.id)).where(
+                AssessmentScoreCorrection.interview_id == interview.id
+            )
+        )
+    ).scalar_one()
+    if body.expected_version != version:
+        raise fastapi.HTTPException(409, "This score changed. Refresh before correcting it.")
+    if before["knowledge"] is None and body.knowledge is not None:
+        raise fastapi.HTTPException(422, "This assessment has no knowledge score to correct.")
+    knowledge = body.knowledge if before["knowledge"] is not None else None
+    if knowledge == before["knowledge"] and body.speech == before["speech"]:
+        raise fastapi.HTTPException(422, "Change at least one score.")
+    summary.report_json = corrected_report(
+        summary.report_json, knowledge, body.speech, body.student_note
+    )
+    flag_modified(summary, "report_json")
+    # An older final report, if one exists, must agree, since some readers prefer it.
+    legacy = (
+        await session.execute(sa.select(Report).where(Report.interview_id == interview.id))
+    ).scalar_one_or_none()
+    if legacy is not None:
+        if isinstance(legacy.knowledge_competence, dict) and knowledge is not None:
+            legacy.knowledge_competence = rescale(legacy.knowledge_competence, knowledge)
+        if isinstance(legacy.speech_structure_fluency, dict):
+            legacy.speech_structure_fluency = rescale(legacy.speech_structure_fluency, body.speech)
+        parts = [p for p in (knowledge, body.speech) if p is not None]
+        overall = sum(parts) / len(parts)
+        if legacy.overall_score is not None:
+            legacy.overall_score = overall if legacy.overall_score > 10 else round(overall / 10, 2)
+    session.add(
+        AssessmentScoreCorrection(
+            interview_id=interview.id,
+            version=version + 1,
+            knowledge_pct=knowledge,
+            speech_pct=body.speech,
+            previous=before,
+            reason=body.reason,
+            student_note=body.student_note,
+            corrected_by=user.id,
+        )
+    )
+    audit(
+        session, user, "interview", interview.id, "assessment_score_corrected", body.reason,
+        {"version": version + 1, "from": before, "to": {"knowledge": knowledge, "speech": body.speech}},
+    )
+    await session.commit()
+    return {"id": interview.id, "version": version + 1}

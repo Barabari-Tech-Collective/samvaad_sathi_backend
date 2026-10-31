@@ -33,3 +33,40 @@ def held_report(report: dict) -> dict:
         "questionAnalysis": [],
         "uncertaintyNotice": HELD_NOTICE,
     }
+
+
+def rescale(part: dict, pct: int) -> dict:
+    """Move a score block to a new percentage, keeping its points and average consistent."""
+    out = dict(part)
+    out["percentage"] = pct
+    if "averagePct" in out:
+        out["averagePct"] = pct
+    if isinstance(out.get("maxScore"), (int, float)):
+        out["score"] = round(pct / 100 * out["maxScore"])
+    if isinstance(out.get("maxAverage"), (int, float)):
+        out["average"] = round(pct / 100 * out["maxAverage"], 2)
+    return out
+
+
+def current_scores(report_json: dict | None) -> dict | None:
+    summary = (report_json or {}).get("scoreSummary") or {}
+    speech = (summary.get("speechAndStructure") or {}).get("percentage")
+    if speech is None:
+        return None
+    return {
+        "knowledge": (summary.get("knowledgeCompetence") or {}).get("percentage"),
+        "speech": speech,
+    }
+
+
+def corrected_report(report_json: dict, knowledge: int | None, speech: int, note: str | None) -> dict:
+    """The report with corrected headline percentages; per-criterion detail is unchanged."""
+    out = dict(report_json)
+    summary = dict(out["scoreSummary"])
+    summary["speechAndStructure"] = rescale(summary["speechAndStructure"], speech)
+    if knowledge is not None and summary.get("knowledgeCompetence"):
+        summary["knowledgeCompetence"] = rescale(summary["knowledgeCompetence"], knowledge)
+    out["scoreSummary"] = summary
+    if note:
+        out["uncertaintyNotice"] = f"Your score was updated after review. {note}"
+    return out

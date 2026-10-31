@@ -27,6 +27,16 @@ REPORT = {
     "candidateInfo": {"interviewDate": "2026-10-30", "roleTopic": "Analyst"},
     "questionAnalysis": [],
     "finalTip": {"title": "Lead with the result", "description": "Then explain the query."},
+    "scoreSummary": {
+        "knowledgeCompetence": {
+            "score": 15, "maxScore": 25, "average": 3.0, "maxAverage": 5.0,
+            "percentage": 60, "criteria": {},
+        },
+        "speechAndStructure": {
+            "score": 14, "maxScore": 20, "average": 3.5, "maxAverage": 5.0,
+            "percentage": 70, "criteria": {},
+        },
+    },
 }
 
 
@@ -181,3 +191,41 @@ async def test_template_rule_needs_template_editing_and_is_frozen_per_sitting(he
             course_id="course-a",
         )
         assert fresh.result_release == "review"
+
+
+async def test_corrections_keep_every_version_and_reach_the_student(held):
+    c, _, _, ids = held
+    base = f"/v2/assessment-records/ai/{ids['interview']}"
+    await c.post(f"{base}/release", json={"reason": "Checked the answers carefully."}, headers=as_("publisher"))
+    fix = {
+        "expected_version": 0,
+        "knowledge": 72,
+        "speech": 70,
+        "reason": "Two answers were marked wrong by a transcription error.",
+        "student_note": "Two answers were re-marked after a transcript check.",
+    }
+    assert (await c.post(f"{base}/corrections", json=fix, headers=as_("viewer"))).status_code == 403
+    r = await c.post(f"{base}/corrections", json=fix, headers=as_("publisher"))
+    assert r.status_code == 200 and r.json()["version"] == 1, r.text
+    # A stale form cannot overwrite the newer version.
+    assert (await c.post(f"{base}/corrections", json=fix, headers=as_("publisher"))).status_code == 409
+    again = {**fix, "expected_version": 1, "knowledge": 75, "student_note": None,
+             "reason": "Second reviewer agreed one more answer was correct."}
+    assert (await c.post(f"{base}/corrections", json=again, headers=as_("publisher"))).status_code == 200
+
+    student = (await c.get(f"/v2/summary-report/{ids['interview']}", headers=as_("student"))).json()
+    kc = student["scoreSummary"]["knowledgeCompetence"]
+    assert kc["percentage"] == 75 and kc["score"] == 19 and kc["average"] == 3.75
+    assert student["scoreSummary"]["speechAndStructure"]["percentage"] == 70
+    assert student["uncertaintyNotice"].startswith("Your score was updated after review.")
+
+    record = (await c.get(base, headers=as_("viewer"))).json()
+    assert [v["previous"] for v in record["corrections"]] == [
+        {"knowledge": 60, "speech": 70},
+        {"knowledge": 72, "speech": 70},
+    ]
+    assert record["result"]["scores"]["overall"] == 72.5
+    assert record["can_correct"] is False
+    assert [e["action"] for e in record["history"]][-2:] == [
+        "assessment_score_corrected", "assessment_score_corrected",
+    ]

@@ -44,3 +44,4 @@ from .resume_storage_job import ResumeStorageJob  # noqa: F401
 
 from .graduation import Graduation, GraduationEvent  # noqa: F401
 from .opportunity_selection import OpportunitySelection, OpportunitySelectionEntry  # noqa: F401
+from .assessment_correction import AssessmentScoreCorrection  # noqa: F401
