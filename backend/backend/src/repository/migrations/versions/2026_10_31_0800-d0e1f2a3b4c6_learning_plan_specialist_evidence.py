@@ -10,6 +10,17 @@ depends_on = None
 
 
 def upgrade():
+    op.drop_index("uq_learning_plan_drill_evidence", "learning_plan_step_progress")
+    op.create_index(
+        "uq_learning_plan_drill_evidence",
+        "learning_plan_step_progress",
+        ["evidence_kind", "evidence_id"],
+        unique=True,
+        postgresql_where=(
+            "evidence_kind IN ('drill_completion', 'pronunciation_session', "
+            "'structure_practice', 'pacing_session')"
+        ),
+    )
     op.drop_constraint(
         "ck_learning_plan_progress_evidence",
         "learning_plan_step_progress",
@@ -33,4 +44,12 @@ def downgrade():
         "ck_learning_plan_progress_evidence",
         "learning_plan_step_progress",
         "evidence_kind IN ('drill_completion', 'interview', 'reflection')",
+    )
+    op.drop_index("uq_learning_plan_drill_evidence", "learning_plan_step_progress")
+    op.create_index(
+        "uq_learning_plan_drill_evidence",
+        "learning_plan_step_progress",
+        ["evidence_id"],
+        unique=True,
+        postgresql_where="evidence_kind = 'drill_completion'",
     )
