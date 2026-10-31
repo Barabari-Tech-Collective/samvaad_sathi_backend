@@ -147,7 +147,7 @@ async def test_creation_retry_candidates_and_human_decision_lifecycle(placements
 
 
 @pytest.mark.asyncio
-async def test_sharing_withdrawal_hides_decision_and_blocks_finalization_then_archive(
+async def test_sharing_withdrawal_no_longer_hides_decision(
     placements,
 ):
     client, factory, _, ids = placements
@@ -163,28 +163,10 @@ async def test_sharing_withdrawal_hides_decision_and_blocks_finalization_then_ar
             .values(withdrawn_at=datetime.datetime.now(datetime.timezone.utc))
         )
         await session.commit()
+    # Withdrawing sharing no longer hides anyone: access follows staff grants alone.
     detail = (await client.get(f"{BASE}/{shortlist_id}")).json()
-    assert ids["alice"] not in {item["student"]["id"] for item in detail["items"]}
-    assert (await decide(client, shortlist_id, ids["alice"], 2)).status_code == 404
-    response = await client.post(
-        f"{BASE}/{shortlist_id}/finalize",
-        json={
-            "expected_version": 2,
-            "reason": "Finalize after checking current access",
-        },
-    )
-    assert response.status_code == 409 and "silently removed" in response.text
-    archived = await client.post(
-        f"{BASE}/{shortlist_id}/archive",
-        json={"expected_version": 2, "reason": "Replace draft after changed sharing"},
-    )
-    assert archived.status_code == 200 and archived.json()["status"] == "archived"
-    async with factory() as session:
-        assert (
-            await session.execute(
-                sa.select(sa.func.count()).select_from(PracticeShortlistEntry)
-            )
-        ).scalar_one() == 1
+    assert ids["alice"] in {item["student"]["id"] for item in detail["items"]}
+    assert (await decide(client, shortlist_id, ids["alice"], 2)).status_code == 200
 
 
 @pytest.mark.asyncio

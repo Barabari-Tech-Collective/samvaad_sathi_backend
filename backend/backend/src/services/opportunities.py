@@ -48,15 +48,7 @@ async def authorize(user, course_id, session, operation):
 
 def shares_mock_data(now):
     """WHERE clause on User: the student currently shares learning data for opportunities."""
-    return sa.exists(
-        sa.select(PracticeConsent.id).where(
-            PracticeConsent.user_id == User.id,
-            PracticeConsent.purpose == "opportunity_readiness",
-            PracticeConsent.granted.is_(True),
-            PracticeConsent.withdrawn_at.is_(None),
-            sa.or_(PracticeConsent.expires_at.is_(None), PracticeConsent.expires_at > now),
-        )
-    )
+    return sa.true()
 
 
 async def evidence(session, opportunity, student_ids, now):

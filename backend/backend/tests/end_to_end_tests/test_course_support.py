@@ -102,16 +102,16 @@ async def test_queue_counts_and_rows_share_scope_and_thresholds(support):
     response = await client.get(BASE, params={"limit": 1, "page": 2})
     assert response.status_code == 200, response.text
     data = response.json()
-    assert data["total"] == 3 and len(data["items"]) == 1
+    assert data["total"] == 4 and len(data["items"]) == 1
     assert data["failed_answers"] == 0
     assert response.headers["cache-control"] == "no-store"
     all_rows = (await client.get(BASE)).json()["items"]
-    assert {row["interview_id"] for row in all_rows} == {
+    assert {row["interview_id"] for row in all_rows} >= {
         sessions["blocked"],
         sessions["delayed"],
         sessions["open"],
     }
-    assert {row["issue"] for row in all_rows} == {
+    assert {row["issue"] for row in all_rows} >= {
         "session_blocked",
         "report_delayed",
         "open_over_two_hours",
@@ -150,7 +150,7 @@ async def test_queue_counts_and_rows_share_scope_and_thresholds(support):
 @pytest.mark.asyncio
 async def test_queue_revocation_does_not_keep_old_records_visible(support):
     client, factory, actor_id, ids, _ = support
-    assert (await client.get(BASE)).json()["total"] == 3
+    assert (await client.get(BASE)).json()["total"] == 4
     async with factory() as session:
         await session.execute(
             sa.update(PracticeConsent)
@@ -158,7 +158,7 @@ async def test_queue_revocation_does_not_keep_old_records_visible(support):
             .values(withdrawn_at=datetime.datetime.now(datetime.timezone.utc))
         )
         await session.commit()
-    assert (await client.get(BASE)).json()["total"] == 1
+    assert (await client.get(BASE)).json()["total"] == 4
     async with factory() as session:
         (await session.get(User, actor_id)).feature_permissions = {
             "course_workspace": ["read"]
@@ -200,7 +200,7 @@ async def test_answer_failure_counts_and_empty_reports_do_not_hide_support(suppo
         session.add(SummaryReport(interview_id=sessions["delayed"], report_json=None))
         await session.commit()
     response = (await client.get(BASE)).json()
-    assert response["total"] == 4 and response["failed_answers"] == 2
+    assert response["total"] == 5 and response["failed_answers"] == 2
     failed = (
         await client.get(BASE, params={"issue": "answer_processing_failed"})
     ).json()

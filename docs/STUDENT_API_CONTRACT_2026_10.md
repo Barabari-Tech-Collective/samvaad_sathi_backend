@@ -208,21 +208,7 @@ arrives with F14 (the assignment snapshots the conditions).
 
 Add `v2/accommodations/` to the allowed paths in `session-axios.ts`.
 
-## 11. Export or delete my data (F32)
-
-Allowlist path: `/v2/data-requests`.
-
-- `POST /v2/data-requests` `{request_key (uuid), kind: "export"|"deletion", note?}` -> 201 (200 on replay). 409 if
-  you already have an open request of that kind.
-- `GET /v2/data-requests/me` -> `{items: [{id, kind, status, version, note, outcome, closure_note, created_at,
-  completed_at}]}`. Status: `submitted` -> `verified` -> `completed` | `rejected`, or `withdrawn`.
-- `POST /v2/data-requests/{id}/withdraw` only while `submitted`.
-- `GET /v2/data-requests/{id}/export` -> JSON of your data once an export is `completed` (7 days, then 410).
-- A person must verify identity first; nothing is deleted or exported until then. Show this in the UI.
-- A completed deletion has `outcome`: `deleted` (`category`, `count`), `retained` (`category`, `reason`) and
-  `pending` (`category`, `reason`). Show all three plainly; assessment evidence is retained on purpose.
-
-## 12. Assigned AI interviews (F14)
+## 11. Assigned AI interviews (F14)
 
 Allowlist path: `/v2/assessment-assignments`.
 
@@ -236,3 +222,16 @@ Allowlist path: `/v2/assessment-assignments`.
 - Learners with no assignment for a template keep today's open access.
 - `accommodations` are the confirmed conditions when it was assigned (labels only). Extra time is not yet
   applied to the timer by the server.
+
+## 12. Privacy notice, and retired sharing choices
+
+Allowlist path: `/v2/privacy-notice`.
+
+- Show one plain page once, at signup or first sign-in, with a single "I understand" tick.
+  `GET /v2/privacy-notice` -> `{version, title, paragraphs[], accepted, accepted_at}`;
+  `POST /v2/privacy-notice/accept {version}` -> `{accepted: true}` (409 if the version changed).
+  Re-show it only when `accepted` is false for the current version. It switches nothing on or off.
+- Remove the coaching-sharing and opportunity-sharing switches and any "your data is private" copy.
+  `/v2/practice-dashboard/consents/me` still answers (`granted: true`, PUT does nothing) so older
+  app builds do not break, but it no longer affects who can see a learner's practice data.
+- There is no student data export or deletion request flow.

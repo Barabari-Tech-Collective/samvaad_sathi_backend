@@ -134,10 +134,10 @@ async def test_search_summary_pagination_and_export_share_authorized_rows(report
     response = await client.get(base, params={"page": 2, "limit": 1})
     assert response.status_code == 200, response.text
     data = response.json()
-    assert data["total"] == 3 and len(data["items"]) == 1
+    assert data["total"] == 4 and len(data["items"]) == 1
     assert data["summary"] == {
         "practised_students": 1,
-        "not_started_students": 2,
+        "not_started_students": 3,
         "completed_practice_rounds": 2,
     }
     assert response.headers["cache-control"] == "no-store"
@@ -148,22 +148,24 @@ async def test_search_summary_pagination_and_export_share_authorized_rows(report
     literal = (await client.get(base, params={"q": "%_"})).json()
     assert [row["id"] for row in literal["items"]] == [ids["literal"]]
     no_match = (await client.get(base, params={"q": "Hidden"})).json()
+    # The student who never shared is listed too: sharing is no longer a student choice.
     assert (
-        no_match["total"] == 0 and no_match["summary"]["completed_practice_rounds"] == 0
+        no_match["total"] == 1 and no_match["summary"]["completed_practice_rounds"] == 0
     )
     response = await client.post(
         base + "/export", json={"reason": "Weekly shared practice review"}
     )
     assert response.status_code == 200, response.text
     rows = list(csv.reader(io.StringIO(response.text.lstrip("\ufeff"))))
-    assert len(rows) == 4 and len(rows[0]) == 4
+    assert len(rows) == 5 and len(rows[0]) == 4
     assert {int(row[0]) for row in rows[1:]} == {
         ids["alice"],
         ids["zero"],
         ids["literal"],
+        ids["no_consent"],
     }
     assert rows[1][1] == "'=Alice"
-    assert "Hidden" not in response.text
+    assert "Hidden College" not in response.text and "Hidden Course" not in response.text
     assert response.headers["cache-control"] == "no-store"
     async with factory() as session:
         event = (
@@ -173,7 +175,7 @@ async def test_search_summary_pagination_and_export_share_authorized_rows(report
                 )
             )
         ).scalar_one()
-        assert event.actor_id == actor_id and event.event_metadata["rows"] == 3
+        assert event.actor_id == actor_id and event.event_metadata["rows"] == 4
 
 
 @pytest.mark.asyncio
@@ -200,13 +202,13 @@ async def test_export_requires_explicit_operation_and_fresh_scope(reporting):
             .values(withdrawn_at=datetime.datetime.now(datetime.timezone.utc))
         )
         await session.commit()
-    assert (await client.get(base)).json()["total"] == 2
+    assert (await client.get(base)).json()["total"] == 4
     response = await client.post(
         base + "/export", json={"q": "Alice", "reason": "Weekly practice review"}
     )
     assert (
         response.status_code == 200
-        and len(list(csv.reader(io.StringIO(response.text.lstrip("\ufeff"))))) == 1
+        and len(list(csv.reader(io.StringIO(response.text.lstrip("\ufeff"))))) == 2
     )
     async with factory() as session:
         await session.execute(

@@ -182,16 +182,16 @@ async def test_assign_to_a_cohort_follows_each_members_rules(course, db):
     r = await c.post(f"{base}/assign", json=drill, headers=as_("admin"))
     assert r.status_code == 200, r.text
     body = r.json()
-    assert [d["name"] for d in body["done"]] == ["asha"]
-    assert [s["name"] for s in body["skipped"]] == ["bilal"]
+    assert [d["name"] for d in body["done"]] == ["asha", "bilal"]
+    assert body["skipped"] == []
     # Retrying the same request creates nothing twice.
     again = (await c.post(f"{base}/assign", json=drill, headers=as_("admin"))).json()
-    assert [d["name"] for d in again["done"]] == ["asha"]
+    assert [d["name"] for d in again["done"]] == ["asha", "bilal"]
     async with factory() as s:
         from src.models.db.coaching_assignment import CoachingAssignment
         import sqlalchemy as sa
         n = (await s.execute(sa.select(sa.func.count(CoachingAssignment.id)))).scalar_one()
-        assert n == 1
+        assert n == 2
 
     opening_body = {"request_key": str(uuid.uuid4()), "kind": "opening", "opportunity_id": opening_id,
                     "reason": "Whole batch is applying to this opening."}

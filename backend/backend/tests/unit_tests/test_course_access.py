@@ -264,8 +264,6 @@ async def test_roster_query_limits_consent_enrollment_evidence_and_pagination():
     for field in [
         "enrolled_course_ids",
         "course_id",
-        "withdrawn_at",
-        "expires_at",
         "OFFSET",
         "LIMIT",
     ]:

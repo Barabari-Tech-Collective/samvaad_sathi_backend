@@ -136,10 +136,8 @@ async def _shared_student_predicate(course_id, current_user, session, *, coachin
     now = datetime.datetime.now(datetime.timezone.utc)
 
     def consent(purpose):
-        return sa.exists(sa.select(PracticeConsent.id).where(
-            PracticeConsent.user_id == User.id, PracticeConsent.purpose == purpose,
-            PracticeConsent.granted.is_(True), PracticeConsent.withdrawn_at.is_(None),
-            sa.or_(PracticeConsent.expires_at.is_(None), PracticeConsent.expires_at > now)))
+        # Students are not asked to share; staff scope is decided by grants alone.
+        return sa.true()
 
     if is_admin_user(current_user):
         predicate = sa.and_(student_predicate(course_id, grants, global_access=True), consent("facilitator_coaching"))

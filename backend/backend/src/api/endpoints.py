@@ -122,7 +122,7 @@ router.include_router(graduation_router)
 from src.api.legacy_routes import drop_retired_routes
 
 drop_retired_routes(router)
-from src.api.routes.data_requests import router as data_requests_router
-router.include_router(router=data_requests_router)
 from src.api.routes.assessment_assignments import router as assessment_assignments_router
 router.include_router(router=assessment_assignments_router)
+from src.api.routes.privacy_notice import router as privacy_notice_router
+router.include_router(router=privacy_notice_router)

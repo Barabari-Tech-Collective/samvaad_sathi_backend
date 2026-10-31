@@ -195,12 +195,8 @@ def _purpose(role: DashboardRole) -> ConsentPurpose | None:
 
 
 def _consent_is_active(consent: PracticeConsent | None, now: datetime.datetime) -> bool:
-    return bool(
-        consent
-        and consent.granted
-        and consent.withdrawn_at is None
-        and (consent.expires_at is None or consent.expires_at > now)
-    )
+    # Sharing is not a student choice any more; access is decided by staff grants alone.
+    return True
 
 
 async def _active_consent(
@@ -437,17 +433,8 @@ async def update_my_consent(
         raise fastapi.HTTPException(
             status_code=400, detail="Consent expiry must be in the future"
         )
-    consent = await _active_consent(session, current_user.id, body.purpose)
-    if consent is None:
-        consent = PracticeConsent(user_id=current_user.id, purpose=body.purpose)
-        session.add(consent)
-    consent.granted = body.granted
-    consent.policy_version = body.policy_version
-    consent.expires_at = body.expires_at if body.granted else None
-    consent.granted_at = now if body.granted else None
-    consent.withdrawn_at = None if body.granted else now
-    await session.commit()
-    return {"purpose": body.purpose, "granted": body.granted, "updated_at": now}
+    # Retired: nothing a student sends here changes who can see their practice data.
+    return {"purpose": body.purpose, "granted": True, "updated_at": now}
 
 
 @router.get("/overview")
@@ -793,21 +780,7 @@ async def shortlist_detail(
         .all()
     )
     consented_ids = list(
-        (
-            await session.execute(
-                sqlalchemy.select(PracticeConsent.user_id).where(
-                    PracticeConsent.purpose == "opportunity_readiness",
-                    PracticeConsent.granted.is_(True),
-                    PracticeConsent.withdrawn_at.is_(None),
-                    sqlalchemy.or_(
-                        PracticeConsent.expires_at.is_(None),
-                        PracticeConsent.expires_at > _utcnow(),
-                    ),
-                )
-            )
-        )
-        .scalars()
-        .all()
+        (await session.execute(sqlalchemy.select(User.id))).scalars().all()
     )
     users_stmt = sqlalchemy.select(User).where(User.id.in_(consented_ids or [-1]))
     if colleges is not None:

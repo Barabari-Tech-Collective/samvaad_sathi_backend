@@ -122,7 +122,8 @@ async def test_opening_candidates_rounds_and_evidence(factory):
         assert by_name["ready"]["state"] == "ready" and by_name["ready"]["assessments_for_role"] == 1
         # Old assessment and a mock interview do not count; "missing" is not "rejected".
         assert by_name["new"]["state"] == "missing" and by_name["new"]["assessments"] == 0
-        assert by_name["new"]["shares_mock_data"] is False
+        # Sharing is no longer a student choice, so mock data is always available to staff.
+        assert by_name["new"]["shares_mock_data"] is True
 
         # Changing the evidence rules is a new eligibility version.
         changed = await routes.change_opportunity(opening["id"], routes.Change(min_assessments=2),

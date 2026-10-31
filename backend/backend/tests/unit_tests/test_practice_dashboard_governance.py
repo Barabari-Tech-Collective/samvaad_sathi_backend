@@ -55,19 +55,15 @@ def test_student_has_no_dashboard_role():
     assert resolve_dashboard_role(_user(), []) is None
 
 
-def test_withdrawn_or_expired_consent_fails_closed():
+def test_withdrawn_or_expired_consent_no_longer_limits_access():
     now = datetime.datetime.now(datetime.timezone.utc)
     consent = PracticeConsent(
-        user_id=20,
-        purpose="opportunity_readiness",
-        granted=True,
-        policy_version="v1",
+        user_id=20, purpose="opportunity_readiness", granted=True, policy_version="v1",
         expires_at=now - datetime.timedelta(seconds=1),
     )
-    assert _consent_is_active(consent, now) is False
-    consent.expires_at = now + datetime.timedelta(days=1)
+    assert _consent_is_active(consent, now) is True
     consent.withdrawn_at = now
-    assert _consent_is_active(consent, now) is False
+    assert _consent_is_active(consent, now) is True
 
 
 def test_human_actions_require_meaningful_reasons():

@@ -74,17 +74,7 @@ async def authorize(user, course_id, session, operation):
             403, "A placement responsibility assigned to this course is required."
         )
     now = datetime.datetime.now(UTC)
-    consent = sa.exists(
-        sa.select(PracticeConsent.id).where(
-            PracticeConsent.user_id == User.id,
-            PracticeConsent.purpose == "opportunity_readiness",
-            PracticeConsent.granted.is_(True),
-            PracticeConsent.withdrawn_at.is_(None),
-            sa.or_(
-                PracticeConsent.expires_at.is_(None), PracticeConsent.expires_at > now
-            ),
-        )
-    )
+    consent = sa.true()
     staff = sa.exists(
         sa.select(TeamMember.id).where(
             TeamMember.user_id == User.id, TeamMember.status == "active"

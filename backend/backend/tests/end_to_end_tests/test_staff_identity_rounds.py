@@ -196,9 +196,8 @@ async def test_multi_role_consent_stays_paired_with_membership_colleges(db):
         actor._token_source = "central_sso"
         result = await course_students("same-course", 1, 25, actor, session)
         assert {item["id"] for item in result["items"]} == {a.id, b.id}
-        # The Placement membership only covers College B; its consent purpose
-        # cannot substitute for withdrawn coaching consent in College A.
+        # Withdrawn consent no longer narrows the list; membership colleges still do.
         consent_a.granted = False
         await session.commit()
         result = await course_students("same-course", 1, 25, actor, session)
-        assert {item["id"] for item in result["items"]} == {b.id}
+        assert {item["id"] for item in result["items"]} == {a.id, b.id}

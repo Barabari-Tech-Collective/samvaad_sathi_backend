@@ -60,7 +60,7 @@ async def overview(db):
 async def test_support_follow_ups_count_only_shared_practice(overview):
     tasks = (await overview.get("/v2/staff/tasks", headers={"x-test-actor": "admin"})).json()["tasks"]
     task = next(t for t in tasks if t["id"] == "support_follow_ups")
-    assert task["count"] == 1
+    assert task["count"] == 2
     assert task["action"]["href"] == "/dashboard/samvaad/courses/course-a/support"
     assert task["oldest_at"] is not None
     tasks = (await overview.get("/v2/staff/tasks", headers={"x-test-actor": "plain"})).json()["tasks"]
