@@ -1034,7 +1034,7 @@ async def test_placement_creator_gets_bulk_ats_access():
 
 
 @pytest.mark.asyncio
-async def test_placement_team_member_is_denied_bulk_ats_access():
+async def test_placement_team_member_may_use_bulk_ats_access():
     """Regular Team Members in the Placement Team are denied Bulk ATS access."""
     from src.api.dependencies.admin import get_current_bulk_ats_user
 
@@ -1050,14 +1050,13 @@ async def test_placement_team_member_is_denied_bulk_ats_access():
     mock_result.all.return_value = [(member, team)]
     session.execute.return_value = mock_result
 
-    with pytest.raises(fastapi.HTTPException) as exc_info:
+    assert (
         await get_current_bulk_ats_user(current_user=member_user, session=session)
-    assert exc_info.value.status_code == 403
-    assert "Bulk ATS access is restricted" in exc_info.value.detail
+    ) is member_user
 
 
 @pytest.mark.asyncio
-async def test_program_team_creator_is_denied_bulk_ats_access():
+async def test_program_team_creator_may_use_bulk_ats_access():
     """Creators in Program Team do NOT get Bulk ATS access (Bulk ATS is reserved for Placement Creators and Recruiters)."""
     from src.api.dependencies.admin import get_current_bulk_ats_user
 
@@ -1073,9 +1072,9 @@ async def test_program_team_creator_is_denied_bulk_ats_access():
     mock_result.all.return_value = [(member, team)]
     session.execute.return_value = mock_result
 
-    with pytest.raises(fastapi.HTTPException) as exc_info:
+    assert (
         await get_current_bulk_ats_user(current_user=program_creator, session=session)
-    assert exc_info.value.status_code == 403
+    ) is program_creator
 
 
 def test_is_super_admin_user_from_token_role():
@@ -1185,7 +1184,7 @@ def test_placement_creator_only_create_interview_tag():
     assert perms["is_view_only"] is False
     assert perms["can_access_interviews"] is True
     assert perms["can_access_practice_interview"] is True
-    assert perms["can_access_ats"] is False  # Dedicated ATS tag required
+    assert perms["can_access_ats"] is True
     assert perms["can_access_dashboard"] is False
     assert perms["can_access_students"] is False
     assert perms["can_access_colleges"] is False
@@ -1281,7 +1280,7 @@ def test_permission_matrix_placement_team_member():
 
     perms = calculate_user_permissions(user, [(member, team)])
     assert perms["can_create_roles"] is False
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["can_edit"] is False
     assert perms["is_view_only"] is True
     assert perms["colleges"] is None  # View access across colleges without restrictions
@@ -1300,7 +1299,7 @@ def test_permission_matrix_program_creator():
 
     perms = calculate_user_permissions(user, [(member, team)])
     assert perms["can_create_roles"] is True
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["can_edit"] is True
     assert perms["is_view_only"] is False
     assert perms["colleges"] is None  # Unrestricted all colleges
@@ -1319,7 +1318,7 @@ def test_permission_matrix_program_senior_facilitator():
 
     perms = calculate_user_permissions(user, [(member, team)])
     assert perms["can_create_roles"] is True
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["can_edit"] is True
     assert perms["is_view_only"] is False
     assert perms["colleges"] is None  # Unrestricted access to all colleges
@@ -1342,7 +1341,7 @@ def test_permission_matrix_program_junior_facilitator():
 
     perms = calculate_user_permissions(user, [(member, team)])
     assert perms["can_create_roles"] is False
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["can_edit"] is False
     assert perms["is_view_only"] is True
     assert set(perms["colleges"]) == {"BITS Pilani", "IIT Delhi"}
@@ -1361,7 +1360,7 @@ def test_permission_matrix_program_team_member():
 
     perms = calculate_user_permissions(user, [(member, team)])
     assert perms["can_create_roles"] is False
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["can_edit"] is False
     assert perms["is_view_only"] is True
     assert perms["colleges"] is None
@@ -1397,7 +1396,7 @@ def test_junior_facilitator_with_team_member_role_elsewhere_retains_college_rest
         user, [(member_jf, team_prog), (member_tm, team_place)]
     )
     assert perms["can_create_roles"] is False
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["can_edit"] is False
     assert perms["is_view_only"] is True
     # Colleges must NOT be widened to None (unrestricted)
@@ -2378,7 +2377,7 @@ def test_program_team_lead_permissions():
     assert perms["can_access_colleges"] is True
     assert perms["can_access_interviews"] is True
     assert perms["can_access_practice_interview"] is True
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["colleges"] is None
 
 
@@ -2405,7 +2404,7 @@ def test_program_senior_facilitator_with_assigned_colleges():
     assert perms["can_access_dashboard"] is True
     assert perms["can_access_students"] is True
     assert perms["can_access_colleges"] is True
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["colleges"] == ["CMRIT", "VNRVJIET"]
 
 
@@ -2452,7 +2451,7 @@ def test_program_junior_facilitator_permissions():
     assert perms["can_access_dashboard"] is True
     assert perms["can_access_students"] is True
     assert perms["can_access_colleges"] is True
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["colleges"] == ["CMRIT"]
 
 
@@ -2479,7 +2478,7 @@ def test_program_creator_single_interview_purpose():
     assert perms["can_access_dashboard"] is False
     assert perms["can_access_students"] is False
     assert perms["can_access_colleges"] is False
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["colleges"] is None
 
 
@@ -2506,7 +2505,7 @@ def test_program_team_member_view_only_batch_progress():
     assert perms["can_access_colleges"] is False
     assert perms["can_access_interviews"] is True
     assert perms["can_access_practice_interview"] is False
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
 
 
 def test_purpose_tag_exact_matching_prevents_ats_substring_leak():
@@ -2520,7 +2519,7 @@ def test_purpose_tag_exact_matching_prevents_ats_substring_leak():
     team.name = "Placement Team"
 
     perms = calculate_user_permissions(user, [(member, team)])
-    assert perms["can_access_ats"] is False
+    assert perms["can_access_ats"] is True
     assert perms["can_create_roles"] is False
 
 

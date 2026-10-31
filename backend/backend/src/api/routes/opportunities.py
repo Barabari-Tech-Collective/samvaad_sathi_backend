@@ -18,12 +18,14 @@ from sqlalchemy.dialects.postgresql import insert
 
 from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.session import get_async_session
+from src.models.db.assessment_assignment import AssessmentAssignment
 from src.models.db.bulk_ats import BulkATSBatch
 from src.models.db.human_interview import HumanInterview
 from src.models.db.job_profile import JobProfile
 from src.models.db.opportunity import Opportunity, OpportunityCandidate, OpportunityRound
 from src.models.db.practice_governance import PracticeDashboardAuditEvent, PracticeShortlist
 from src.models.db.user import User
+from src.services import assessment_assignments as assignments
 from src.services import course_shortlists as shortlists
 from src.services import opportunities as service
 
@@ -247,6 +249,23 @@ async def opportunity_detail(
             .order_by(OpportunityRound.position)
         )
     ).all()
+    assigned = {
+        rid: (int(total), int(done))
+        for rid, total, done in (
+            await session.execute(
+                sa.select(
+                    AssessmentAssignment.opportunity_round_id,
+                    sa.func.count(AssessmentAssignment.id),
+                    sa.func.count(AssessmentAssignment.id).filter(AssessmentAssignment.status == "completed"),
+                )
+                .where(
+                    AssessmentAssignment.opportunity_round_id.in_([r.id for r, _ in rounds] or [-1]),
+                    AssessmentAssignment.status != "cancelled",
+                )
+                .group_by(AssessmentAssignment.opportunity_round_id)
+            )
+        ).all()
+    }
     linked_shortlists = (
         await session.execute(
             sa.select(PracticeShortlist).where(PracticeShortlist.opportunity_id == row.id)
@@ -274,7 +293,8 @@ async def opportunity_detail(
         ],
         rounds=[
             {"id": r.id, "position": r.position, "kind": r.kind, "name": r.name,
-             "job_profile_id": r.job_profile_id, "template": name}
+             "job_profile_id": r.job_profile_id, "template": name,
+             "assigned": assigned.get(r.id, (0, 0))[0], "completed": assigned.get(r.id, (0, 0))[1]}
             for r, name in rounds
         ],
         shortlists=[shortlists.metadata(s) for s in linked_shortlists],
@@ -468,3 +488,70 @@ async def unlink_screening(
     _audit(session, user, row, "opportunity_screening_unlinked", {"batch_id": batch_id})
     await session.commit()
     return {"id": batch.id}
+
+
+class AssignRound(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_key: UUID
+    difficulty: Literal["easy", "medium", "hard", "expert"] = "medium"
+    opens_at: datetime.datetime
+    closes_at: datetime.datetime | None = None
+    instructions: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("opens_at", "closes_at")
+    @classmethod
+    def zoned(cls, v):
+        if v is not None and v.tzinfo is None:
+            raise ValueError("Give times with a timezone.")
+        return v
+
+
+@router.post("/{opportunity_id}/rounds/{round_id}/assign")
+async def assign_round(
+    opportunity_id: int,
+    round_id: int,
+    body: AssignRound,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Give every current candidate this AI round as a timed assignment."""
+    from src.services.interview_eligibility import unavailable_reason
+
+    row, predicate = await _load(session, user, opportunity_id, "update", lock=True)
+    _require_open(row)
+    plan = (
+        await session.execute(
+            sa.select(OpportunityRound).where(
+                OpportunityRound.id == round_id, OpportunityRound.opportunity_id == row.id
+            )
+        )
+    ).scalar_one_or_none()
+    if plan is None or plan.kind != "ai":
+        raise fastapi.HTTPException(404, "AI round not found.")
+    template = await _assessment_template(session, plan.job_profile_id) if plan.job_profile_id else None
+    if template is None:
+        raise fastapi.HTTPException(422, "This round has no assessment template.")
+    reason = unavailable_reason(template, body.difficulty)
+    if reason:
+        raise fastapi.HTTPException(422, reason)
+    if body.closes_at is not None and body.closes_at <= body.opens_at:
+        raise fastapi.HTTPException(422, "The window must close after it opens.")
+    if body.closes_at is not None and body.closes_at <= datetime.datetime.now(UTC):
+        raise fastapi.HTTPException(422, "The window must end in the future.")
+    students = (
+        await session.execute(
+            sa.select(User.id)
+            .join(OpportunityCandidate, OpportunityCandidate.student_id == User.id)
+            .where(OpportunityCandidate.opportunity_id == row.id, predicate)
+        )
+    ).scalars().all()
+    if not students:
+        raise fastapi.HTTPException(422, "There are no candidates in your scope to assign this to.")
+    made, replayed = await assignments.create_for(
+        session, user, course_id=row.course_id, template=template, difficulty=body.difficulty,
+        student_ids=list(students), opens_at=body.opens_at, closes_at=body.closes_at,
+        instructions=body.instructions, request_key=body.request_key, round_id=plan.id,
+    )
+    _audit(session, user, row, "opportunity_round_assigned", {"round_id": plan.id, "created": len(made)})
+    await session.commit()
+    return {"created": len(made), "already_assigned": replayed}

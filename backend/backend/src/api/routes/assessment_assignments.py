@@ -231,35 +231,13 @@ async def create(
     if missing and body.cohort_id is None:
         raise fastapi.HTTPException(404, "Some learners are not in your scope.")
     now = dt.datetime.now(UTC)
-    made, replayed, skipped = [], 0, len(missing)
-    for student_id in sorted(allowed):
-        key = str(body.request_key)
-        existing = (
-            await session.execute(
-                sa.select(AssessmentAssignment).where(
-                    AssessmentAssignment.student_id == student_id, AssessmentAssignment.request_key == key
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            replayed += 1
-            continue
-        row = AssessmentAssignment(
-            student_id=student_id, assigned_by=user.id, course_id=course_id, cohort_id=body.cohort_id,
-            job_profile_id=template.id, pinned_revision=template.content_revision or 0,
-            difficulty=body.difficulty, opens_at=body.opens_at, closes_at=body.closes_at,
-            instructions=body.instructions, request_key=key,
-            accommodations=await confirmed_conditions(session, student_id),
-        )
-        session.add(row)
-        await session.flush()
-        audit(session, user.id, row, "assessment_assignment_created", "Assigned an AI assessment.")
-        notifications.notify(
-            session, student_id, "assessment_assigned", "An AI interview was assigned to you",
-            f"{template.job_name} opens on {body.opens_at.date().isoformat()}.",
-            "/assessments", ("assessment_assignment", row.id),
-        )
-        made.append(row)
+    skipped = len(missing)
+    made, replayed = await service.create_for(
+        session, user, course_id=course_id, template=template, difficulty=body.difficulty,
+        student_ids=sorted(allowed), opens_at=body.opens_at, closes_at=body.closes_at,
+        instructions=body.instructions, request_key=body.request_key, cohort_id=body.cohort_id,
+        audit=audit,
+    )
     await session.commit()
     if not made and replayed:
         response.status_code = 200

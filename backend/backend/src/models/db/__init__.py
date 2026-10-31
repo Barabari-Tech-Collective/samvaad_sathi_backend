@@ -55,3 +55,5 @@ from .feedback_issue import FeedbackIssue  # noqa: F401
 from .accommodation import AccommodationRequest  # noqa: F401
 from .assessment_assignment import AssessmentAssignment  # noqa: F401
 from .privacy_notice import PrivacyNoticeAcceptance  # noqa: F401
+from .readiness_rule import ReadinessRule  # noqa: F401
+from .opportunity_handoff import OpportunityHandoff, OpportunityHandoffCandidate  # noqa: F401

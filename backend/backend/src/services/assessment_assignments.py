@@ -8,6 +8,9 @@ import datetime as dt
 import fastapi
 import sqlalchemy as sa
 
+from src.services import notifications
+from src.services.accommodations import confirmed_conditions
+
 from src.api.dependencies.admin import is_admin_user
 from src.models.db.assessment_assignment import AssessmentAssignment
 from src.services.course_access import grants_for, require_course, student_predicate
@@ -112,3 +115,43 @@ def student_only():
     from src.services.people import student_only as f
 
     return f()
+
+
+async def create_for(
+    session, user, *, course_id, template, difficulty, student_ids, opens_at, closes_at,
+    instructions, request_key, cohort_id=None, round_id=None, audit=None,
+):
+    """Create one assignment per learner (idempotent per learner and request key).
+    Returns (new rows, replayed count). The caller commits."""
+    made, replayed = [], 0
+    for student_id in sorted(set(student_ids)):
+        key = str(request_key)
+        existing = (
+            await session.execute(
+                sa.select(AssessmentAssignment.id).where(
+                    AssessmentAssignment.student_id == student_id,
+                    AssessmentAssignment.request_key == key,
+                )
+            )
+        ).first()
+        if existing is not None:
+            replayed += 1
+            continue
+        row = AssessmentAssignment(
+            student_id=student_id, assigned_by=user.id, course_id=course_id, cohort_id=cohort_id,
+            opportunity_round_id=round_id, job_profile_id=template.id,
+            pinned_revision=template.content_revision or 0, difficulty=difficulty,
+            opens_at=opens_at, closes_at=closes_at, instructions=instructions, request_key=key,
+            accommodations=await confirmed_conditions(session, student_id),
+        )
+        session.add(row)
+        await session.flush()
+        if audit:
+            audit(session, user.id, row, "assessment_assignment_created", "Assigned an AI assessment.")
+        notifications.notify(
+            session, student_id, "assessment_assigned", "An AI interview was assigned to you",
+            f"{template.job_name} opens on {opens_at.date().isoformat()}.",
+            "/assessments", ("assessment_assignment", row.id),
+        )
+        made.append(row)
+    return made, replayed

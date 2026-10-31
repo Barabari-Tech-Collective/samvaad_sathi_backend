@@ -126,3 +126,7 @@ from src.api.routes.assessment_assignments import router as assessment_assignmen
 router.include_router(router=assessment_assignments_router)
 from src.api.routes.privacy_notice import router as privacy_notice_router
 router.include_router(router=privacy_notice_router)
+from src.api.routes.readiness import router as readiness_router
+router.include_router(router=readiness_router)
+from src.api.routes.opportunity_handoff import router as opportunity_handoff_router
+router.include_router(router=opportunity_handoff_router)

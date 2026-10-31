@@ -49,9 +49,22 @@ async def selection(db):
     async with engine.begin() as conn:
 
         def install(sync_conn):
+            from sqlalchemy import text
+
+            from src.models.db.opportunity_handoff import (
+                OpportunityHandoff,
+                OpportunityHandoffCandidate,
+            )
+
+            # The company handoff points at selections, so it is rebuilt around the migration.
+            sync_conn.execute(
+                text("DROP TABLE IF EXISTS opportunity_handoff_candidate, opportunity_handoff CASCADE")
+            )
             with Operations.context(MigrationContext.configure(sync_conn)):
                 migration.downgrade()
                 migration.upgrade()
+            OpportunityHandoff.__table__.create(sync_conn)
+            OpportunityHandoffCandidate.__table__.create(sync_conn)
 
         await conn.run_sync(install)
     now = dt.datetime.now(dt.timezone.utc)
@@ -136,6 +149,10 @@ async def selection(db):
     app.include_router(opportunities.router)
     app.include_router(human_interviews.router)
     app.include_router(staff_tasks.router)
+    from src.api.routes import opportunity_handoff, readiness
+
+    app.include_router(opportunity_handoff.router)
+    app.include_router(readiness.router)
 
     async def session_dep():
         async with factory() as s:

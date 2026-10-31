@@ -30,6 +30,8 @@ class AssessmentAssignment(Base):
     assigned_by: Mapped[int] = mapped_column(sa.ForeignKey("user.id", ondelete="RESTRICT"))
     course_id: Mapped[str] = mapped_column(sa.String(128), index=True)
     cohort_id: Mapped[int | None] = mapped_column(sa.Integer)
+    # The opening's AI round this came from, when it was assigned from an opportunity.
+    opportunity_round_id: Mapped[int | None] = mapped_column(sa.Integer, index=True)
     job_profile_id: Mapped[int] = mapped_column(sa.ForeignKey("job_profile.id", ondelete="RESTRICT"), index=True)
     # JobProfile.content_revision when assigned: a later edit needs a new assignment.
     pinned_revision: Mapped[int] = mapped_column()

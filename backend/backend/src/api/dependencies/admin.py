@@ -234,6 +234,8 @@ def calculate_user_permissions(
     is_sr_facilitator = False
     is_junior_facilitator = False
     is_team_member = False
+    is_placement_member = False
+    is_program_member = False
     junior_colleges: list[str] = []
     sr_colleges: list[str] = []
 
@@ -268,6 +270,10 @@ def calculate_user_permissions(
                         has_explicit_purposes = True
 
         is_placement = any(kw in t_name for kw in ["placement", "partnership"])
+        if is_placement:
+            is_placement_member = True
+        else:
+            is_program_member = True
 
         if m_role in {"recruiter", "placement staff", "placement com", "partnership staff"}:
             is_placement_staff = True
@@ -371,8 +377,12 @@ def calculate_user_permissions(
     )
 
     # Bulk ATS: Placement Leads, unrestricted Placement Creators, or users with explicit ATS tag/token claim
+    # The program team screens resumes to find who to put forward, and the placement team to
+    # shortlist for openings, so every member of either team may use it.
     can_access_ats = bool(
-        is_placement_lead
+        is_placement_member
+        or is_program_member
+        or is_placement_lead
         or is_placement_staff
         or (is_placement_creator and (placement_creator_unrestricted or has_ats_purpose or can_access_ats_token))
         or has_ats_purpose
@@ -763,7 +773,7 @@ async def get_current_bulk_ats_user(
 
     - Super Admins, Global Admins, and users with recruiter/placement_staff roles have full access.
     - Creators / Leads in the Placement / Partnerships team have full access to Bulk ATS.
-    - Regular Team Members (in Placement or Program team) are rejected with 403 Forbidden.
+    - Members of the Placement or Program team have access (the access switch can still turn it off).
     - Students are rejected with 403 Forbidden.
     """
     if is_admin_user(current_user):
