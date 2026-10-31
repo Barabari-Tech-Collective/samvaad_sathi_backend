@@ -1916,10 +1916,12 @@ async def test_analytics_v2_unassigned_college_scoping_for_junior_facilitators()
         )
         assert r_stu.items == []
 
-        r_att = await get_dashboard_attention_required(
-            current_user=jf_user, session=mock_session
-        )
-        assert r_att.items == []
+        # Operations alerts are administrators only (architecture pack sec 3).
+        with pytest.raises(fastapi.HTTPException) as refused:
+            await get_dashboard_attention_required(
+                current_user=jf_user, session=mock_session
+            )
+        assert refused.value.status_code == 403
 
         r_sum = await get_students_summary(current_user=jf_user, session=mock_session)
         assert all(kpi.value in (0, 0.0) for kpi in r_sum.kpis)
@@ -1951,8 +1953,9 @@ async def test_analytics_v2_unassigned_college_scoping_for_junior_facilitators()
         r_fun = await get_dropoff_funnel(current_user=jf_user, session=mock_session)
         assert r_fun.stages == []
 
-        r_pred = await get_predictive_alerts(current_user=jf_user, session=mock_session)
-        assert r_pred.items == []
+        with pytest.raises(fastapi.HTTPException) as refused:
+            await get_predictive_alerts(current_user=jf_user, session=mock_session)
+        assert refused.value.status_code == 403
 
         r_bench = await get_benchmarking(current_user=jf_user, session=mock_session)
         assert r_bench.items == []
@@ -2740,3 +2743,15 @@ async def test_resolve_effective_category_scopes_facilitator_to_domain():
 
 
 
+
+
+@pytest.mark.asyncio
+async def test_operations_alerts_open_to_administrators_only():
+    from src.api.routes.analytics_v2 import require_operations
+
+    admin = _make_user(802, email="admin@barabari.org", is_admin=True, is_super_admin=False)
+    analyst = _make_user(803, email="analyst@barabari.org", is_admin=False, is_super_admin=False)
+    require_operations(admin)
+    with pytest.raises(fastapi.HTTPException) as refused:
+        require_operations(analyst)
+    assert refused.value.status_code == 403

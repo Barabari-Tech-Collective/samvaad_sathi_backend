@@ -18,6 +18,7 @@ from src.api.dependencies.admin import (
     get_current_admin_user,
     get_user_allowed_colleges,
     verify_college_access,
+    is_admin_user,
 )
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.session import get_async_session
@@ -268,6 +269,16 @@ def _to_date(value: datetime.date | datetime.datetime | None) -> datetime.date |
     if isinstance(value, datetime.datetime):
         return value.date()
     return value
+
+
+def require_operations(user: User) -> None:
+    """Operations (failures and alerts) is for administrators only (architecture pack sec 3:
+    a secondary, permission-controlled destination), not everyone with analytics access."""
+    if not is_admin_user(user):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Operations alerts are limited to administrators.",
+        )
 
 
 async def verify_student_access(
@@ -828,6 +839,7 @@ async def get_dashboard_attention_required(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ) -> TablePageResponse:
+    require_operations(current_user)
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if allowed_colleges is not None and not allowed_colleges:
         limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 20))
@@ -2458,6 +2470,7 @@ async def get_predictive_alerts(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    require_operations(current_user)
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if allowed_colleges is not None and not allowed_colleges:
         page_val = page if isinstance(page, int) else int(getattr(page, "default", 1))
