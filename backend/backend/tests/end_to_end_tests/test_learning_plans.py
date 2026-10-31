@@ -6,6 +6,7 @@ import uuid
 import fastapi
 import httpx
 import pytest
+import sqlalchemy as sa
 
 from src.api.dependencies.admin import get_current_admin_user
 from src.api.dependencies.auth import get_current_user
@@ -13,6 +14,7 @@ from src.api.dependencies.session import get_async_session
 from src.api.routes import learning_plans
 from src.models.db.interview import Interview
 from src.models.db.job_profile import JobProfile
+from src.models.db.learning_plan import LearningPlanStepProgress
 from src.models.db.practice_drill_completion import PracticeDrillCompletion
 from src.models.db.practice_governance import PracticeConsent
 from src.models.db.user import User
@@ -76,6 +78,20 @@ async def published_plan(c, ids, self_start=False):
     return r.json()
 
 
+async def assign_plan(c, ids, plan):
+    response = await c.post(
+        f"/v2/learning-plans/courses/course-a/students/{ids['student']}",
+        headers=as_("admin"),
+        json={
+            "request_key": str(uuid.uuid4()),
+            "plan_id": plan["id"],
+            "reason": "Prepare for the project viva.",
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 async def test_authoring_publish_freezes_and_revise_makes_a_new_version(plans):
     c, _, ids = plans
     assert (await c.get("/v2/learning-plans", headers=as_("staff"))).status_code == 403
@@ -97,9 +113,7 @@ async def test_steps_complete_in_order_from_evidence(plans):
     c, factory, ids = plans
     plan = await published_plan(c, ids)
     base = f"/v2/learning-plans/courses/course-a/students/{ids['student']}"
-    r = await c.post(base, headers=as_("admin"), json={
-        "request_key": str(uuid.uuid4()), "plan_id": plan["id"], "reason": "Prepare for the project viva."})
-    assert r.status_code == 201, r.text
+    await assign_plan(c, ids, plan)
     mine = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
     assert [s["status"] for s in mine["steps"]] == ["current", "upcoming", "upcoming"]
 
@@ -108,22 +122,19 @@ async def test_steps_complete_in_order_from_evidence(plans):
         # A finished mock before the drill does not skip ahead: steps go in order.
         s.add(Interview(user_id=ids["student"], track="Defence", course_id="course-a", interview_mode="practice",
                         job_profile_id=ids["mock"], status="completed", completed_at=later))
-        await s.commit()
-    drill_step = mine["steps"][0]["id"]
-    receipt = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
-    async with factory() as s:
-        completion = (await s.execute(__import__("sqlalchemy").select(PracticeDrillCompletion.id).where(PracticeDrillCompletion.client_completion_id == "warmup:plan001"))).scalar_one()
-    bind = f"/v2/learning-plans/me/{receipt['id']}/steps/{drill_step}/drill-completion"
-    assert (await c.post(bind, json={"completion_id": completion}, headers=as_("student"))).status_code == 200
-    assert (await c.post(bind, json={"completion_id": completion}, headers=as_("student"))).status_code == 409
-    mine = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
-    assert [s["status"] for s in mine["steps"]] == ["current", "upcoming", "upcoming"]
-
-    async with factory() as s:
         s.add(PracticeDrillCompletion(user_id=ids["student"], module="warm_up", level="beginner",
                                       client_completion_id="warmup:plan001", evidence_kind="audio",
                                       evidence_units=300, completed_at=later - dt.timedelta(seconds=1)))
         await s.commit()
+    drill_step = mine["steps"][0]["id"]
+    receipt = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
+    async with factory() as s:
+        completion = (await s.execute(sa.select(PracticeDrillCompletion.id).where(
+            PracticeDrillCompletion.client_completion_id == "warmup:plan001"
+        ))).scalar_one()
+    bind = f"/v2/learning-plans/me/{receipt['id']}/steps/{drill_step}/drill-completion"
+    assert (await c.post(bind, json={"completion_id": completion}, headers=as_("student"))).status_code == 200
+    assert (await c.post(bind, json={"completion_id": completion}, headers=as_("student"))).status_code == 409
     mine = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
     assert [s["status"] for s in mine["steps"]] == ["done", "done", "current"]
 
@@ -150,5 +161,101 @@ async def test_self_start_needs_an_open_plan_and_enrollment(plans):
     start["plan_id"] = open_plan["id"]
     r = await c.post("/v2/learning-plans/me/start", json=start, headers=as_("student"))
     assert r.status_code == 201 and r.json()["source"] == "self"
+    retry = await c.post("/v2/learning-plans/me/start", json=start, headers=as_("student"))
+    assert retry.status_code == 200 and retry.json()["id"] == r.json()["id"]
     elsewhere = {**start, "request_key": str(uuid.uuid4()), "course_id": "course-z"}
     assert (await c.post("/v2/learning-plans/me/start", json=elsewhere, headers=as_("student"))).status_code in (403, 404)
+
+
+async def test_cancelled_plan_rejects_late_step_submissions(plans):
+    c, _, ids = plans
+    assignment = await assign_plan(c, ids, await published_plan(c, ids))
+    cancel = await c.post(
+        f"/v2/learning-plans/courses/course-a/students/{ids['student']}/{assignment['id']}/cancel",
+        headers=as_("admin"),
+        json={"expected_version": assignment["version"], "reason": "This plan is no longer needed."},
+    )
+    assert cancel.status_code == 200, cancel.text
+    first_step = assignment["steps"][0]["id"]
+    response = await c.post(
+        f"/v2/learning-plans/me/{assignment['id']}/steps/{first_step}/reflection",
+        headers=as_("student"),
+        json={"text": "I will use a clearer opening for my next answer."},
+    )
+    assert response.status_code == 409
+
+
+async def test_reflection_replay_is_a_conflict_not_a_duplicate(plans):
+    c, factory, ids = plans
+    assignment = await assign_plan(c, ids, await published_plan(c, ids))
+    first, mock, reflection = assignment["steps"]
+    after_start = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1)
+    async with factory() as s:
+        s.add(LearningPlanStepProgress(
+            assignment_id=assignment["id"], step_id=first["id"], evidence_kind="drill_completion",
+            evidence_id=987654, completed_at=after_start,
+        ))
+        s.add(Interview(
+            user_id=ids["student"], track="Defence", course_id="course-a", interview_mode="practice",
+            job_profile_id=ids["mock"], status="completed", completed_at=after_start + dt.timedelta(seconds=1),
+        ))
+        await s.commit()
+    current = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
+    assert current["steps"][2]["status"] == "current"
+    url = f"/v2/learning-plans/me/{assignment['id']}/steps/{reflection['id']}/reflection"
+    payload = {"text": "I will open with the impact before describing implementation details."}
+    assert (await c.post(url, json=payload, headers=as_("student"))).status_code == 200
+    assert (await c.post(url, json=payload, headers=as_("student"))).status_code == 409
+
+
+async def test_drill_binding_rejects_wrong_module_and_revoked_enrollment(plans):
+    c, factory, ids = plans
+    assignment = await assign_plan(c, ids, await published_plan(c, ids))
+    step = assignment["steps"][0]
+    async with factory() as s:
+        s.add(PracticeDrillCompletion(
+            user_id=ids["student"], module="think_fast", level="beginner",
+            client_completion_id="wrong-module", evidence_kind="audio", evidence_units=300,
+        ))
+        await s.commit()
+        receipt_id = (await s.execute(sa.select(PracticeDrillCompletion.id).where(
+            PracticeDrillCompletion.client_completion_id == "wrong-module"
+        ))).scalar_one()
+    url = f"/v2/learning-plans/me/{assignment['id']}/steps/{step['id']}/drill-completion"
+    assert (await c.post(url, json={"completion_id": receipt_id}, headers=as_("student"))).status_code == 409
+    async with factory() as s:
+        student = await s.get(User, ids["student"])
+        student.enrolled_course_ids = []
+        await s.commit()
+    assert (await c.post(url, json={"completion_id": receipt_id}, headers=as_("student"))).status_code == 403
+
+
+async def test_mock_step_only_accepts_the_assigned_course_and_role(plans):
+    c, factory, ids = plans
+    assignment = await assign_plan(c, ids, await published_plan(c, ids))
+    first, mock, _ = assignment["steps"]
+    completed = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1)
+    async with factory() as s:
+        s.add(LearningPlanStepProgress(
+            assignment_id=assignment["id"], step_id=first["id"], evidence_kind="drill_completion",
+            evidence_id=123456, completed_at=completed,
+        ))
+        other = JobProfile(job_name="Different role", job_description="Different mock.",
+                           interview_mode="practice", status="published")
+        s.add(other)
+        await s.flush()
+        s.add_all([
+            Interview(user_id=ids["student"], track="Defence", course_id="course-b", interview_mode="practice",
+                      job_profile_id=ids["mock"], status="completed", completed_at=completed + dt.timedelta(seconds=1)),
+            Interview(user_id=ids["student"], track="Defence", course_id="course-a", interview_mode="practice",
+                      job_profile_id=other.id, status="completed", completed_at=completed + dt.timedelta(seconds=2)),
+        ])
+        await s.commit()
+    still_current = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
+    assert still_current["steps"][1]["id"] == mock["id"] and still_current["steps"][1]["status"] == "current"
+    async with factory() as s:
+        s.add(Interview(user_id=ids["student"], track="Defence", course_id="course-a", interview_mode="practice",
+                        job_profile_id=ids["mock"], status="completed", completed_at=completed + dt.timedelta(seconds=3)))
+        await s.commit()
+    advanced = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
+    assert advanced["steps"][2]["status"] == "current"

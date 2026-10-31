@@ -593,7 +593,11 @@ async def write_reflection(
             reflection=body.text, completed_at=dt.datetime.now(UTC),
         )
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except sa.exc.IntegrityError:
+        await session.rollback()
+        raise fastapi.HTTPException(409, "This reflection was already submitted. Refresh the plan.")
     return (await service.assignment_views(session, [row]))[0]
 
 
@@ -610,12 +614,30 @@ async def bind_drill_completion(assignment_id: int, step_id: int, body: DrillRec
     current = next((s for s in view["steps"] if s["status"] == "current"), None)
     if current is None or current["id"] != step_id or current["kind"] != "drill":
         raise fastapi.HTTPException(409, "This is not the drill step you are on.")
-    receipt = await session.get(PracticeDrillCompletion, body.completion_id)
+    receipt = (
+        await session.execute(
+            sa.select(PracticeDrillCompletion)
+            .where(PracticeDrillCompletion.id == body.completion_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
     if receipt is None or receipt.user_id != user.id or receipt.module != current["module"] or receipt.completed_at < row.created_at:
         raise fastapi.HTTPException(409, "This drill receipt cannot complete this plan step.")
     used = (await session.execute(sa.select(LearningPlanStepProgress.id).where(LearningPlanStepProgress.evidence_kind == "drill_completion", LearningPlanStepProgress.evidence_id == receipt.id))).scalar_one_or_none()
     if used is not None:
         raise fastapi.HTTPException(409, "This drill receipt was already used by a learning plan.")
-    session.add(LearningPlanStepProgress(assignment_id=row.id, step_id=step_id, evidence_kind="drill_completion", evidence_id=receipt.id, completed_at=receipt.completed_at))
-    await session.commit()
+    session.add(
+        LearningPlanStepProgress(
+            assignment_id=row.id,
+            step_id=step_id,
+            evidence_kind="drill_completion",
+            evidence_id=receipt.id,
+            completed_at=receipt.completed_at,
+        )
+    )
+    try:
+        await session.commit()
+    except sa.exc.IntegrityError:
+        await session.rollback()
+        raise fastapi.HTTPException(409, "This drill receipt was already used by a learning plan.")
     return (await service.assignment_views(session, [row]))[0]
