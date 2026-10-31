@@ -89,14 +89,28 @@ def upgrade():
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("assignment_id", "step_id", name="uq_learning_plan_step_progress"),
         sa.CheckConstraint(
-            "evidence_kind IN ('drill_completion', 'interview', 'reflection')",
+            "evidence_kind IN ('drill_completion', 'pronunciation_session', "
+            "'structure_practice', 'pacing_session', 'interview', 'reflection')",
             name="ck_learning_plan_progress_evidence",
         ),
     )
     op.create_index("ix_learning_plan_step_progress_assignment_id", "learning_plan_step_progress", ["assignment_id"])
+    # One recorded drill session can advance only one plan step, ever. Created here, with the
+    # table, so no later revision has to drop and recreate it.
+    op.create_index(
+        "uq_learning_plan_drill_evidence",
+        "learning_plan_step_progress",
+        ["evidence_kind", "evidence_id"],
+        unique=True,
+        postgresql_where=sa.text(
+            "evidence_kind IN ('drill_completion', 'pronunciation_session', "
+            "'structure_practice', 'pacing_session')"
+        ),
+    )
 
 
 def downgrade():
+    op.drop_index("uq_learning_plan_drill_evidence", "learning_plan_step_progress")
     op.drop_index("ix_learning_plan_step_progress_assignment_id", "learning_plan_step_progress")
     op.drop_table("learning_plan_step_progress")
     for column in ("course_id", "student_id", "plan_id"):

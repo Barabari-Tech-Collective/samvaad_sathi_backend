@@ -1,7 +1,7 @@
-"""Prevent a completion receipt from advancing more than one learning-plan step."""
+"""Folded into b8c9d0e1f2a4 (learning plans).
 
-from alembic import op
-
+The one-step-per-recorded-drill index is now created with the table. This revision stays so
+that any database already at it (or past it) keeps a valid history; it changes nothing."""
 
 revision = "c9d0e1f2a3b5"
 down_revision = "b8c9d0e1f2a4"
@@ -10,17 +10,8 @@ depends_on = None
 
 
 def upgrade():
-    op.create_index(
-        "uq_learning_plan_drill_evidence",
-        "learning_plan_step_progress",
-        ["evidence_id"],
-        unique=True,
-        postgresql_where="evidence_kind = 'drill_completion'",
-    )
+    pass
 
 
 def downgrade():
-    op.drop_index(
-        "uq_learning_plan_drill_evidence",
-        "learning_plan_step_progress",
-    )
+    pass
