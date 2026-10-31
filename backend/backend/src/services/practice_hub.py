@@ -26,6 +26,7 @@ from src.models.db.structure_practice import StructurePractice, StructurePractic
 from src.models.db.summary_report import SummaryReport
 from src.models.schemas.interview import (
     PracticeHubActivity,
+    PracticeHubActivityDay,
     PracticeHubFocus,
     PracticeHubResponse,
     PracticeHubResumeCard,
@@ -250,6 +251,36 @@ def _streak(activity_times: Iterable[datetime.datetime], now: datetime.datetime)
     return count
 
 
+def _daily_activity(
+    mock_times: Iterable[datetime.datetime],
+    drill_times: Iterable[datetime.datetime],
+    now: datetime.datetime,
+    *,
+    days: int = 7,
+) -> list[PracticeHubActivityDay]:
+    """Return a complete, India-local seven-day series so empty days stay visible."""
+    today = now.astimezone(_IST).date()
+    start = today - datetime.timedelta(days=days - 1)
+    mock_counts = collections.Counter(
+        value.astimezone(_IST).date()
+        for value in mock_times
+        if value is not None and start <= value.astimezone(_IST).date() <= today
+    )
+    drill_counts = collections.Counter(
+        value.astimezone(_IST).date()
+        for value in drill_times
+        if value is not None and start <= value.astimezone(_IST).date() <= today
+    )
+    return [
+        PracticeHubActivityDay(
+            date=start + datetime.timedelta(days=offset),
+            completed_mocks=mock_counts[start + datetime.timedelta(days=offset)],
+            completed_drills=drill_counts[start + datetime.timedelta(days=offset)],
+        )
+        for offset in range(days)
+    ]
+
+
 async def build_practice_hub(
     session: AsyncSession,
     *,
@@ -258,6 +289,10 @@ async def build_practice_hub(
 ) -> PracticeHubResponse:
     current_time = now or datetime.datetime.now(datetime.timezone.utc)
     week_start = _week_start(current_time)
+    local_today = current_time.astimezone(_IST).date()
+    activity_window_start = datetime.datetime.combine(
+        local_today - datetime.timedelta(days=6), datetime.time.min, tzinfo=_IST
+    ).astimezone(datetime.timezone.utc)
 
     resume_stmt = (
         sqlalchemy.select(Interview)
@@ -409,7 +444,7 @@ async def build_practice_hub(
         Interview.user_id == user_id,
         Interview.interview_mode == "practice",
         Interview.status == "completed",
-        Interview.completed_at >= week_start,
+        Interview.completed_at >= activity_window_start,
     )
     mock_times = [
         value for value in (await session.execute(mocks_stmt)).scalars().all() if value
@@ -418,7 +453,7 @@ async def build_practice_hub(
     pacing_stmt = sqlalchemy.select(PacingPracticeSession.updated_at).where(
         PacingPracticeSession.user_id == user_id,
         PacingPracticeSession.status == "completed",
-        PacingPracticeSession.updated_at >= week_start,
+        PacingPracticeSession.updated_at >= activity_window_start,
     )
     pacing_times = [
         value for value in (await session.execute(pacing_stmt)).scalars().all() if value
@@ -433,7 +468,7 @@ async def build_practice_hub(
         .where(
             StructurePractice.user_id == user_id,
             StructurePracticeAnswer.analyzed_at.is_not(None),
-            StructurePracticeAnswer.analyzed_at >= week_start,
+            StructurePracticeAnswer.analyzed_at >= activity_window_start,
         )
         .group_by(StructurePractice.id)
     )
@@ -445,7 +480,7 @@ async def build_practice_hub(
 
     completion_stmt = sqlalchemy.select(PracticeDrillCompletion.completed_at).where(
         PracticeDrillCompletion.user_id == user_id,
-        PracticeDrillCompletion.completed_at >= week_start,
+        PracticeDrillCompletion.completed_at >= activity_window_start,
     )
     completion_times = [
         value
@@ -457,8 +492,9 @@ async def build_practice_hub(
     return PracticeHubResponse(
         activity=PracticeHubActivity(
             practice_days_streak=_streak(mock_times + drill_times, current_time),
-            completed_mocks_this_week=len(mock_times),
-            completed_drills_this_week=len(drill_times),
+            completed_mocks_this_week=sum(value >= week_start for value in mock_times),
+            completed_drills_this_week=sum(value >= week_start for value in drill_times),
+            daily_activity=_daily_activity(mock_times, drill_times, current_time),
         ),
         resume=resume_card,
         focus=infer_focus(report_payloads, evidence_count),

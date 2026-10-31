@@ -6,6 +6,7 @@ import pytest
 
 from src.models.schemas.interview import CompletePracticeDrillRequest
 from src.services.practice_hub import (
+    _daily_activity,
     _streak,
     has_evidence,
     infer_focus,
@@ -106,6 +107,22 @@ def test_streak_uses_india_calendar_days_and_allows_yesterday_as_latest_day():
     ]
 
     assert _streak(activity, now) == 3
+
+
+def test_daily_activity_has_seven_india_calendar_days_and_keeps_empty_days():
+    now = datetime.datetime(2026, 10, 17, 20, 0, tzinfo=datetime.timezone.utc)
+    daily = _daily_activity(
+        [datetime.datetime(2026, 10, 17, 19, 0, tzinfo=datetime.timezone.utc)],
+        [datetime.datetime(2026, 10, 15, 20, 0, tzinfo=datetime.timezone.utc)],
+        now,
+    )
+
+    assert [row.date.isoformat() for row in daily] == [
+        "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15",
+        "2026-10-16", "2026-10-17", "2026-10-18",
+    ]
+    assert [(row.completed_mocks, row.completed_drills) for row in daily][-1] == (1, 0)
+    assert [(row.completed_mocks, row.completed_drills) for row in daily][4] == (0, 1)
 
 
 def test_drill_completion_rejects_empty_client_evidence():

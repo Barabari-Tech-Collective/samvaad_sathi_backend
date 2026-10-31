@@ -330,6 +330,15 @@ class PracticeHubActivity(BaseSchemaModel):
     practice_days_streak: int = pydantic.Field(default=0, ge=0)
     completed_mocks_this_week: int = pydantic.Field(default=0, ge=0)
     completed_drills_this_week: int = pydantic.Field(default=0, ge=0)
+    daily_activity: list["PracticeHubActivityDay"] = pydantic.Field(default_factory=list, max_length=7)
+
+
+class PracticeHubActivityDay(BaseSchemaModel):
+    """One local-calendar day of private practice activity; never a score."""
+
+    date: datetime.date
+    completed_mocks: int = pydantic.Field(default=0, ge=0)
+    completed_drills: int = pydantic.Field(default=0, ge=0)
 
 
 class PracticeHubResponse(BaseSchemaModel):
