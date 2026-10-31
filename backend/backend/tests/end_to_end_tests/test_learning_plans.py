@@ -109,6 +109,13 @@ async def test_steps_complete_in_order_from_evidence(plans):
         s.add(Interview(user_id=ids["student"], track="Defence", course_id="course-a", interview_mode="practice",
                         job_profile_id=ids["mock"], status="completed", completed_at=later))
         await s.commit()
+    drill_step = mine["steps"][0]["id"]
+    receipt = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
+    async with factory() as s:
+        completion = (await s.execute(__import__("sqlalchemy").select(PracticeDrillCompletion.id).where(PracticeDrillCompletion.client_completion_id == "warmup:plan001"))).scalar_one()
+    bind = f"/v2/learning-plans/me/{receipt['id']}/steps/{drill_step}/drill-completion"
+    assert (await c.post(bind, json={"completion_id": completion}, headers=as_("student"))).status_code == 200
+    assert (await c.post(bind, json={"completion_id": completion}, headers=as_("student"))).status_code == 409
     mine = (await c.get("/v2/learning-plans/me/plans", headers=as_("student"))).json()["items"][0]
     assert [s["status"] for s in mine["steps"]] == ["current", "upcoming", "upcoming"]
 
