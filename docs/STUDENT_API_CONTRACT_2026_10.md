@@ -221,3 +221,18 @@ Allowlist path: `/v2/data-requests`.
 - A person must verify identity first; nothing is deleted or exported until then. Show this in the UI.
 - A completed deletion has `outcome`: `deleted` (`category`, `count`), `retained` (`category`, `reason`) and
   `pending` (`category`, `reason`). Show all three plainly; assessment evidence is retained on purpose.
+
+## 12. Assigned AI interviews (F14)
+
+Allowlist path: `/v2/assessment-assignments`.
+
+- `GET /v2/assessment-assignments/me` -> `{items: [{id, job_profile_id, job_name, difficulty, opens_at,
+  closes_at, instructions, accommodations: [{code, label}], status, phase, version, interview_id}]}`.
+  `phase`: `upcoming` | `open` | `closed` | `started` | `completed`. Cancelled ones are not listed.
+- Start only when `phase` is `open`, with `POST /v2/interviews/create` using the item's `job_profile_id` and
+  `difficulty` (as before). Outside the window the server answers 409 with a plain next step; show it as is.
+  A `closed` assignment says to ask the facilitator to reschedule. A template changed after assignment also
+  answers 409 ("assign it again").
+- Learners with no assignment for a template keep today's open access.
+- `accommodations` are the confirmed conditions when it was assigned (labels only). Extra time is not yet
+  applied to the timer by the server.

@@ -54,3 +54,4 @@ from .learner_context import LearnerContext  # noqa: F401
 from .feedback_issue import FeedbackIssue  # noqa: F401
 from .accommodation import AccommodationRequest  # noqa: F401
 from .data_request import DataRequest  # noqa: F401
+from .assessment_assignment import AssessmentAssignment  # noqa: F401

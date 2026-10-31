@@ -14,6 +14,7 @@ CATALOGUE = {
     "practice_coaching": {"label": "Practice coaching", "operations": ["read", "create", "update", "delete"]},
     "bulk_ats": {"label": "Bulk ATS", "operations": ["read", "create", "update", "delete"]},
     "teams": {"label": "Members and teams", "operations": ["read", "create", "update", "delete"]},
+    "assessment_assignments": {"label": "Assign AI assessments", "operations": ["read", "create", "update"]},
     "accommodations": {"label": "Accommodation requests (restricted)", "operations": ["read", "update"]},
     "data_requests": {"label": "Student data export and deletion requests (restricted)", "operations": ["read", "update"]},
 }

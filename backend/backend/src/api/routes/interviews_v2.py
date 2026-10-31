@@ -116,6 +116,8 @@ CURATED_QUESTION_COUNT = 5
 MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS = 2
 
 
+from src.services import assessment_assignments  # noqa: E402
+
 router = fastapi.APIRouter(prefix="/v2", tags=["interviews-v2"])
 
 
@@ -419,6 +421,15 @@ async def create_or_resume_interview_v2(
                 status_code=fastapi.status.HTTP_409_CONFLICT, detail=refusal
             )
 
+    assignment = None
+    if payload.job_profile_id is not None and job_profile.interview_mode == "assessment":
+        assignment = await assessment_assignments.start_check(
+            interview_repo.async_session, current_user.id, job_profile, payload.course_id
+        )
+        if assignment is not None and assignment.difficulty != difficulty:
+            raise fastapi.HTTPException(
+                409, f"This assessment was assigned at the {assignment.difficulty} level."
+            )
     interview = await interview_repo.create_interview(
         user_id=current_user.id,
         course_id=payload.course_id,
@@ -428,6 +439,10 @@ async def create_or_resume_interview_v2(
         question_count=payload.question_count,
         fixed_length=payload.client_contract == "fixed-round-v1",
     )
+    if assignment is not None and assignment.status == "assigned":
+        assignment.status, assignment.interview_id = "started", interview.id
+        assignment.version += 1
+        await interview_repo.async_session.commit()
     await track_analytics_event(
         interview_repo.async_session,
         event_type="interview_started",
