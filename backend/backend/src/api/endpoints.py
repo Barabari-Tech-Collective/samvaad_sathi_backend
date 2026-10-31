@@ -74,6 +74,8 @@ router.include_router(router=staff_access_router)
 
 from src.api.routes.coaching_assignments import router as coaching_assignments_router
 router.include_router(router=coaching_assignments_router)
+from src.api.routes.mock_assignments import router as mock_assignments_router
+router.include_router(router=mock_assignments_router)
 
 from src.api.routes.course_shortlists import router as course_shortlists_router
 router.include_router(router=course_shortlists_router)

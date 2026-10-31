@@ -306,3 +306,55 @@ async def test_past_due_creation_rejected_but_late_completion_allowed(db, monkey
                 ),
             )
         assert error.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_mock_interview_assignment_completes_from_a_finished_mock(db, monkeypatch):
+    from src.api.routes import mock_assignments as mocks
+    from src.models.db.interview import Interview
+    from src.models.db.job_profile import JobProfile
+
+    _, factory, student_id = db
+    monkeypatch.setattr(mocks, "authorize_staff", AsyncMock())
+    async with factory() as session:
+        draft = JobProfile(job_name="Draft mock", job_description="A mock template still in draft.",
+                           interview_mode="practice", status="draft")
+        mock = JobProfile(job_name="Analyst mock", job_description="Practise analyst interview answers.",
+                          interview_mode="practice", status="published")
+        formal = JobProfile(job_name="Analyst assessment", job_description="Formal analyst assessment round.",
+                            interview_mode="assessment", status="published")
+        session.add_all([draft, mock, formal])
+        await session.commit()
+        user = await session.get(User, student_id)
+
+        def make(template):
+            return mocks.Create(request_key=uuid4(), job_profile_id=template,
+                                reason="Try a full analyst mock interview")
+
+        for bad in (draft.id, formal.id):
+            with pytest.raises(fastapi.HTTPException) as error:
+                await mocks.create_mock_assignment("course-a", student_id, make(bad), fastapi.Response(), user, session)
+            assert error.value.status_code == 422
+        created = await mocks.create_mock_assignment(
+            "course-a", student_id, make(mock.id), fastapi.Response(), user, session
+        )
+        assert created["job_name"] == "Analyst mock" and created["status"] == "assigned"
+        # Drill follow-ups for the current student app are unaffected.
+        drills = await routes.own_assignments(fastapi.Response(), 1, 25, user, session)
+        assert drills["items"] == []
+        session.add(Interview(
+            user_id=student_id, track="Analyst", course_id="course-a", interview_mode="practice",
+            job_profile_id=mock.id, status="completed",
+            completed_at=datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=1),
+        ))
+        await session.commit()
+        own = await mocks.own_mock_assignments(fastapi.Response(), 1, 25, user, session)
+        item = own["items"][0]
+        assert item["status"] == "completed" and item["interview_id"] is not None
+        with pytest.raises(fastapi.HTTPException) as error:
+            await mocks.cancel_mock_assignment(
+                "course-a", student_id, item["id"],
+                mocks.Cancel(expected_version=2, reason="No longer needed for this learner"),
+                user, session,
+            )
+        assert error.value.status_code == 409
