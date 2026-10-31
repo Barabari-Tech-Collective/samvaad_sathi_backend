@@ -437,7 +437,34 @@ async def link_screening(
     batch = await session.get(BulkATSBatch, batch_id)
     if batch is None or (not is_admin_user(user) and batch.created_by != user.id):
         raise fastapi.HTTPException(404, "Screening run not found.")
+    if batch.opportunity_id not in (None, row.id):
+        # Moving a run silently would take it away from another opening's reviewers.
+        raise fastapi.HTTPException(
+            409, "This screening run belongs to another opening. Unlink it there first."
+        )
     batch.opportunity_id = row.id
     _audit(session, user, row, "opportunity_screening_linked", {"batch_id": batch_id})
     await session.commit()
     return {"id": batch.id, "name": batch.name}
+
+
+@router.delete("/{opportunity_id}/screening/{batch_id}")
+async def unlink_screening(
+    opportunity_id: int,
+    batch_id: int,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Detach a screening run from this opening. The run and its results are kept."""
+    row, _ = await _load(session, user, opportunity_id, "update", lock=True)
+    batch = await session.get(BulkATSBatch, batch_id)
+    if (
+        batch is None
+        or batch.opportunity_id != row.id
+        or (not is_admin_user(user) and batch.created_by != user.id)
+    ):
+        raise fastapi.HTTPException(404, "Screening run not found on this opening.")
+    batch.opportunity_id = None
+    _audit(session, user, row, "opportunity_screening_unlinked", {"batch_id": batch_id})
+    await session.commit()
+    return {"id": batch.id}

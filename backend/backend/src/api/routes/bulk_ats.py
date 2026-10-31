@@ -583,6 +583,7 @@ async def list_batches(
             "name": b.name,
             "roleName": b.role_name,
             "status": b.status,
+            "opportunityId": b.opportunity_id,
             "createdAt": b.created_at,
             "createdBy": {
                 "id": b.created_by,
