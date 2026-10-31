@@ -61,6 +61,9 @@ class HumanInterview(Base):
     role_name: Mapped[str | None] = mapped_column(sa.String(160))
     instructions: Mapped[str | None] = mapped_column(sa.Text)
     interviewer_name: Mapped[str | None] = mapped_column(sa.String(120))
+    # The staff member who takes the interview, when it is not the scheduler (pack F17). A plain
+    # id: HumanInterview already links to user through host_id.
+    interviewer_id: Mapped[int | None] = mapped_column(sa.Integer, index=True)
     reschedule_count: Mapped[int] = mapped_column(server_default="0")
     # Host-entered outcome. Students see it only once result_released_at is set.
     result: Mapped[str | None] = mapped_column(sa.String(24))

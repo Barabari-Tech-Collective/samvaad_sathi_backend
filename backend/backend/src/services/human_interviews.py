@@ -4,6 +4,8 @@ import datetime as dt
 import re
 import fastapi
 import sqlalchemy as sa
+
+from src.models.db.human_interview import HumanInterview
 from src.api.dependencies.admin import is_admin_user
 from src.models.db.user import User
 from src.models.db.team_member import TeamMember
@@ -59,6 +61,11 @@ async def authorize(user, course_id, session, operation, *, historical=False):
                 )
         return sa.or_(*clauses) if clauses else sa.false()
     return student_predicate(course_id, grants, global_access=is_admin_user(user))
+
+
+def involved(user):
+    """WHERE clause on HumanInterview: this person hosts it or was assigned to take it."""
+    return sa.or_(HumanInterview.host_id == user.id, HumanInterview.interviewer_id == user.id)
 
 
 def joinable(row, now):

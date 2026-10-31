@@ -432,7 +432,7 @@ async def human_record(
             "student": person(student),
             "interviewer": {
                 "name": row.interviewer_name or (host.name if host else None),
-                "is_you": row.host_id == user.id,
+                "is_you": user.id in (row.host_id, row.interviewer_id),
             },
         },
         "execution": {

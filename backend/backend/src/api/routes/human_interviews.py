@@ -33,6 +33,8 @@ class Create(BaseModel):
     role_name: str | None = Field(None, max_length=160)
     instructions: str | None = Field(None, max_length=2000)
     interviewer_name: str | None = Field(None, max_length=120)
+    # A staff member who takes the interview instead of the scheduler (pack F17).
+    interviewer_id: int | None = Field(None, ge=1)
     # The opening this round is for, when scheduled from one (pack F25).
     opportunity_id: int | None = Field(None, ge=1)
 
@@ -172,7 +174,7 @@ async def staff_row(
         )
     )
     if not is_admin_user(user):
-        statement = statement.where(HumanInterview.host_id == user.id)
+        statement = statement.where(service.involved(user))
     if lock:
         statement = statement.with_for_update(of=HumanInterview)
     row = (await session.execute(statement)).scalar_one_or_none()
@@ -201,7 +203,7 @@ async def staff_list(
         service.student_only(),
     ]
     if not is_admin_user(user):
-        conditions.append(HumanInterview.host_id == user.id)
+        conditions.append(service.involved(user))
     from src.services.sampark_enrollment_sync import freshness_predicate
 
     current_enrollment = sa.and_(
@@ -305,6 +307,26 @@ async def create(
         raise fastapi.HTTPException(404, "Eligible student not found.")
     if body.opportunity_id is not None:
         await open_opportunity_in_course(session, body.opportunity_id, course_id)
+    if body.interviewer_id is not None and body.interviewer_id != user.id:
+        interviewer = await session.get(User, body.interviewer_id)
+        from src.services.course_access import grants_for
+
+        covers = interviewer is not None and (
+            is_admin_user(interviewer)
+            or any(course_id in g.course_ids for g in await grants_for(interviewer, session))
+        )
+        if (
+            interviewer is None
+            or interviewer.id == student
+            or not service.permitted(interviewer, "update")
+            or not covers
+        ):
+            raise fastapi.HTTPException(
+                422,
+                "Choose an interviewer who may take human interviews in this course.",
+            )
+        if not body.interviewer_name:
+            body.interviewer_name = interviewer.name
     canonical = {
         "course_id": course_id,
         **body.model_dump(mode="json", exclude={"request_key"}),
@@ -356,6 +378,9 @@ async def create(
                 sa.or_(
                     HumanInterview.student_id.in_([user.id, student]),
                     HumanInterview.host_id.in_([user.id, student]),
+                    HumanInterview.interviewer_id.in_(
+                        [i for i in (user.id, body.interviewer_id) if i]
+                    ),
                 ),
             )
             .limit(1)
@@ -551,6 +576,16 @@ async def record_outcome(
     if row.result_released_at is not None:
         raise fastapi.HTTPException(
             409, "This result was already shared with the student."
+        )
+    from src.models.db.human_scorecard import HumanScorecard
+
+    if (
+        await session.execute(
+            sa.select(HumanScorecard.id).where(HumanScorecard.appointment_id == row.id)
+        )
+    ).scalar_one_or_none():
+        raise fastapi.HTTPException(
+            409, "This interview has a scorecard. Submit it for review instead."
         )
     now = dt.datetime.now(service.UTC)
     row.result, row.feedback = body.result, body.feedback

@@ -46,7 +46,7 @@ def _interview_scope(user):
     """Admins see every interview; anyone else only those they host."""
     scope = [interviews.student_only()]
     if not is_admin_user(user):
-        scope.append(HumanInterview.host_id == user.id)
+        scope.append(interviews.involved(user))
     return scope
 
 
@@ -209,6 +209,37 @@ async def _support_tasks(user, session, now):
         "Blocked sessions, delayed feedback or failed answers. Saved work is kept.",
         "Facilitator", "Open support",
         f"/dashboard/samvaad/courses/{oldest_course}/support", True, oldest,
+    )]
+
+
+async def _scorecard_tasks(user, session):
+    """Human interview scorecards submitted and waiting for a reviewer (pack F20)."""
+    from src.api.routes.human_scorecards import can_review
+    from src.models.db.human_scorecard import HumanScorecard
+    from src.services.course_access import grants_for
+
+    if not can_review(user):
+        return []
+    submitted = (
+        await session.execute(
+            sa.select(HumanInterview.course_id, HumanInterview.id, HumanScorecard.submitted_at,
+                      HumanScorecard.submitted_by)
+            .join(HumanScorecard, HumanScorecard.appointment_id == HumanInterview.id)
+            .where(HumanScorecard.status == "submitted")
+            .order_by(HumanScorecard.submitted_at)
+        )
+    ).all()
+    if not is_admin_user(user):
+        mine = {c for g in await grants_for(user, session) for c in g.course_ids}
+        submitted = [r for r in submitted if r.course_id in mine and r.submitted_by != user.id]
+    if not submitted:
+        return []
+    first = submitted[0]
+    return [_task(
+        "scorecards_to_review", "Interview scorecards to review", len(submitted),
+        "Approve or return each one; only an approved scorecard can be shared with the student.",
+        "Reviewer", "Review scorecards",
+        f"/dashboard/samvaad/assessments/human/{first.id}", True, first.submitted_at,
     )]
 
 
@@ -375,6 +406,7 @@ async def my_tasks(
         *await _human_tasks(user, session, now),
         *await _selection_tasks(user, session),
         *await _support_tasks(user, session, now),
+        *await _scorecard_tasks(user, session),
         *await _release_tasks(user, session),
         *await _review_tasks(user, session),
         *await _operations_tasks(user, session, now),

@@ -81,7 +81,7 @@ async def human_rounds(user, student_id, courses, session):
     ]
     # Same rule as the interviews list: only admins see rounds someone else hosts.
     if not is_admin_user(user):
-        conditions.append(HumanInterview.host_id == user.id)
+        conditions.append(interviews.involved(user))
     rows = (
         await session.execute(
             sa.select(HumanInterview)
