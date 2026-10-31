@@ -14,6 +14,7 @@ CATALOGUE = {
     "practice_coaching": {"label": "Practice coaching", "operations": ["read", "create", "update", "delete"]},
     "bulk_ats": {"label": "Bulk ATS", "operations": ["read", "create", "update", "delete"]},
     "teams": {"label": "Members and teams", "operations": ["read", "create", "update", "delete"]},
+    "accommodations": {"label": "Accommodation requests (restricted)", "operations": ["read", "update"]},
 }
 
 

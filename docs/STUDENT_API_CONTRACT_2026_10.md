@@ -185,3 +185,25 @@ notification (kind `feedback_issue_reviewed`).
 - `GET v2/feedback-issues/me` → `{ items: [{id, interview_id, question_attempt_id, kind, explanation, status: "open"|"resolved"|"dismissed", resolution, created_at, resolved_at}] }`
 
 Add `v2/profile-context/` and `v2/feedback-issues/` to the allowed paths in `session-axios.ts`.
+
+---
+
+## 10. Accommodations (F13)
+
+A student privately asks for support; a person holding the restricted *accommodations* permission
+approves a fixed set of conditions or declines, with a reason the student sees; the student confirms
+approved conditions. Only **confirmed** conditions are ever shown to an interviewer or reviewer, and
+only as labels.
+
+- `GET v2/accommodations/catalogue` → `{ conditions: [{code, label}] }` (extra_time_25/50/100, rest_breaks, read_aloud_instructions, flexible_rescheduling)
+- `POST v2/accommodations/me` `{request_key: uuid, description (10–2000)}` → 201 request. Same key → 200 existing.
+- `GET v2/accommodations/me` → `{ items: [{id, status: "requested"|"approved"|"declined"|"withdrawn", version, description, conditions: [{code,label}], decision_reason, decided_at, confirmed, created_at}] }`
+- `POST v2/accommodations/me/{id}/confirm` `{expected_version}` → request (confirmed). Only for an approved request.
+- `POST v2/accommodations/me/{id}/withdraw` `{expected_version}` → request (withdrawn; conditions stop applying).
+
+The decision arrives as a notification (`accommodation_decided`, no detail in the text). The preflight for
+an assessment should read `GET v2/accommodations/me`, use only items with `status: "approved"` and
+`confirmed: true`, and apply their conditions. Server enforcement of extra time on a started attempt
+arrives with F14 (the assignment snapshots the conditions).
+
+Add `v2/accommodations/` to the allowed paths in `session-axios.ts`.

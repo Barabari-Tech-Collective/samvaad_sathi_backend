@@ -36,6 +36,7 @@ from src.services.analytics import (
 )
 from src.services.course_access import grants_for, student_predicate
 from src.services import notifications
+from src.services.accommodations import confirmed_conditions
 from src.services.feature_access import permits
 from src.services.people import student_interview, student_only
 from sqlalchemy.orm.attributes import flag_modified
@@ -326,6 +327,8 @@ async def ai_record(
         "integrity": await integrity(user, interview, session),
         "history": await ai_history(session, interview.id),
         "corrections": await corrections(session, interview.id),
+        # Only confirmed condition labels, so whoever runs or reviews this sitting knows them.
+        "accommodations": await confirmed_conditions(session, interview.user_id),
         "can_correct": scored and may_release(user),
         "can_release": interview.status == "completed"
         and withheld(interview)
@@ -411,6 +414,7 @@ async def human_record(
     }
     return {
         "appointment": appointment,
+        "accommodations": await confirmed_conditions(session, row.student_id),
         "kind": "human",
         "id": row.id,
         "status": row.status,

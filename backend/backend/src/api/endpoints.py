@@ -96,6 +96,8 @@ from src.api.routes.profile_context import router as profile_context_router
 router.include_router(router=profile_context_router)
 from src.api.routes.feedback_issues import router as feedback_issues_router
 router.include_router(router=feedback_issues_router)
+from src.api.routes.accommodations import router as accommodations_router
+router.include_router(router=accommodations_router)
 from src.api.routes.staff_tasks import router as staff_tasks_router
 router.include_router(router=staff_tasks_router)
 from src.api.routes.opportunity_selection import router as opportunity_selection_router
