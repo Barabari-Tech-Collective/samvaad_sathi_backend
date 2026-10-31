@@ -152,3 +152,51 @@ async def test_learner_search_is_scoped_names_only(course):
     assert set(found["items"][0]) == {"id", "name", "college"}
     # Searching to add members is a managing action.
     assert (await c.get("/v2/cohorts/courses/course-a/learners", headers=as_("viewer"))).status_code == 403
+
+
+async def test_assign_to_a_cohort_follows_each_members_rules(course, db):
+    from src.models.db.opportunity import Opportunity
+    from src.models.db.practice_governance import PracticeConsent
+
+    c, users = course
+    _, factory, _ = db
+    async with factory() as s:
+        admin = User(email="admin@cohort.test", name="admin", password_hash="test", is_admin=True)
+        s.add(admin)
+        # asha shares practice for coaching; bilal does not.
+        s.add(PracticeConsent(user_id=users["asha"], purpose="facilitator_coaching", granted=True,
+                              policy_version="v1"))
+        opening = Opportunity(course_id="course-a", title="Analyst", organisation="Example",
+                              created_by=users["manager"], request_key=str(uuid.uuid4()), request_hash="x",
+                              max_evidence_age_days=30, min_assessments=1, status="open", eligibility_version=1)
+        s.add(opening)
+        await s.commit()
+        users["admin"], opening_id = admin.id, opening.id
+    cohort = await make(c)
+    base = f"/v2/cohorts/courses/course-a/{cohort['id']}"
+    await c.put(f"{base}/members", headers=as_("manager"), json={
+        "expected_version": 1, "add": [users["asha"], users["bilal"]], "reason": "Final-year group for placements."})
+
+    drill = {"request_key": str(uuid.uuid4()), "kind": "drill", "module": "warm_up",
+             "reason": "Everyone practises opening answers this week."}
+    r = await c.post(f"{base}/assign", json=drill, headers=as_("admin"))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [d["name"] for d in body["done"]] == ["asha"]
+    assert [s["name"] for s in body["skipped"]] == ["bilal"]
+    # Retrying the same request creates nothing twice.
+    again = (await c.post(f"{base}/assign", json=drill, headers=as_("admin"))).json()
+    assert [d["name"] for d in again["done"]] == ["asha"]
+    async with factory() as s:
+        from src.models.db.coaching_assignment import CoachingAssignment
+        import sqlalchemy as sa
+        n = (await s.execute(sa.select(sa.func.count(CoachingAssignment.id)))).scalar_one()
+        assert n == 1
+
+    opening_body = {"request_key": str(uuid.uuid4()), "kind": "opening", "opportunity_id": opening_id,
+                    "reason": "Whole batch is applying to this opening."}
+    r = await c.post(f"{base}/assign", json=opening_body, headers=as_("admin"))
+    assert r.status_code == 200, r.text
+    assert sorted(d["name"] for d in r.json()["done"]) == ["asha", "bilal"]
+    # The viewer cannot assign.
+    assert (await c.post(f"{base}/assign", json=drill, headers=as_("viewer"))).status_code == 403
