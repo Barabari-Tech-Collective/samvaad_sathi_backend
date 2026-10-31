@@ -156,6 +156,62 @@ async def _today(user, session, now):
     ]
 
 
+async def _support_tasks(user, session, now):
+    """Learners whose practice needs a look (pack F23), summed across every course where this
+    person may open the support queue, under that queue's own consent and scope rules."""
+    from src.api.routes.course_workspace import _shared_student_predicate
+    from src.models.db.interview import Interview
+    from src.services import course_support
+    from src.services.course_access import grants_for
+
+    if not course_support.allowed(user):
+        return []
+    if is_admin_user(user):
+        # Courses with practice in the last two weeks; older sittings are not new follow-ups.
+        courses = (
+            await session.execute(
+                sa.select(Interview.course_id)
+                .where(
+                    Interview.course_id.is_not(None),
+                    Interview.created_at >= now - dt.timedelta(days=14),
+                )
+                .distinct()
+            )
+        ).scalars().all()
+    else:
+        courses = sorted({c for g in await grants_for(user, session) for c in g.course_ids})
+    waiting, oldest_course, oldest = 0, None, None
+    for course_id in courses:
+        if not await course_support.can_open(user, course_id, session):
+            continue
+        try:
+            authorized = await _shared_student_predicate(
+                course_id, user, session, coaching_only=True
+            )
+        except fastapi.HTTPException:
+            continue
+        signals = course_support.support_query(course_id, authorized)
+        n, first = (
+            await session.execute(
+                sa.select(sa.func.count(), sa.func.min(signals.c.created_at))
+                .select_from(signals)
+                .where(signals.c.issue.is_not(None))
+            )
+        ).one()
+        if n:
+            waiting += int(n)
+            if oldest is None or first < oldest:
+                oldest, oldest_course = first, course_id
+    if not waiting:
+        return []
+    return [_task(
+        "support_follow_ups", "Learners whose practice needs a look", waiting,
+        "Blocked sessions, delayed feedback or failed answers. Saved work is kept.",
+        "Facilitator", "Open support",
+        f"/dashboard/samvaad/courses/{oldest_course}/support", True, oldest,
+    )]
+
+
 async def _release_tasks(user, session):
     """AI assessment results held for review (pack F16), for people who may release them."""
     from src.api.routes.assessment_records import may_release
@@ -318,6 +374,7 @@ async def my_tasks(
     tasks = [
         *await _human_tasks(user, session, now),
         *await _selection_tasks(user, session),
+        *await _support_tasks(user, session, now),
         *await _release_tasks(user, session),
         *await _review_tasks(user, session),
         *await _operations_tasks(user, session, now),
