@@ -169,6 +169,11 @@ async def test_human_record_separates_feedback_from_internal_reasons(records):
     assert body["execution"]["close_reason"] == "Panel agreed the student attended in full."
     assert body["participants"]["interviewer"]["is_you"] is True
     assert [e["action"] for e in body["history"]] == ["human_interview_closed"]
+    # The list's own entry, so the record can offer the list's actions.
+    appointment = body["appointment"]
+    assert appointment["id"] == ids["human"] and appointment["student_name"] == "student"
+    assert appointment["can_record_result"] is True and appointment["can_manage"] is False
+    assert appointment["enrollment_current"] is True
 
 
 async def test_human_record_hidden_from_other_hosts_and_outsiders(records):

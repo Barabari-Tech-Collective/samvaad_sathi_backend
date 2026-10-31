@@ -385,7 +385,31 @@ async def human_record(
             for e, name in events
         ]
     released = row.result_released_at is not None
+    # The same entry the Human interviews list shows, so the record offers the same Join,
+    # reschedule, close and outcome actions under the same rules.
+    from src.services.sampark_enrollment_sync import freshness_predicate
+
+    now = dt.datetime.now(dt.timezone.utc)
+    current = (
+        await session.execute(
+            sa.select(
+                sa.and_(
+                    User.enrolled_course_ids.contains([row.course_id]),
+                    freshness_predicate(),
+                )
+            ).where(User.id == row.student_id)
+        )
+    ).scalar_one()
+    appointment = interviews.metadata(
+        row, now, can_manage=interviews.permitted(user, "update"), staff=True
+    ) | {
+        "student_name": student.name,
+        "can_join": bool(current) and interviews.joinable(row, now),
+        "can_report_result": bool(current),
+        "enrollment_current": bool(current),
+    }
     return {
+        "appointment": appointment,
         "kind": "human",
         "id": row.id,
         "status": row.status,
