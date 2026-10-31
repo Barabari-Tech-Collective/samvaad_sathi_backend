@@ -16,6 +16,8 @@ EXPORT_LIMIT = 1000
 class RosterFilters(BaseModel):
     q: str = Field(default="", max_length=100)
     activity: Activity = "all"
+    # Narrow to one cohort; the route checks it belongs to the course first.
+    cohort_id: int | None = Field(default=None, ge=1)
 
     @field_validator("q", mode="before")
     @classmethod
@@ -57,6 +59,18 @@ def roster_predicate(authorized, completed, filters):
             sa.or_(
                 User.name.ilike(f"%{literal}%", escape="\\"),
                 User.university.ilike(f"%{literal}%", escape="\\"),
+            ),
+        )
+    if filters.cohort_id is not None:
+        from src.models.db.cohort import CohortMember
+
+        predicate = sa.and_(
+            predicate,
+            sa.exists(
+                sa.select(CohortMember.id).where(
+                    CohortMember.cohort_id == filters.cohort_id,
+                    CohortMember.student_id == User.id,
+                )
             ),
         )
     if filters.activity == "practised":

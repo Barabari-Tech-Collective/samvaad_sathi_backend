@@ -30,6 +30,7 @@ from src.services import human_interviews as interviews
 from src.services.course_access import grants_for, student_predicate
 from src.services.feature_access import permits
 from src.services.people import student_only
+from src.api.routes.cohorts import learner_cohorts
 
 router = fastapi.APIRouter(prefix="/v2/learners", tags=["learners"])
 
@@ -229,6 +230,7 @@ async def record(
             and allowed(user, "practice_coaching", "create"),
             "schedule_assessment": bool(courses) and interviews.permitted(user, "create"),
         },
+        "cohorts": await learner_cohorts(session, student.id, courses),
         "human_rounds": await human_rounds(user, student.id, courses, session),
         "opportunities": await openings(user, student.id, courses, session),
         "as_of": now.isoformat(),

@@ -116,6 +116,19 @@ async def my_course_scope(
     }
 
 
+async def _cohort_in_course(session, course_id, cohort_id):
+    """A cohort filter must name a cohort of this course."""
+    if cohort_id is None:
+        return
+    from src.models.db.cohort import Cohort
+
+    owner = (
+        await session.execute(sa.select(Cohort.course_id).where(Cohort.id == cohort_id))
+    ).scalar_one_or_none()
+    if owner != course_id:
+        raise fastapi.HTTPException(404, "Cohort not found in this course.")
+
+
 async def _shared_student_predicate(course_id, current_user, session, *, coaching_only=False):
     memberships = await get_user_active_memberships(current_user.id, session)
     grants = membership_grants(memberships)
@@ -167,6 +180,7 @@ async def course_students(
     session=fastapi.Depends(get_async_session),
     q: Annotated[str, fastapi.Query(max_length=100)] = "",
     activity: Activity = "all",
+    cohort: Annotated[int | None, fastapi.Query(ge=1)] = None,
     response: fastapi.Response = None,
 ):
     if response is not None:
@@ -175,8 +189,9 @@ async def course_students(
     from src.services.human_interviews import permitted as human_permitted
     from src.services.integrity_review import permitted as integrity_permitted
     from src.services.course_support import can_open as support_can_open
-    filters = RosterFilters(q=q, activity=activity)
+    filters = RosterFilters(q=q, activity=activity, cohort_id=cohort)
     authorized = await _shared_student_predicate(course_id, current_user, session)
+    await _cohort_in_course(session, course_id, cohort)
     completed = completed_practice_count(course_id)
     predicate = roster_predicate(authorized, completed, filters)
     summary = (
@@ -245,6 +260,7 @@ async def export_course_students(
             current_user.feature_permissions, "course_workspace", "export"
         )
     authorized = await _shared_student_predicate(course_id, current_user, session)
+    await _cohort_in_course(session, course_id, body.cohort_id)
     completed = completed_practice_count(course_id)
     predicate = roster_predicate(authorized, completed, body)
     rows = (

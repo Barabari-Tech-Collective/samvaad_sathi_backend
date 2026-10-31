@@ -63,6 +63,8 @@ router.include_router(router=bulk_ats_router, dependencies=[fastapi.Depends(feat
 router.include_router(router=teams_v2_router, dependencies=[fastapi.Depends(feature_gate("teams"))])
 router.include_router(router=practice_dashboard_router, dependencies=[fastapi.Depends(feature_gate("practice_coaching"))])
 router.include_router(router=course_workspace_router, dependencies=[fastapi.Depends(feature_gate("course_workspace"))])
+from src.api.routes.cohorts import router as cohorts_router
+router.include_router(router=cohorts_router, dependencies=[fastapi.Depends(feature_gate("course_workspace"))])
 # //working on staging
 
 router.include_router(router=feature_access_router)
