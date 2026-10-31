@@ -1,6 +1,7 @@
 """One bounded, private read model for the student's home-page next action."""
 
 import datetime as dt
+from urllib.parse import quote
 
 import fastapi
 import sqlalchemy as sa
@@ -103,7 +104,23 @@ async def today(
         plan = (await learning_plans.assignment_views(session, plans))[0]
         current = next((step for step in plan["steps"] if step["status"] == "current"), None)
         if current:
-            return {"action": {"kind": "learning_plan", "title": plan["plan"]["title"], "detail": f"Learning Plan · Step {current['position']}: {current['title']}", "href": "/coaching"}, "activity": activity}
+            drill_paths = {
+                "warm_up": "/warm-up-chat",
+                "think_fast": "/think-fast",
+                "pronunciation": "/pronunciation-practice",
+                "structure": "/structure-your-answer",
+                "pace": "/control-your-pace",
+            }
+            if current["kind"] == "drill" and current["module"] in drill_paths:
+                href = f"{drill_paths[current['module']]}?planAssignment={plan['id']}&planStep={current['id']}"
+            elif current["kind"] == "mock" and current["job_profile_id"]:
+                href = (
+                    "/interview-start?mode=practice"
+                    f"&jobProfileId={current['job_profile_id']}&courseId={quote(plan['course_id'], safe='')}"
+                )
+            else:
+                href = "/coaching"
+            return {"action": {"kind": "learning_plan", "title": plan["plan"]["title"], "detail": f"Learning Plan · Step {current['position']}: {current['title']}", "href": href}, "activity": activity}
 
     mock = (
         await session.execute(
@@ -121,5 +138,5 @@ async def today(
     ).first()
     if mock:
         row, name = mock
-        return {"action": {"kind": "mock_assignment", "title": f"Assigned Mock Interview: {name}", "detail": "Assigned by your program team.", "href": f"/interview-start?mode=practice&jobProfileId={row.job_profile_id}&courseId={row.course_id}"}, "activity": activity}
+        return {"action": {"kind": "mock_assignment", "title": f"Assigned Mock Interview: {name}", "detail": "Assigned by your program team.", "href": f"/interview-start?mode=practice&jobProfileId={row.job_profile_id}&courseId={quote(row.course_id, safe='')}"}, "activity": activity}
     return {"action": None, "activity": activity}
