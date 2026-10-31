@@ -15,6 +15,7 @@ CATALOGUE = {
     "bulk_ats": {"label": "Bulk ATS", "operations": ["read", "create", "update", "delete"]},
     "teams": {"label": "Members and teams", "operations": ["read", "create", "update", "delete"]},
     "accommodations": {"label": "Accommodation requests (restricted)", "operations": ["read", "update"]},
+    "data_requests": {"label": "Student data export and deletion requests (restricted)", "operations": ["read", "update"]},
 }
 
 

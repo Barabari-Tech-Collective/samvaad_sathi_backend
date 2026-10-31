@@ -538,3 +538,8 @@ async def _background_upload_and_enforce_limit(
         logger = logging.getLogger(__name__)
         logger.error(f"Failed background S3 resume upload: {e}")
         raise e
+
+
+async def delete_objects_from_s3(object_keys: list[str]) -> dict:
+    """Delete stored objects by key (answer recordings, resumes) with an auditable result."""
+    return await delete_bulk_ats_resumes_from_s3(object_keys)

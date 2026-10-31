@@ -207,3 +207,17 @@ an assessment should read `GET v2/accommodations/me`, use only items with `statu
 arrives with F14 (the assignment snapshots the conditions).
 
 Add `v2/accommodations/` to the allowed paths in `session-axios.ts`.
+
+## 11. Export or delete my data (F32)
+
+Allowlist path: `/v2/data-requests`.
+
+- `POST /v2/data-requests` `{request_key (uuid), kind: "export"|"deletion", note?}` -> 201 (200 on replay). 409 if
+  you already have an open request of that kind.
+- `GET /v2/data-requests/me` -> `{items: [{id, kind, status, version, note, outcome, closure_note, created_at,
+  completed_at}]}`. Status: `submitted` -> `verified` -> `completed` | `rejected`, or `withdrawn`.
+- `POST /v2/data-requests/{id}/withdraw` only while `submitted`.
+- `GET /v2/data-requests/{id}/export` -> JSON of your data once an export is `completed` (7 days, then 410).
+- A person must verify identity first; nothing is deleted or exported until then. Show this in the UI.
+- A completed deletion has `outcome`: `deleted` (`category`, `count`), `retained` (`category`, `reason`) and
+  `pending` (`category`, `reason`). Show all three plainly; assessment evidence is retained on purpose.
