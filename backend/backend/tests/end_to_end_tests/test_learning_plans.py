@@ -17,6 +17,8 @@ from src.models.db.job_profile import JobProfile
 from src.models.db.learning_plan import LearningPlanStepProgress
 from src.models.db.practice_drill_completion import PracticeDrillCompletion
 from src.models.db.pacing_practice import PacingPracticeSession
+from src.models.db.pronunciation_practice import PronunciationPractice
+from src.models.db.structure_practice import StructurePractice, StructurePracticeAnswer
 from src.models.db.practice_governance import PracticeConsent
 from src.models.db.user import User
 from .test_fixed_question_rounds import db, pytestmark  # noqa: F401
@@ -287,3 +289,42 @@ async def test_pacing_session_can_only_bind_to_its_current_pace_step(plans):
     url = f"/v2/learning-plans/me/{assignment['id']}/steps/{assignment['steps'][0]['id']}/drill-session"
     assert (await c.post(url, headers=as_("student"), json={"session_id": session_id})).status_code == 200
     assert (await c.post(url, headers=as_("student"), json={"session_id": session_id})).status_code == 409
+
+
+@pytest.mark.parametrize("module", ["pronunciation", "structure"])
+async def test_specialist_drill_binding_requires_owned_completed_evidence(plans, module):
+    c, factory, ids = plans
+    plan = (await c.post("/v2/learning-plans", headers=as_("admin"), json={
+        "request_key": str(uuid.uuid4()), "title": f"Improve {module}",
+        "goal": "Complete one verified specialist speaking practice session.",
+    })).json()
+    plan = (await c.put(f"/v2/learning-plans/{plan['id']}/steps", headers=as_("admin"), json={
+        "expected_row_version": plan["row_version"],
+        "steps": [{"kind": "drill", "module": module, "title": f"Complete {module} practice"}],
+    })).json()
+    plan = (await c.post(f"/v2/learning-plans/{plan['id']}/publish", headers=as_("admin"), json={
+        "expected_row_version": plan["row_version"]
+    })).json()
+    assignment = await assign_plan(c, ids, plan)
+    async with factory() as s:
+        if module == "pronunciation":
+            record = PronunciationPractice(
+                user_id=ids["student"], difficulty="easy", words=[{"word": "clarity"}], status="completed"
+            )
+            s.add(record)
+            await s.commit()
+            session_id = record.id
+        else:
+            record = StructurePractice(
+                user_id=ids["student"], track="Developer", questions=[{"sections": ["Situation"]}], status="active"
+            )
+            s.add(record)
+            await s.flush()
+            s.add(StructurePracticeAnswer(
+                practice_id=record.id, question_index=0, section_name="Situation",
+                answer_text="I clarified the task before choosing an approach.", analyzed_at=dt.datetime.now(dt.timezone.utc),
+            ))
+            await s.commit()
+            session_id = record.id
+    url = f"/v2/learning-plans/me/{assignment['id']}/steps/{assignment['steps'][0]['id']}/drill-session"
+    assert (await c.post(url, headers=as_("student"), json={"session_id": session_id})).status_code == 200
