@@ -1,3 +1,5 @@
+import logging
+
 import fastapi
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -10,6 +12,8 @@ from src.securities.authorizations.access_revocation import is_access_revoked
 from src.api.dependencies.repository import get_repository
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
 from src.utilities.server_timing import step
+
+logger = logging.getLogger(__name__)
 
 # Create HTTPBearer security scheme for Swagger UI
 security = HTTPBearer()
@@ -105,11 +109,17 @@ async def get_current_user(
         except EntityAlreadyExists:
             # Race between two concurrent first requests — re-fetch the now-existing row.
             user = await user_repo.get_user_by_email(email=email)
+    except fastapi.HTTPException:
+        raise
     except Exception:
+        # A database or pool failure says nothing about whether the caller is signed in.
+        # Answering 401 here made the frontend treat a valid session as expired and send
+        # staff back to the login page. 503 is retryable and keeps the session.
+        logger.exception("User lookup failed for a verified central token")
         raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
-            detail="User not found in database",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Sign-in could not be completed right now. Please try again.",
+            headers={"Retry-After": "2"},
         )
 
     if settings.CENTRAL_IDENTITY_CHECK_ENABLED:
