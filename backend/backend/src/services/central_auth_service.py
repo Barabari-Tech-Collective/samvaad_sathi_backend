@@ -144,15 +144,16 @@ async def provision_or_invite_staff(
     if resp.status_code not in (200, 201) or not body.get("isSuccess"):
         err_msg = body.get("errorMessage") or f"HTTP {resp.status_code}"
         logger.error(f"[central-auth] Provisioning failed for {email}: {err_msg}")
-        if 400 <= resp.status_code < 500:
-            existing_role = _extract_non_staff_role(err_msg)
-            if existing_role is not None:
-                raise CentralAuthNonStaffAccountError(
-                    f"The email '{email.strip().lower()}' already belongs to a "
-                    f"{existing_role.lower()} account, so it cannot be added as a team member. "
-                    "Please use a different email address.",
-                    existing_role=existing_role,
-                ) from None
+        # Match on the rejection text, not the HTTP status: Central Auth may report this
+        # business rule with any status code (including 200 + isSuccess=false).
+        existing_role = _extract_non_staff_role(err_msg)
+        if existing_role is not None:
+            raise CentralAuthNonStaffAccountError(
+                f"The email '{email.strip().lower()}' already belongs to a "
+                f"{existing_role.lower()} account, so it cannot be added as a team member. "
+                "Please use a different email address.",
+                existing_role=existing_role,
+            ) from None
         raise CentralAuthProvisioningError(f"Central Auth rejected provisioning: {err_msg}")
 
     data = body.get("data") or {}

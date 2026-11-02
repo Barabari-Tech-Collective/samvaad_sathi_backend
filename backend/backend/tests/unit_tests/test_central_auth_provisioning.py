@@ -95,6 +95,30 @@ async def test_provision_or_invite_staff_student_identity_raises_non_staff_error
     assert isinstance(exc_info.value, CentralAuthProvisioningError)
 
 
+@pytest.mark.parametrize("status_code", [200, 400, 403, 409, 422, 500])
+@pytest.mark.asyncio
+async def test_provision_or_invite_staff_student_identity_detected_for_any_status(monkeypatch, status_code):
+    from src.config.manager import settings
+    monkeypatch.setattr(settings, "AUTH_SERVICE_BASE_URL", "https://auth.barabari.org")
+    monkeypatch.setattr(settings, "CENTRAL_PROFILE_API_KEY", "secret-key")
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = status_code
+    mock_resp.headers = {"content-type": "application/json"}
+    mock_resp.json.return_value = {
+        "isSuccess": False,
+        "errorMessage": (
+            "Cannot provision or modify account with role 'STUDENT'. Operation is restricted to "
+            "staff accounts (STAFF, FACILITATOR). Non-staff and privileged identities cannot be modified."
+        ),
+    }
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_resp)):
+        with pytest.raises(CentralAuthNonStaffAccountError) as exc_info:
+            await provision_or_invite_staff(email="s@barabari.org", name="S")
+    assert exc_info.value.existing_role == "STUDENT"
+
+
 @pytest.mark.asyncio
 async def test_provision_or_invite_staff_server_error_is_not_non_staff_error(monkeypatch):
     from src.config.manager import settings
