@@ -40,6 +40,9 @@ async def test_pulse_compares_periods_and_counts_students_only(factory):
         staff = User(email="s@example.test", name="s", password_hash="x", is_admin=True)
         session.add_all([a, b, staff])
         await session.flush()
+        # Both learners signed up today, so this week has two sign-ups and last week none.
+        for user in (a, b, staff):
+            user.created_at = noon_today
 
         def interview(user, mode, status, days_ago):
             return Interview(
@@ -67,6 +70,9 @@ async def test_pulse_compares_periods_and_counts_students_only(factory):
 
         pulse = await get_dashboard_pulse(days=7, current_user=staff, session=session)
         m = pulse["metrics"]
+        # Staff accounts are never counted as sign-ups.
+        assert m["sign_ups"]["value"] == 2 and m["sign_ups"]["previous"] == 0
+        assert m["sign_ups"]["series"][-1] == 2 and len(m["sign_ups"]["series"]) == 7
         assert m["active_learners"]["value"] == 2 and m["active_learners"]["previous"] == 1
         assert m["assessments_taken"]["value"] == 2 and m["assessments_taken"]["change"] == 1
         assert m["average_assessment_score"]["value"] == 50.0

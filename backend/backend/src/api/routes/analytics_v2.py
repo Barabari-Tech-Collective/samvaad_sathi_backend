@@ -2610,6 +2610,19 @@ async def get_forecasting(
 _PULSE_PERIOD_DAYS = (7, 30)
 
 
+def _count_by_ist_day(moments) -> dict[datetime.date, int]:
+    """Count timestamps per Indian calendar day. A timestamp without a zone is taken as UTC."""
+    counts: dict[datetime.date, int] = {}
+    for moment in moments:
+        if moment is None:
+            continue
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        day = moment.astimezone(_IST).date()
+        counts[day] = counts.get(day, 0) + 1
+    return counts
+
+
 @router.get(
     "/dashboard/pulse",
     summary="Programme pulse for the staff Overview",
@@ -2650,6 +2663,31 @@ async def get_dashboard_pulse(
     interviews = [
         i for i in fetched if previous_start <= i.created_at.astimezone(_IST).date() <= today
     ]
+
+    # Sign-ups: learners whose account was created in the period, under the same student and
+    # college rules as the sign-ups chart. One extra day each side for the UTC/IST edge.
+    signups_by_day: dict[datetime.date, int] = {}
+    if allowed_colleges is None or allowed_colleges:
+        signup_stmt = sqlalchemy.select(User.created_at).where(
+            student_only(),
+            User.created_at
+            >= datetime.datetime.combine(
+                previous_start - datetime.timedelta(days=1),
+                datetime.time.min,
+                tzinfo=datetime.timezone.utc,
+            ),
+            User.created_at
+            <= datetime.datetime.combine(
+                today + datetime.timedelta(days=1),
+                datetime.time.max,
+                tzinfo=datetime.timezone.utc,
+            ),
+        )
+        if allowed_colleges is not None:
+            signup_stmt = signup_stmt.where(User.university.in_(list(allowed_colleges)))
+        signups_by_day = _count_by_ist_day(
+            (await session.execute(signup_stmt)).scalars().all()
+        )
     finished = [i for i in interviews if i.status == "completed" and i.interview_mode == "assessment"]
     reports = await service._reports_by_interview([i.id for i in finished])
     summaries = await service._summary_reports_by_interview([i.id for i in finished])
@@ -2666,6 +2704,8 @@ async def get_dashboard_pulse(
         done = [i for i in rows if i.status == "completed" and i.interview_mode == "assessment"]
         scores = [score[i.id] for i in done if score.get(i.id) is not None]
         return {
+            # A day with no sign-ups is a real zero, unlike a day with no average score.
+            "sign_ups": sum(n for day, n in signups_by_day.items() if lo <= day <= hi),
             "active_learners": len({i.user_id for i in rows}),
             "assessments_taken": len(done),
             "average_assessment_score": round(sum(scores) / len(scores), 1) if scores else None,
