@@ -20,6 +20,18 @@ security = HTTPBearer()
 optional_security = HTTPBearer(auto_error=False)
 
 
+def _describe_unverified_token(token: str) -> str:
+    """Role/expiry of a token for diagnostics only. Never used for authorization; the token
+    itself, the subject and every other claim are deliberately left out of the log."""
+    try:
+        from jose import jwt as jose_jwt
+
+        claims = jose_jwt.get_unverified_claims(token)
+        return f"role={claims.get('role')!r} exp={claims.get('exp')!r}"
+    except Exception:
+        return "token not decodable"
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = fastapi.Depends(optional_security),
     user_repo: UserCRUDRepository = fastapi.Depends(
@@ -80,7 +92,15 @@ async def get_current_user(
                 status_code=fastapi.status.HTTP_403_FORBIDDEN,
                 detail="Access to Samvaad Saathi has been revoked",
             )
-    except SsoTokenError:
+    except SsoTokenError as exc:
+        # The caller only ever sees a generic 401; record the real reason server-side so a
+        # rejected login can be diagnosed (bad signature, expired, or a role not allowed).
+        logger.warning(
+            "SSO token rejected on %s: %s (%s)",
+            getattr(getattr(request, "url", None), "path", "?"),
+            exc,
+            _describe_unverified_token(token),
+        )
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",
