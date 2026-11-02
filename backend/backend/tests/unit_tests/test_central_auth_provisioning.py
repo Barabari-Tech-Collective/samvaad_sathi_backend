@@ -5,6 +5,7 @@ import fastapi
 
 from src.services.central_auth_service import (
     provision_or_invite_staff,
+    CentralAuthNonStaffAccountError,
     CentralAuthProvisioningError,
     CentralAuthReconciliationError,
 )
@@ -65,6 +66,51 @@ async def test_provision_or_invite_staff_rejection_raises_error(monkeypatch):
     with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_resp)):
         with pytest.raises(CentralAuthProvisioningError, match="Invalid staff role"):
             await provision_or_invite_staff(email="test@barabari.org", name="Test User")
+
+
+@pytest.mark.asyncio
+async def test_provision_or_invite_staff_student_identity_raises_non_staff_error(monkeypatch):
+    from src.config.manager import settings
+    monkeypatch.setattr(settings, "AUTH_SERVICE_BASE_URL", "https://auth.barabari.org")
+    monkeypatch.setattr(settings, "CENTRAL_PROFILE_API_KEY", "secret-key")
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 403
+    mock_resp.headers = {"content-type": "application/json"}
+    mock_resp.json.return_value = {
+        "isSuccess": False,
+        "errorMessage": (
+            "Cannot provision or modify account with role 'STUDENT'. Operation is restricted to "
+            "staff accounts (STAFF, FACILITATOR). Non-staff and privileged identities cannot be modified."
+        ),
+    }
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_resp)):
+        with pytest.raises(CentralAuthNonStaffAccountError, match="student account") as exc_info:
+            await provision_or_invite_staff(email="Student@Barabari.org", name="Test User")
+
+    assert exc_info.value.existing_role == "STUDENT"
+    assert "student@barabari.org" in str(exc_info.value)
+    # Still a provisioning error so generic handlers keep working
+    assert isinstance(exc_info.value, CentralAuthProvisioningError)
+
+
+@pytest.mark.asyncio
+async def test_provision_or_invite_staff_server_error_is_not_non_staff_error(monkeypatch):
+    from src.config.manager import settings
+    monkeypatch.setattr(settings, "AUTH_SERVICE_BASE_URL", "https://auth.barabari.org")
+    monkeypatch.setattr(settings, "CENTRAL_PROFILE_API_KEY", "secret-key")
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 500
+    mock_resp.headers = {"content-type": "application/json"}
+    mock_resp.json.return_value = {"isSuccess": False, "errorMessage": "Internal error"}
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_resp)):
+        with pytest.raises(CentralAuthProvisioningError) as exc_info:
+            await provision_or_invite_staff(email="test@barabari.org", name="Test User")
+
+    assert not isinstance(exc_info.value, CentralAuthNonStaffAccountError)
 
 
 @pytest.mark.asyncio
