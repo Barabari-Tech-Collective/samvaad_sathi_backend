@@ -941,3 +941,31 @@ async def test_revoke_provisioning_sends_product_scoped_headers(monkeypatch):
         assert captured_payload.get("previousRole") == "STAFF"
         assert captured_payload.get("previousPasswordHash") == "$2a$10$prevHash"
         assert captured_payload.get("isNewUser") is False
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics for rejected SSO tokens
+# ---------------------------------------------------------------------------
+
+
+def test_describe_unverified_token_reports_role_and_expiry_only():
+    from jose import jwt as jose_jwt
+    from src.api.dependencies.auth import _describe_unverified_token
+
+    token = jose_jwt.encode(
+        {"sub": "person@barabari.org", "role": "STAFF", "exp": 1893456000},
+        "any-key",
+        algorithm="HS256",
+    )
+    described = _describe_unverified_token(token)
+
+    assert "role='STAFF'" in described
+    assert "exp=1893456000" in described
+    assert "person@barabari.org" not in described
+    assert token not in described
+
+
+def test_describe_unverified_token_handles_garbage():
+    from src.api.dependencies.auth import _describe_unverified_token
+
+    assert _describe_unverified_token("not-a-jwt") == "token not decodable"
