@@ -22,8 +22,15 @@ def max_age():
     return age
 
 
+# A course the student chose for themselves has no snapshot to age out: it stays until they
+# change it, whether or not the Sampark sync is switched on.
+SELF_SOURCE = "self"
+
+
 def fresh(user, now=None):
     if not enabled():
+        return True
+    if getattr(user, "enrollment_source", None) == SELF_SOURCE:
         return True
     observed = getattr(user, "enrollment_observed_at", None)
     now = now or datetime.datetime.now(UTC)
@@ -40,12 +47,15 @@ def fresh(user, now=None):
 def freshness_predicate():
     if not enabled():
         return sa.true()
-    return sa.and_(
-        User.enrollment_source == "sampark",
-        User.enrollment_observed_at
-        >= datetime.datetime.now(UTC) - datetime.timedelta(seconds=max_age()),
-        User.enrollment_observed_at
-        <= datetime.datetime.now(UTC) + datetime.timedelta(seconds=300),
+    return sa.or_(
+        User.enrollment_source == SELF_SOURCE,
+        sa.and_(
+            User.enrollment_source == "sampark",
+            User.enrollment_observed_at
+            >= datetime.datetime.now(UTC) - datetime.timedelta(seconds=max_age()),
+            User.enrollment_observed_at
+            <= datetime.datetime.now(UTC) + datetime.timedelta(seconds=300),
+        ),
     )
 
 
