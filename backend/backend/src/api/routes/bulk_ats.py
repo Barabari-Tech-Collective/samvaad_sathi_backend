@@ -36,7 +36,7 @@ from src.repository.crud.bulk_ats import (
     _feedback_request_is_active,
 )
 from src.repository.crud.user import UserCRUDRepository
-from src.services.ai_resume.parser_service import ALLOWED_FILE_TYPES
+from src.services.ai_resume.parser_service import inspect_resume_upload
 from src.services.ai_resume.bulk.jd_quality import analyze_job_description
 from src.services.ai_resume.bulk.malware_scan import scan_document
 from src.services.ai_resume.bulk.google_drive_oauth import (
@@ -716,23 +716,31 @@ async def upload_resumes(
     accepted: list[dict] = []
     skipped: list[dict] = []
 
-    for upload in files:
+    for file_index, upload in enumerate(files):
         try:
-            if upload.content_type not in ALLOWED_FILE_TYPES:
-                skipped.append(
-                    {"filename": upload.filename, "reason": "unsupported file type"}
-                )
-                continue
-
             raw_bytes = await upload.read(
                 settings.BULK_ATS_MAX_FILE_SIZE_MB * 1024 * 1024 + 1
             )
-            if not raw_bytes:
-                skipped.append({"filename": upload.filename, "reason": "empty file"})
-                continue
             if len(raw_bytes) > settings.BULK_ATS_MAX_FILE_SIZE_MB * 1024 * 1024:
                 skipped.append(
-                    {"filename": upload.filename, "reason": "file too large"}
+                    {
+                        "fileIndex": file_index,
+                        "filename": upload.filename,
+                        "reason": "file is larger than the 10 MB limit",
+                    }
+                )
+                continue
+            try:
+                _, canonical_content_type = inspect_resume_upload(
+                    raw_bytes, upload.filename
+                )
+            except ValueError as exc:
+                skipped.append(
+                    {
+                        "fileIndex": file_index,
+                        "filename": upload.filename,
+                        "reason": str(exc),
+                    }
                 )
                 continue
 
@@ -740,6 +748,7 @@ async def upload_resumes(
             if malware["status"] in {"infected", "error"}:
                 skipped.append(
                     {
+                        "fileIndex": file_index,
                         "filename": upload.filename,
                         "reason": "document failed malware safety scan",
                     }
@@ -753,6 +762,7 @@ async def upload_resumes(
             if duplicate is not None:
                 skipped.append(
                     {
+                        "fileIndex": file_index,
                         "filename": upload.filename,
                         "reason": "duplicate of an existing candidate in this batch",
                     }
@@ -763,11 +773,15 @@ async def upload_resumes(
                 raw_bytes,
                 batch_id,
                 upload.filename or "resume.pdf",
-                upload.content_type,
+                canonical_content_type,
             )
             if s3_key is None:
                 skipped.append(
-                    {"filename": upload.filename, "reason": "storage upload failed"}
+                    {
+                        "fileIndex": file_index,
+                        "filename": upload.filename,
+                        "reason": "storage upload failed; try again shortly",
+                    }
                 )
                 continue
 
@@ -789,6 +803,7 @@ async def upload_resumes(
                 )
             accepted.append(
                 {
+                    "fileIndex": file_index,
                     "candidateId": candidate.id,
                     "filename": upload.filename,
                     "queued": bool(queued),
@@ -796,7 +811,13 @@ async def upload_resumes(
             )
         except Exception as exc:
             logger.exception("Bulk ATS upload failed for file %s", upload.filename)
-            skipped.append({"filename": upload.filename, "reason": str(exc)})
+            skipped.append(
+                {
+                    "fileIndex": file_index,
+                    "filename": upload.filename,
+                    "reason": "upload could not be completed; try again shortly",
+                }
+            )
 
     await repo.refresh_batch_status(batch_id)
     await repo.record_audit(
