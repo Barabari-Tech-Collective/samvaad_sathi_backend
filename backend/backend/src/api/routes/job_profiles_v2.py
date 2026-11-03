@@ -6,6 +6,7 @@ from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.admin import get_current_creator_user
 from src.api.dependencies.repository import get_repository
 from src.models.schemas.job_profile import (
+    InterviewMode,
     JobProfileSummaryResponse,
     JobProfileResponse,
     JobProfileCreateV2,
@@ -104,10 +105,17 @@ async def get_job_profiles_summary(
 async def list_job_profiles(
     category: Optional[str] = fastapi.Query(None),
     limit: Optional[int] = fastapi.Query(None),
+    interview_mode: Optional[InterviewMode] = fastapi.Query(
+        None,
+        alias="interviewMode",
+        description="Only roles of this kind. The Practice feature asks for 'practice', assessments for 'assessment'.",
+    ),
     is_admin: bool = fastapi.Depends(check_is_admin_dep),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileListResponse:
-    profiles = await job_profile_repo.list_profiles(category=category, limit=limit, is_admin=is_admin)
+    profiles = await job_profile_repo.list_profiles(
+        category=category, limit=limit, is_admin=is_admin, interview_mode=interview_mode
+    )
     return JobProfileListResponse(items=profiles, total=len(profiles))
 
 @router.post(
