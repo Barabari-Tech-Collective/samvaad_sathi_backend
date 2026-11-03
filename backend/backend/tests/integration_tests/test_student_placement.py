@@ -22,6 +22,7 @@ from src.models.db.practice_governance import PracticeDashboardAuditEvent
 from src.models.db.student_placement import StudentPlacement
 from src.models.db.user import User
 from src.repository.table import Base
+from src.services import barabari_integration as integration
 from src.services import student_placement as service
 
 DATABASE_URL = os.environ.get("SCHEMA_TEST_DATABASE_URL")
@@ -267,8 +268,10 @@ def listen(monkeypatch, caplog):
 
 @pytest.fixture
 def connected(monkeypatch):
-    monkeypatch.setattr(service.settings, "SAMPARK_SAATHI_BASE_URL", "https://sampark.test/api", raising=False)
-    monkeypatch.setattr(service.settings, "SAMPARK_SAATHI_API_KEY", "service-key", raising=False)
+    monkeypatch.setattr(integration.settings, "SAMPARK_SAATHI_BASE_URL", "https://sampark.test/api", raising=False)
+    monkeypatch.setattr(integration.settings, "SAMPARK_SAATHI_API_KEY", "service-key", raising=False)
+    monkeypatch.setattr(integration.settings, "SAMPARK_BATCHES_BASE_URL", "", raising=False)
+    monkeypatch.setattr(integration.settings, "SAMPARK_BATCHES_API_KEY", "", raising=False)
     service.reset_cache()
     yield
     service.reset_cache()
@@ -326,7 +329,7 @@ async def test_without_any_good_copy_an_outage_is_a_plain_503(connected):
 @pytest.mark.parametrize(
     "status, expected",
     [
-        (401, "service key was refused"),
+        (401, "refused the service key"),
         (404, "no open-batches route"),
         (500, "migration has not been run"),
     ],
@@ -354,16 +357,83 @@ async def test_a_timeout_and_a_missing_setting_are_described_too(connected, monk
         await service.open_batches(transport=sampark(slow))
     assert "did not answer in time" in caplog.text
     service.reset_cache()
-    monkeypatch.setattr(service.settings, "SAMPARK_SAATHI_BASE_URL", "", raising=False)
+    monkeypatch.setattr(integration.settings, "SAMPARK_SAATHI_BASE_URL", "", raising=False)
     caplog.clear()
     with pytest.raises(fastapi.HTTPException):
         await service.open_batches()
-    assert "not configured" in caplog.text
+    assert "is not set" in caplog.text
+
+
+# --- which Sampark the batch list comes from -------------------------------------------------------
+
+
+def test_the_batch_list_uses_its_own_settings_when_set_and_otherwise_the_resume_score_ones(monkeypatch):
+    s = integration.settings
+    for name, value in {
+        "SAMPARK_SAATHI_BASE_URL": "https://old.example/sampark/",
+        "SAMPARK_SAATHI_API_KEY": "old-key",
+        "SAMPARK_BATCHES_BASE_URL": "",
+        "SAMPARK_BATCHES_API_KEY": "",
+    }.items():
+        monkeypatch.setattr(s, name, value, raising=False)
+    assert integration.batches_connection() == ("https://old.example/sampark", "old-key")
+    monkeypatch.setattr(s, "SAMPARK_BATCHES_BASE_URL", "https://new.example/api/sampark/", raising=False)
+    assert integration.batches_connection() == ("https://new.example/api/sampark", "old-key")  # key falls back alone
+    monkeypatch.setattr(s, "SAMPARK_BATCHES_API_KEY", " new-key ", raising=False)
+    assert integration.batches_connection() == ("https://new.example/api/sampark", "new-key")
+
+
+@pytest.mark.asyncio
+async def test_the_batch_list_and_the_callback_go_to_the_batches_address_not_the_resume_one(monkeypatch):
+    s = integration.settings
+    monkeypatch.setattr(s, "SAMPARK_SAATHI_BASE_URL", "https://old.example/sampark", raising=False)
+    monkeypatch.setattr(s, "SAMPARK_SAATHI_API_KEY", "old-key", raising=False)
+    monkeypatch.setattr(s, "SAMPARK_BATCHES_BASE_URL", "https://new.example/api/sampark", raising=False)
+    monkeypatch.setattr(s, "SAMPARK_BATCHES_API_KEY", "new-key", raising=False)
+    service.reset_cache()
+    seen = []
+
+    def handler(request):
+        seen.append((str(request.url), request.headers.get("SAMVAAD-SAATHI-API-KEY")))
+        return httpx.Response(200, json={"isSuccess": True, "data": []})
+
+    await service.open_batches(transport=sampark(handler))
+    real = httpx.AsyncClient
+    with patch.object(integration.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)):
+        await integration.submit_batch_choice_to_sampark("a@b.org", "k", "r")
+        await integration.submit_resume_score_to_barabari("S1", 80, "r2")
+    service.reset_cache()
+    assert seen[0] == ("https://new.example/api/sampark/samvaad-saathi/v1/open-batches", "new-key")
+    assert seen[1] == ("https://new.example/api/sampark/samvaad-saathi/v1/batch-choice", "new-key")
+    # The resume-score callback is untouched: it still goes where it always went.
+    assert seen[2] == ("https://old.example/sampark/samvaad-saathi/v1/resume-score", "old-key")
+
+
+@pytest.mark.asyncio
+async def test_the_log_tells_the_gateway_from_the_key_and_names_what_is_missing(connected, caplog, monkeypatch):
+    listen(monkeypatch, caplog)
+    gateway = httpx.Response(401, json={"isSuccess": False, "errorMessage": "Authentication required"})
+    with pytest.raises(fastapi.HTTPException):
+        await service.open_batches(transport=sampark(lambda request: gateway))
+    assert "auth gateway refused it" in caplog.text
+    caplog.clear()
+    service.reset_cache()
+    refused = httpx.Response(401, json={"isSuccess": False, "errorMessage": "Invalid or missing API key"})
+    with pytest.raises(fastapi.HTTPException):
+        await service.open_batches(transport=sampark(lambda request: refused))
+    assert "Sampark refused the service key" in caplog.text
+    caplog.clear()
+    service.reset_cache()
+    monkeypatch.setattr(integration.settings, "SAMPARK_SAATHI_API_KEY", "", raising=False)
+    monkeypatch.setattr(integration.settings, "SAMPARK_BATCHES_API_KEY", "", raising=False)
+    with pytest.raises(fastapi.HTTPException):
+        await service.open_batches()
+    assert "service key is not set" in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_an_unconfigured_connection_is_a_503_not_an_empty_list(monkeypatch):
-    monkeypatch.setattr(service.settings, "SAMPARK_SAATHI_BASE_URL", "", raising=False)
+    monkeypatch.setattr(integration.settings, "SAMPARK_SAATHI_BASE_URL", "", raising=False)
     service.reset_cache()
     with pytest.raises(fastapi.HTTPException) as err:
         await service.open_batches()

@@ -17,7 +17,7 @@ import httpx
 import sqlalchemy as sa
 from pydantic import BaseModel, Field, ValidationError
 
-from src.config.manager import settings
+from src.services.barabari_integration import batches_connection
 from src.models.db.cohort import Cohort, CohortMember
 from src.models.db.practice_governance import PracticeDashboardAuditEvent
 from src.models.db.student_placement import StudentPlacement
@@ -66,8 +66,14 @@ def describe_failure(exc: Exception) -> str:
     """A one-line reason for a failed Sampark read, safe to log (never contains the key)."""
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
+        gateway = code == 401 and "authentication required" in exc.response.text.lower()
         hint = {
-            401: "the service key was refused (SAMPARK_SAATHI_API_KEY must equal Sampark's SAMVAAD_SAATHI_AUTH_API_KEY)",
+            401: (
+                "the auth gateway refused it before Sampark saw it: /api/sampark/samvaad-saathi/** must be on the "
+                "gateway's public list (deploy the latest Sampark auth-service) and the base URL must go through it"
+                if gateway
+                else "Sampark refused the service key (the key here must equal Sampark's SAMVAAD_SAATHI_AUTH_API_KEY)"
+            ),
             403: "the service key was refused",
             404: "Sampark has no open-batches route (is Sampark's staging branch deployed, and is SAMPARK_SAATHI_BASE_URL its API base?)",
         }.get(code, "Sampark answered with an error (500 usually means its migration has not been run)" if code >= 500 else "unexpected answer")
@@ -88,10 +94,14 @@ async def open_batches(*, transport=None) -> tuple[list[OpenBatch], bool]:
     now = time.monotonic()
     if _cache["items"] is not None and now - _cache["at"] < CACHE_SECONDS:
         return _cache["items"], False
-    base, key = (settings.SAMPARK_SAATHI_BASE_URL or "").rstrip("/"), settings.SAMPARK_SAATHI_API_KEY
+    base, key = batches_connection()
     try:
         if not base or not key:
-            raise RuntimeError("Sampark connection is not configured")
+            missing = [name for name, value in (("base URL", base), ("service key", key)) if not value]
+            raise RuntimeError(
+                f"the Sampark {' and '.join(missing)} is not set (SAMPARK_BATCHES_BASE_URL / SAMPARK_BATCHES_API_KEY, "
+                "or SAMPARK_SAATHI_BASE_URL / SAMPARK_SAATHI_API_KEY)"
+            )
         async with httpx.AsyncClient(timeout=8.0, transport=transport) as client:
             response = await client.get(f"{base}{OPEN_BATCHES_PATH}", headers={"SAMVAAD-SAATHI-API-KEY": key})
         response.raise_for_status()
