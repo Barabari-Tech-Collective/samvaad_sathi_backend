@@ -465,6 +465,12 @@ class JobProfileQuestionsListResponse(BaseSchemaModel):
     profile_status: str | None = None
     authoring_mode: str | None = None
     content_revision: int = 0
+    # The profile, rather than a browser tab, owns asynchronous-generation state.
+    # This lets a refresh or a second tab resume the right job without ever
+    # accepting a job token copied from a different profile.
+    generation_state: str | None = None
+    generation_job_id: str | None = None
+    generation_error: str | None = None
     job_profile_id: str
     total_questions: int
     level_counts: JobProfileQuestionLevelCounts

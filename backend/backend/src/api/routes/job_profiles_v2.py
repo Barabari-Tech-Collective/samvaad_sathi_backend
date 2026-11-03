@@ -1096,6 +1096,19 @@ async def get_job_profile_questions_v2(
         profile_status=profile.status,
         authoring_mode=getattr(profile, "authoring_mode", None),
         content_revision=getattr(profile, "content_revision", 0),
+        generation_state=getattr(profile, "generation_state", None),
+        # Only expose an ID while it is an active job for this exact profile.
+        # A completed/failed token must never be re-polled by a returning tab.
+        generation_job_id=(
+            getattr(profile, "generation_token", None)
+            if getattr(profile, "generation_state", None) in ("queued", "in_progress")
+            else None
+        ),
+        generation_error=(
+            getattr(profile, "generation_error", None)
+            if getattr(profile, "generation_state", None) in ("failed", "stale")
+            else None
+        ),
         job_profile_id=str(job_profile_id),
         total_questions=len(db_questions),
         level_counts=JobProfileQuestionLevelCounts(**level_counts),
