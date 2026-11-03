@@ -13,23 +13,69 @@ ALLOWED_FILE_TYPES = [
 ]
 
 MAX_FILE_SIZE_MB = 10
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# A resume should never contain an archive large enough to exhaust a worker
+# while it is being parsed.  DOCX is a ZIP container, so its compressed size
+# alone is not a sufficient safety boundary.
+MAX_DOCX_ARCHIVE_ENTRIES = 1_000
+MAX_DOCX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+
+_RESUME_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+def inspect_resume_upload(contents: bytes, filename: str | None) -> tuple[str, str]:
+    """Return a canonical extension and MIME type after inspecting file bytes.
+
+    Browser supplied MIME types are hints, not a security boundary: valid files
+    are often labelled ``application/octet-stream`` and an attacker can label
+    arbitrary bytes ``application/pdf``.  We therefore require a supported
+    filename extension *and* matching PDF/DOCX container bytes.
+    """
+    name = (filename or "").strip()
+    extension = name[name.rfind(".") :].lower() if "." in name else ""
+    if extension not in _RESUME_CONTENT_TYPES:
+        raise ValueError("Only PDF and DOCX files are supported")
+    if not contents:
+        raise ValueError("The file is empty")
+
+    if extension == ".pdf":
+        # PDF header is permitted within the first 1,024 bytes by the format.
+        if b"%PDF-" not in contents[:1024]:
+            raise ValueError("The file contents do not match a PDF document")
+        return extension, _RESUME_CONTENT_TYPES[extension]
+
+    try:
+        with zipfile.ZipFile(BytesIO(contents)) as archive:
+            entries = archive.infolist()
+            if len(entries) > MAX_DOCX_ARCHIVE_ENTRIES:
+                raise ValueError("The DOCX contains too many archive entries")
+            if sum(entry.file_size for entry in entries) > MAX_DOCX_UNCOMPRESSED_BYTES:
+                raise ValueError("The DOCX expands beyond the safe processing limit")
+            names = {entry.filename for entry in entries}
+            if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                raise ValueError("The file contents do not match a DOCX document")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("The file contents do not match a DOCX document") from exc
+
+    return extension, _RESUME_CONTENT_TYPES[extension]
 
 
 async def validate_resume_file(file: UploadFile):
-    if file.content_type not in ALLOWED_FILE_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF and DOCX files are allowed",
-        )
-
-    contents = await file.read()
-    file_size_mb = len(contents) / (1024 * 1024)
-
-    if file_size_mb > MAX_FILE_SIZE_MB:
+    contents = await file.read(MAX_FILE_SIZE_BYTES + 1)
+    if len(contents) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=400,
             detail=f"File size exceeds {MAX_FILE_SIZE_MB} MB limit",
         )
+
+    try:
+        inspect_resume_upload(contents, file.filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     await file.seek(0)
 
