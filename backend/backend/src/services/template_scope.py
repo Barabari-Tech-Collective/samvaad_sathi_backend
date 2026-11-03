@@ -109,3 +109,32 @@ def require_assignable(template, course_id: str) -> None:
             "This template is meant for other courses, so it cannot be assigned in this one. "
             "Add the course to the template first.",
         )
+
+
+async def course_options(session) -> list[dict]:
+    """The courses a template can be meant for: those learners can be in.
+
+    That is every course with a batch open for choosing, plus any course a learner has chosen
+    before (so a course whose batches were later closed is still listed). Sampark being down
+    only drops the first part."""
+    from src.models.db.student_placement import StudentPlacement
+    from src.services import student_placement
+
+    found: dict[str, str | None] = {}
+    rows = await session.execute(
+        sa.select(StudentPlacement.course_id, StudentPlacement.course_name)
+        .distinct()
+        .order_by(StudentPlacement.course_id)
+    )
+    for course_id, name in rows.all():
+        found[course_id] = name
+    try:
+        open_now, _stale = await student_placement.open_batches()
+    except fastapi.HTTPException:
+        open_now = []
+    for batch in open_now:
+        found[batch.course] = batch.courseName or found.get(batch.course)
+    return sorted(
+        ({"course_id": cid, "course_name": name or f"Course {cid}"} for cid, name in found.items()),
+        key=lambda item: item["course_name"].casefold(),
+    )

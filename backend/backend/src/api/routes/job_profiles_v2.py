@@ -236,6 +236,19 @@ async def list_job_profiles(
         item.adminComment = None
     return JobProfileListResponse(items=items, total=len(items))
 
+@router.get("/template-courses")
+async def template_courses(
+    response: fastapi.Response,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+):
+    """Courses a template can be meant for, for the creator's 'Intended for' choice."""
+    from src.services import template_scope
+
+    response.headers["Cache-Control"] = "no-store"
+    return {"items": await template_scope.course_options(job_profile_repo.async_session)}
+
+
 @router.post(
     path="/job-profiles",
     name="job-profiles:create",

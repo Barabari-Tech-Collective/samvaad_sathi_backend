@@ -240,3 +240,49 @@ def test_staff_can_only_assign_a_template_inside_its_courses():
     with pytest.raises(fastapi.HTTPException) as err:
         scope.require_assignable(SimpleNamespace(course_ids=["8"]), "7")
     assert err.value.status_code == 422 and "other courses" in err.value.detail
+
+
+# --- the creator's course choices ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_course_choices_are_open_courses_plus_ones_learners_chose_before(db):
+    from src.models.db.student_placement import StudentPlacement
+    from src.services.student_placement import OpenBatch
+
+    learner = await make_user(db, "fs@example.org")
+    async with db() as session:
+        session.add_all(
+            [
+                StudentPlacement(student_id=learner, batch_key="old", batch_name="Batch 2024", course_id="3", course_name="UI/UX"),
+                StudentPlacement(student_id=learner, batch_key="fs", batch_name="Batch 2026", course_id="7", course_name=None),
+            ]
+        )
+        await session.commit()
+    open_now = [OpenBatch(batchUniqueId="fs-2026", batchId="FS", batchName="Batch 2026", courseId=7, courseName="Full Stack Development")]
+    from unittest.mock import AsyncMock
+
+    async with db() as session:
+        with patch("src.services.student_placement.open_batches", AsyncMock(return_value=(open_now, False))):
+            options = await scope.course_options(session)
+    assert options == [
+        {"course_id": "7", "course_name": "Full Stack Development"},
+        {"course_id": "3", "course_name": "UI/UX"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_course_choices_survive_sampark_being_down(db):
+    from unittest.mock import AsyncMock
+
+    from src.models.db.student_placement import StudentPlacement
+
+    learner = await make_user(db, "fs@example.org")
+    async with db() as session:
+        session.add(StudentPlacement(student_id=learner, batch_key="fs", batch_name="Batch 2026", course_id="7", course_name="Full Stack Development"))
+        await session.commit()
+    down = AsyncMock(side_effect=fastapi.HTTPException(503, "down"))
+    async with db() as session:
+        with patch("src.services.student_placement.open_batches", down):
+            options = await scope.course_options(session)
+    assert options == [{"course_id": "7", "course_name": "Full Stack Development"}]
