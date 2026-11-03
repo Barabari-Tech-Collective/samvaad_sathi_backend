@@ -2515,12 +2515,24 @@ async def get_predictive_alerts(
 async def get_benchmarking(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    page: int = fastapi.Query(default=1, ge=1),
+    limit: int = fastapi.Query(default=10, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    # FastAPI resolves Query defaults before calling this route. The fallback
+    # also keeps direct service-level calls deterministic in unit tests.
+    resolved_page = page if isinstance(page, int) else 1
+    resolved_limit = limit if isinstance(limit, int) else 10
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if allowed_colleges is not None and not allowed_colleges:
-        return TablePageResponse(table_type="benchmarking", items=[], page=1, limit=1, total=0)
+        return TablePageResponse(
+            table_type="benchmarking",
+            items=[],
+            page=resolved_page,
+            limit=resolved_limit,
+            total=0,
+        )
     service = AnalyticsService(session)
     role_items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges)
     
@@ -2556,8 +2568,18 @@ async def get_benchmarking(
                 "tags": tags,
             }
         )
-    normalized_items = _zero_fill_metric_nulls(items)
-    return TablePageResponse(table_type="benchmarking", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
+    # Pagination must be applied here, not only in the UI. Returning every
+    # record with a changing page indicator made each page look identical.
+    total = len(items)
+    start = (resolved_page - 1) * resolved_limit
+    page_items = _zero_fill_metric_nulls(items[start : start + resolved_limit])
+    return TablePageResponse(
+        table_type="benchmarking",
+        items=page_items,
+        page=resolved_page,
+        limit=resolved_limit,
+        total=total,
+    )
 
 
 @router.get(
