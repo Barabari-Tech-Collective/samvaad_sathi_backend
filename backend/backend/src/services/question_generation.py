@@ -1,5 +1,6 @@
 """Core question-generation logic shared by the HTTP route and the arq background task."""
 
+import asyncio
 import logging
 
 from src.services.llm import generate_interview_questions_with_llm
@@ -13,6 +14,51 @@ BATCH_SIZE = 20
 # At BATCH_SIZE=20, each question ≈ 250 tokens → 20 qs ≈ 5000 tokens; cap is 8000.
 # Buffer of 4 uses ~1000 extra tokens, well within the cap.
 BATCH_OVERAGE = 4
+MAX_LLM_BATCH_ATTEMPTS = 3
+LLM_RETRY_BASE_SECONDS = 0.5
+MAX_PARALLEL_LEVEL_GENERATIONS = 2
+
+
+def is_transient_generation_error(error: object) -> bool:
+    """Whether a provider error is safe to retry without changing the draft."""
+    text = str(error or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "rate limit",
+            "timeout",
+            "timed out",
+            "temporar",
+            "connection",
+            "502",
+            "503",
+            "504",
+            "service unavailable",
+        )
+    )
+
+
+async def generate_question_batch_with_retry(**kwargs):
+    """Call the provider with bounded retry/backoff for transient failures."""
+    last_result = None
+    for attempt in range(MAX_LLM_BATCH_ATTEMPTS):
+        result = await generate_interview_questions_with_llm(**kwargs)
+        _, error, _, _, items = result
+        if not error and items:
+            return result
+        last_result = result
+        if not is_transient_generation_error(error) or attempt == MAX_LLM_BATCH_ATTEMPTS - 1:
+            return result
+        delay = LLM_RETRY_BASE_SECONDS * (2**attempt)
+        logger.warning(
+            "Question-generation provider attempt %d/%d failed transiently; retrying in %.1fs",
+            attempt + 1,
+            MAX_LLM_BATCH_ATTEMPTS,
+            delay,
+        )
+        await asyncio.sleep(delay)
+    return last_result
 
 
 async def generate_questions_for_level(
@@ -82,7 +128,7 @@ async def generate_questions_for_level(
             batch_idx + 1, len(batches), level, difficulty,
             ask_count, b_count, BATCH_OVERAGE, len(batch_influence.get("exclude_questions", [])),
         )
-        _, error, _, _, items = await generate_interview_questions_with_llm(
+        _, error, _, _, items = await generate_question_batch_with_retry(
             track=track,
             context_text=context_text,
             count=ask_count,
@@ -113,7 +159,7 @@ async def generate_questions_for_level(
             retry_influence["exclude_questions"] = (
                 retry_influence.get("exclude_questions", []) + [q["text"] for q in items]
             )
-        _, retry_error, _, _, extra = await generate_interview_questions_with_llm(
+        _, retry_error, _, _, extra = await generate_question_batch_with_retry(
             track=track,
             context_text=context_text,
             count=shortfall + BATCH_OVERAGE,
@@ -138,3 +184,46 @@ async def generate_questions_for_level(
         )
 
     return [(level, difficulty, item) for item in all_raw[:count]]
+
+
+async def generate_question_levels(
+    *,
+    levels: list[dict],
+    track: str,
+    context_text: str | None,
+    skills_list: list[str],
+    experience_level: str | None,
+    category: str | None = None,
+    knowledge_reference_context: str | None = None,
+) -> list[list[tuple[int, str, dict]]]:
+    """Generate selected levels with a small global provider-concurrency cap.
+
+    A 200-question bank has twelve LLM batches. Limiting level concurrency to
+    two prevents one staff action from exhausting provider rate limits or a
+    worker's outbound connection pool. The caller writes only after every
+    level succeeds, keeping the bank atomic.
+    """
+    semaphore = asyncio.Semaphore(MAX_PARALLEL_LEVEL_GENERATIONS)
+
+    async def generate_level(level_config: dict) -> list[tuple[int, str, dict]]:
+        async with semaphore:
+            return await generate_questions_for_level(
+                level=level_config["level"],
+                count=level_config["count"],
+                track=track,
+                context_text=context_text,
+                skills_list=skills_list,
+                experience_level=experience_level,
+                category=category,
+                knowledge_reference_context=knowledge_reference_context,
+            )
+
+    tasks = [asyncio.create_task(generate_level(level)) for level in levels]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise

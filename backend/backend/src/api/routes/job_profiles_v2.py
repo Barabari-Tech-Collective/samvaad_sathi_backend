@@ -62,6 +62,7 @@ from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.syllabus_service import syllabus_service
 from src.worker.queue import enqueue_job, get_job_status
+from src.services.question_generation_failures import safe_generation_failure_message
 
 
 async def check_is_admin_dep(
@@ -912,7 +913,12 @@ async def generate_questions_v2(
     )
 
     if job_id is None:
-        await job_profile_repo.finish_generation(job_profile_id, token, "failed")
+        await job_profile_repo.finish_generation(
+            job_profile_id,
+            token,
+            "failed",
+            "Question generation could not be queued. Your draft is safe; retry.",
+        )
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Job queue is temporarily unavailable. Please try again in a moment.",
@@ -960,7 +966,8 @@ async def get_generate_questions_status(
         return JobProfileGenerateJobStatusResponse(
             job_id=job_id,
             status="failed",
-            error="This AI request was cancelled, failed, or became stale after a draft edit.",
+            error=profile.generation_error
+            or "The draft changed while questions were generating. Review it, then retry.",
         )
     if profile.generation_state == "complete":
         return JobProfileGenerateJobStatusResponse(
@@ -971,7 +978,18 @@ async def get_generate_questions_status(
     status_info = await get_job_status(job_id)
     status = status_info.get("status", "unknown")
     if status in ("failed", "not_found"):
-        await job_profile_repo.finish_generation(job_profile_id, job_id, "failed")
+        safe_error = safe_generation_failure_message(status_info.get("error"))
+        await job_profile_repo.finish_generation(
+            job_profile_id,
+            job_id,
+            "failed",
+            safe_error,
+        )
+        return JobProfileGenerateJobStatusResponse(
+            job_id=job_id,
+            status="failed",
+            error=safe_error,
+        )
 
     questions_count: int | None = None
     if status == "complete":

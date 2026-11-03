@@ -66,6 +66,7 @@ class JobProfile(Base):
     generation_token: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(64), nullable=True)
     generation_result_count: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(sqlalchemy.Integer, nullable=True)
     generation_state: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(32), nullable=True)
+    generation_error: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(240), nullable=True)
     admin_comment: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text, nullable=True)
     submitted_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True), nullable=True)
     
