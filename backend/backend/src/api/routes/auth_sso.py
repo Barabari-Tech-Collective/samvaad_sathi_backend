@@ -55,7 +55,10 @@ async def sso_login(request: Request):
     # scheme, which is http unless uvicorn trusts X-Forwarded-Proto, and the resulting
     # http:// URL silently fails to match the registered https:// entry.
     redirect_uri = settings.SSO_REDIRECT_URI or str(request.url_for("auth_sso_callback"))
-    authorize_url = f"{settings.AUTH_SERVICE_BASE_URL.rstrip('/')}/barabari-auth/api/auth/public/v1/authorize?" + urlencode(
+    browser_origin = (
+        getattr(settings, "AUTH_SERVICE_PUBLIC_BASE_URL", "").strip() or settings.AUTH_SERVICE_BASE_URL
+    )
+    authorize_url = f"{browser_origin.rstrip('/')}/barabari-auth/api/auth/public/v1/authorize?" + urlencode(
         {
             "product": settings.SAMPARK_PRODUCT_UNIQUE_ID,
             "redirect_uri": redirect_uri,

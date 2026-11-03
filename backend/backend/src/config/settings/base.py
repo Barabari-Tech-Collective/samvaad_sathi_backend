@@ -179,6 +179,10 @@ class BackendBaseSettings(BaseSettings):
     # ------------------------------
     # Public origin of the barabari-auth-service, e.g. https://barabari-auth-service.onrender.com
     AUTH_SERVICE_BASE_URL: str = decouple.config("AUTH_SERVICE_BASE_URL", cast=str, default="")  # type: ignore
+    # Origin the BROWSER is sent to for /authorize. Empty falls back to AUTH_SERVICE_BASE_URL,
+    # which is also what the server calls directly. Set it when the browser-facing auth host
+    # differs (it decides which login page a student lands on).
+    AUTH_SERVICE_PUBLIC_BASE_URL: str = decouple.config("AUTH_SERVICE_PUBLIC_BASE_URL", cast=str, default="")  # type: ignore
     # Same value as auth-service's JWT_SECRET env var (a Base64 string decoded to raw HMAC key
     # bytes on both sides - see src/securities/authorizations/sso_jwt.py). Shares auth-service's
     # own local-dev default so both services validate each other's tokens out of the box.
