@@ -216,6 +216,8 @@ async def enrich_candidate_brief(
         "Use evaluationIntent only to make the feedback relevant to the stated project or evaluation purpose. "
         "Return only one complete JSON object shaped exactly like this example: "
         '{"summary":"...","strengthNarratives":["..."],'
+        '"gapNarratives":["..."],"interviewFocus":["..."]}. '
+        "Keep the total under 180 words and each list to at most 3 concise items."
         '"gapNarratives":["..."],"interviewFocus":["..."],'
         '"projectReviews":[{"projectName":"...","review":"..."}]}. '
         "For each supplied project, write one concise recruiter assessment naming a specific "
