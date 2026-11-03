@@ -95,6 +95,7 @@ async def test_audio_is_acknowledged_when_background_queue_is_unavailable(monkey
         answer_version=0,
         transcription_status="pending",
         transcription=None,
+        transcription_updated_at=None,
     )
 
     class Repo:
@@ -110,7 +111,7 @@ async def test_audio_is_acknowledged_when_background_queue_is_unavailable(monkey
             attempt.answer_version = 1
             return attempt
 
-        async def mark_transcription_failed(self, **_kwargs):
+        async def fail_transcription_retry_reservation(self, **_kwargs):
             attempt.transcription_status = "failed"
             return attempt
 

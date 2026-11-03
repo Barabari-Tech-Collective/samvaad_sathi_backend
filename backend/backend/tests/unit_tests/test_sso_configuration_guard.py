@@ -21,6 +21,7 @@ def settings_stub(monkeypatch):
 
     class Stub:
         AUTH_SERVICE_BASE_URL = ""
+        AUTH_SERVICE_PUBLIC_BASE_URL = ""
         ENVIRONMENT = Environment.DEVELOPMENT.value
 
     stub = Stub()
@@ -90,3 +91,62 @@ async def test_sso_login_refuses_to_redirect_without_auth_service(settings_stub)
         await auth_sso.sso_login(request)
     assert raised.value.status_code == fastapi.status.HTTP_503_SERVICE_UNAVAILABLE
     assert "unavailable" in raised.value.detail.lower()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("public_origin,expected", [("", "https://auth.internal.test"), ("http://localhost:8081", "http://localhost:8081")])
+async def test_browser_origin_can_differ_from_verified_internal_auth(settings_stub, public_origin, expected):
+    from src.api.routes.auth_sso import sso_login
+    from urllib.parse import urlsplit, parse_qs
+    settings_stub.AUTH_SERVICE_BASE_URL = "https://auth.internal.test"
+    settings_stub.AUTH_SERVICE_PUBLIC_BASE_URL = public_origin
+    settings_stub.SSO_REDIRECT_URI = "http://localhost:8000/api/auth/sso/callback"
+    settings_stub.SAMPARK_PRODUCT_UNIQUE_ID = "local-product"
+    request = fastapi.Request({"type":"http", "method":"GET", "path":"/api/auth/sso/login", "headers":[], "query_string":b"", "session":{}})
+    response = await sso_login(request, return_to="/history?tab=practice")
+    assert request.session["sso_destination"] == "/history?tab=practice"
+    location = response.headers["location"]
+    assert location.startswith(expected + "/barabari-auth/")
+    assert parse_qs(urlsplit(location).query)["state"] == [request.session["sso_state"]]
+    assert settings_stub.AUTH_SERVICE_BASE_URL == "https://auth.internal.test"
+
+
+class _Central:
+    CENTRAL_IDENTITY_CHECK_ENABLED = True
+    REQUIRE_CENTRAL_AUTH_CONFIG = True
+    AUTH_SERVICE_BASE_URL = "https://auth.example.org"
+    PRODUCT_IDENTITY_API_KEY = "k"
+    SAMPARK_PRODUCT_UNIQUE_ID = "p-1"
+
+
+def _central(monkeypatch, **overrides):
+    import src.main as main
+
+    stub = _Central()
+    for name, value in overrides.items():
+        setattr(stub, name, value)
+    monkeypatch.setattr(main, "settings", stub)
+    return main.verify_central_auth_configuration
+
+
+def test_complete_central_configuration_starts(monkeypatch):
+    _central(monkeypatch)()
+
+
+@pytest.mark.parametrize(
+    "overrides,named",
+    [
+        ({"AUTH_SERVICE_BASE_URL": ""}, "AUTH_SERVICE_BASE_URL"),
+        ({"AUTH_SERVICE_BASE_URL": "http://auth.example.org"}, "AUTH_SERVICE_BASE_URL"),
+        ({"PRODUCT_IDENTITY_API_KEY": "  "}, "PRODUCT_IDENTITY_API_KEY"),
+        ({"SAMPARK_PRODUCT_UNIQUE_ID": ""}, "SAMPARK_PRODUCT_UNIQUE_ID"),
+    ],
+)
+def test_missing_central_configuration_fails_at_startup_naming_the_setting(monkeypatch, overrides, named):
+    with pytest.raises(RuntimeError, match=named):
+        _central(monkeypatch, **overrides)()
+
+
+def test_explicit_opt_out_and_disabled_central_auth_do_not_block_startup(monkeypatch):
+    _central(monkeypatch, AUTH_SERVICE_BASE_URL="", REQUIRE_CENTRAL_AUTH_CONFIG=False)()
+    _central(monkeypatch, AUTH_SERVICE_BASE_URL="", CENTRAL_IDENTITY_CHECK_ENABLED=False)()

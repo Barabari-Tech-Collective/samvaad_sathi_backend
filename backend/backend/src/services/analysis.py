@@ -242,7 +242,7 @@ class AnalysisAggregationService:
         stmt = (
             sqlalchemy.select(QuestionAttempt)
             .join(QuestionAttempt.interview)
-            .options(selectinload(QuestionAttempt.question))
+            .options(selectinload(QuestionAttempt.question), selectinload(QuestionAttempt.interview))
             .where(
                 QuestionAttempt.id == question_attempt_id,
                 QuestionAttempt.interview.has(user_id=user_id)
@@ -404,13 +404,26 @@ class AnalysisAggregationService:
                     getattr(question_attempt.question, "expected_answer", None)
                     if question_attempt.question else None
                 )
-                # Call real LLM domain analysis
-                analysis, llm_error, latency_ms, llm_model = await analyze_domain_with_llm(
-                    user_profile=profile,
-                    question_text=getattr(question_attempt, "question_text", None),
-                    transcription=transcription_text,
-                    expected_answer=expected_answer,
-                )
+                # Jev can judge typed rubric dimensions, not generate free-form
+                # questions or speech. Only server-loaded practice context opts in.
+                from src.config.manager import settings
+                from src.services.jev_practice import feedback as jev_feedback
+                from src.services.llm import _is_near_empty_answer
+                analysis = None
+                if not _is_near_empty_answer(transcription_text):
+                    analysis = await jev_feedback(interview=getattr(question_attempt, "interview", None),
+                        attempt_id=question_attempt_id, question=getattr(question_attempt, "question_text", None),
+                        rubric=expected_answer, transcript=transcription_text)
+                if analysis:
+                    llm_error, latency_ms, llm_model = None, None, f"jev:{settings.JEV_MODEL}"
+                else:
+                    # Keep the existing provider for every unapproved/failed case.
+                    analysis, llm_error, latency_ms, llm_model = await analyze_domain_with_llm(
+                        user_profile=profile,
+                        question_text=getattr(question_attempt, "question_text", None),
+                        transcription=transcription_text,
+                        expected_answer=expected_answer,
+                    )
 
                 logger.info(
                   "DOMAIN LLM COMPLETE | Attempt=%s | Model=%s | Latency=%sms | Error=%s | ResponseType=%s | Keys=%s",

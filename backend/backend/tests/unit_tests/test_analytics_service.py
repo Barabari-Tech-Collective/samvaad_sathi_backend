@@ -3,7 +3,60 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.services.analytics import AnalyticsService
+from src.services.analytics import AnalyticsService, canonical_role_options
+
+
+def test_role_filter_options_are_canonical_across_legacy_formatting():
+    assert canonical_role_options(
+        [
+            "FULL STACK DEVELOPER",
+            " Full-Stack Developer ",
+            "Full Stack Developer",
+            "Backend Engineer",
+            None,
+            "  ",
+        ]
+    ) == ["Backend Engineer", "Full Stack Developer"]
+
+
+@pytest.mark.asyncio
+async def test_benchmarking_applies_the_requested_page_and_limit(monkeypatch):
+    import src.api.routes.analytics_v2 as routes
+
+    rows = [
+        {
+            "role": f"Role {index}",
+            "avg_score": 50 + index,
+            "completed_interviews": 1,
+            "interviews": index,
+        }
+        for index in range(1, 7)
+    ]
+
+    async def allowed_colleges(*_args, **_kwargs):
+        return None
+
+    class FakeAnalyticsService:
+        def __init__(self, _session):
+            pass
+
+        async def get_role_segment_analytics(self, **_kwargs):
+            return rows
+
+    monkeypatch.setattr(routes, "get_user_allowed_colleges", allowed_colleges)
+    monkeypatch.setattr(routes, "AnalyticsService", FakeAnalyticsService)
+
+    result = await routes.get_benchmarking(
+        page=2,
+        limit=2,
+        current_user=SimpleNamespace(),
+        session=SimpleNamespace(),
+    )
+
+    assert result.total == 6
+    assert result.page == 2
+    assert result.limit == 2
+    assert [item["name"] for item in result.items] == ["Role 3", "Role 4"]
 
 
 class _ScalarResult:

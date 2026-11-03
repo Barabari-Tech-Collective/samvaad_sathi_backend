@@ -59,6 +59,16 @@ class User(Base):  # type: ignore
         String,
         nullable=True,
     )
+    sampark_student_unique_id: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(128), nullable=True, unique=True)
+    enrollment_observed_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True), nullable=True)
+    enrollment_source: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(32), nullable=True)
+    enrolled_course_ids: SQLAlchemyMapped[list | None] = sqlalchemy_mapped_column(JSONB, nullable=True)
+
+    central_identity_id: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(128), nullable=True, unique=True)
+
+    # NULL preserves role defaults; an explicit empty object denies managed features.
+    feature_permissions: SQLAlchemyMapped[dict | None] = sqlalchemy_mapped_column(JSONB, nullable=True)
+    feature_permissions_version: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(sqlalchemy.Integer, nullable=False, server_default="0")
 
     # Years of experience (stored as float for partial years)
     years_experience: SQLAlchemyMapped[float | None] = sqlalchemy_mapped_column(sqlalchemy.Float, nullable=True)
@@ -109,4 +119,7 @@ class User(Base):  # type: ignore
     )
 
     __mapper_args__ = {"eager_defaults": True}
+    __table_args__ = (
+        sqlalchemy.Index("ix_user_enrolled_course_ids", "enrolled_course_ids", postgresql_using="gin"),
+    )
 

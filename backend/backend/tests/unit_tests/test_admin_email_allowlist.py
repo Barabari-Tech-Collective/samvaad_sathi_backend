@@ -81,5 +81,5 @@ async def test_dependency_allows_allowlisted_user(monkeypatch):
 async def test_dependency_still_403s_for_a_student(monkeypatch):
     _set_allowlist(monkeypatch, "admin@samvaad-sathi.com")
     with pytest.raises(fastapi.HTTPException) as exc:
-        await get_current_admin_user(current_user=_User(email="student@example.com"))
+        await get_current_admin_user(current_user=_User(email="student@example.com"), session=None)
     assert exc.value.status_code == 403

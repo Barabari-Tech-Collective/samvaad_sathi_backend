@@ -7,26 +7,22 @@ from decouple import config
 import boto3
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
+from src.services.aws_storage_config import load_storage_configuration
 
 logger = logging.getLogger(__name__)
 
-# Initialize boto3 client lazily or handle missing creds gracefully
+# Explicit bucket selection prevents an incomplete new-account deployment
+# from silently reading/writing the old staging bucket.
 try:
-    # Explicitly pass credentials from .env via config()
-    s3_client = boto3.client(
-        "s3",
-        aws_access_key_id=config("AWS_ACCESS_KEY_ID", default=None),
-        aws_secret_access_key=config("AWS_SECRET_ACCESS_KEY", default=None),
-        region_name=config("AWS_REGION", default="ap-south-1"),
-    )
-    BUCKET_NAME = config(
-        "AWS_S3_BUCKET_NAME", default="barabari-edtech-service-staging"
-    )
+    STORAGE_CONFIGURATION = load_storage_configuration()
+    s3_client = boto3.client("s3", **STORAGE_CONFIGURATION.client_options)
+    BUCKET_NAME = STORAGE_CONFIGURATION.bucket
 except Exception as e:
-    logger.warning(f"Could not initialize S3 client: {e}")
+    logger.warning("S3 is unavailable; check explicit storage configuration (%s).", type(e).__name__)
     s3_client = None
     BUCKET_NAME = None
+    STORAGE_CONFIGURATION = None
 
 
 def tts_audio_s3_key(question_id: int) -> str:
@@ -46,6 +42,13 @@ def tts_audio_s3_key(question_id: int) -> str:
 
     voice_tag = hashlib.md5(settings.ELEVENLABS_VOICE_ID.encode()).hexdigest()[:8]
     return f"Samvaad-Saathi/tts-audio/question_{question_id}_{voice_tag}.mp3"
+
+
+def tts_audio_public_url(question_id: int) -> str | None:
+    """Only synthesized question audio uses this origin; personal files do not."""
+    if STORAGE_CONFIGURATION is None:
+        return None
+    return f"{STORAGE_CONFIGURATION.public_base_url}/{tts_audio_s3_key(question_id)}"
 
 
 def upload_audio_to_s3(audio_bytes: bytes, question_id: int) -> Optional[str]:
@@ -75,9 +78,7 @@ def upload_audio_to_s3(audio_bytes: bytes, question_id: int) -> Optional[str]:
             ContentType="audio/mpeg",
         )
 
-        region = config("AWS_REGION", default="ap-south-1")
-        # Construct the public URL
-        public_url = f"https://{BUCKET_NAME}.s3.{region}.amazonaws.com/{s3_file_path}"
+        public_url = tts_audio_public_url(question_id)
         logger.info(f"Successfully uploaded TTS audio to S3: {public_url}")
 
         return public_url
@@ -92,6 +93,7 @@ def upload_resume_to_s3(
     user_id: int,
     filename: str,
     content_type: str = "application/pdf",
+    durable_sha256: str | None = None,
 ) -> Optional[str]:
     """
     Uploads a resume file byte stream to the S3 bucket.
@@ -119,6 +121,14 @@ def upload_resume_to_s3(
 
     # The key (path) inside the bucket
     s3_object_key = f"Samvaad-Saathi/resumes/user_{user_id}_{unique_suffix}{ext}"
+
+    if durable_sha256 is not None:
+        import hashlib
+        if hashlib.sha256(file_bytes).hexdigest() != durable_sha256:
+            raise ValueError("Durable resume fingerprint does not match original bytes")
+        # The same account/file always reaches the same key, even after a crash
+        # between object creation and the registry transaction.
+        s3_object_key = f"Samvaad-Saathi/resumes/user_{user_id}_sha256_{durable_sha256}"
 
     try:
         s3_client.put_object(
@@ -197,27 +207,52 @@ async def upload_answer_audio_to_s3(
             ServerSideEncryption="AES256",
         )
 
-    try:
-        await asyncio.get_running_loop().run_in_executor(None, _put)
-        logger.info(
-            "Stored answer audio | QuestionAttempt=%s | Key=%s",
-            question_attempt_id,
-            object_key,
-        )
-        return object_key
-    except Exception as error:  # noqa: BLE001
-        # Deliberately broad. Catching only ClientError let NoCredentialsError
-        # and EndpointConnectionError - both BotoCoreError, not ClientError -
-        # escape into the upload route, which treats any exception as a save
-        # failure and answers 503. Missing or expired credentials would then
-        # cost a student their answer over a storage problem that does not
-        # affect transcription at all.
-        logger.error(
-            "Failed to store answer audio | QuestionAttempt=%s | %s",
-            question_attempt_id,
-            error,
-        )
-        return None
+    def retryable_storage_error(error: Exception) -> bool:
+        if isinstance(error, (BotoCoreError, EndpointConnectionError)):
+            return True
+        if isinstance(error, ClientError):
+            code = str(error.response.get("Error", {}).get("Code", ""))
+            return code in {"500", "503", "RequestTimeout", "SlowDown", "InternalError"}
+        return False
+
+    # ``put_object`` is idempotent for this stable checksum-based key. A short,
+    # bounded retry absorbs a dropped connection/temporary S3 503 without
+    # making a student re-record. Permanent configuration/IAM failures surface
+    # immediately, with the exception type and provider code in server logs.
+    for attempt in range(1, 4):
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _put)
+            logger.info(
+                "Stored answer audio | QuestionAttempt=%s | Key=%s | Attempt=%s",
+                question_attempt_id,
+                object_key,
+                attempt,
+            )
+            return object_key
+        except Exception as error:  # noqa: BLE001
+            provider_code = (
+                str(error.response.get("Error", {}).get("Code", "unknown"))
+                if isinstance(error, ClientError)
+                else "n/a"
+            )
+            if attempt < 3 and retryable_storage_error(error):
+                logger.warning(
+                    "Answer audio storage retry | QuestionAttempt=%s | Attempt=%s | Error=%s | Code=%s",
+                    question_attempt_id,
+                    attempt,
+                    type(error).__name__,
+                    provider_code,
+                )
+                await asyncio.sleep(0.25 * attempt)
+                continue
+            logger.error(
+                "Failed to store answer audio | QuestionAttempt=%s | Error=%s | Code=%s",
+                question_attempt_id,
+                type(error).__name__,
+                provider_code,
+            )
+            return None
+    return None
 
 
 #: Prefix for Bulk ATS candidate resumes. Kept distinct from resumes/ (the
@@ -356,6 +391,8 @@ async def _background_upload_and_enforce_limit(
     source: str,
     size_bytes: int | None = None,
     file_sha256: str | None = None,
+    *,
+    durable_delivery: bool = False,
 ):
     """
     Background task to upload a resume and save the key to the UserResume table.
@@ -368,6 +405,11 @@ async def _background_upload_and_enforce_limit(
     from src.models.db.user_resume import UserResume
 
     logger = logging.getLogger(__name__)
+
+    if durable_delivery:
+        import hashlib
+        if not file_sha256 or hashlib.sha256(file_bytes).hexdigest() != file_sha256:
+            raise ValueError("Durable delivery requires the original file fingerprint")
 
     try:
         # Deduplication check before uploading to S3
@@ -390,9 +432,11 @@ async def _background_upload_and_enforce_limit(
                     return existing_resume.s3_key
 
         loop = asyncio.get_running_loop()
-        s3_key = await loop.run_in_executor(
-            None, upload_resume_to_s3, file_bytes, user_id, filename, content_type
-        )
+        from functools import partial
+        upload = partial(upload_resume_to_s3, file_bytes, user_id, filename, content_type)
+        if durable_delivery:
+            upload = partial(upload, durable_sha256=file_sha256)
+        s3_key = await loop.run_in_executor(None, upload)
 
         if s3_key:
             s3_keys_to_delete = []
@@ -422,8 +466,9 @@ async def _background_upload_and_enforce_limit(
                             f"IntegrityError: Concurrent upload detected for user {user_id}. Using existing."
                         )
 
-                        # Clean up the orphaned S3 object we just uploaded
-                        if s3_client and BUCKET_NAME:
+                        # Random keys are attempt-owned. Stable keys may already belong
+                        # to a concurrent winner: never delete them on a losing insert.
+                        if s3_client and BUCKET_NAME and not durable_delivery:
                             try:
                                 await loop.run_in_executor(
                                     None,
@@ -473,8 +518,9 @@ async def _background_upload_and_enforce_limit(
 
                     await session.commit()
             except Exception as db_err:
-                # DB transaction failed. Clean up the newly uploaded S3 object to prevent leaks.
-                if s3_client and BUCKET_NAME:
+                # Preserve stable keys for replay, including ambiguous commit outcomes.
+                # Only legacy attempt-owned keys may be removed here.
+                if s3_client and BUCKET_NAME and not durable_delivery:
                     try:
                         await loop.run_in_executor(
                             None,

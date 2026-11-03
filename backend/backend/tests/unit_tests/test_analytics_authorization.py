@@ -24,7 +24,7 @@ class _User:
 @pytest.mark.asyncio
 async def test_admin_dependency_rejects_non_admin():
     with pytest.raises(fastapi.HTTPException) as exc:
-        await get_current_admin_user(current_user=_User(1, is_admin=False))
+        await get_current_admin_user(current_user=_User(1, is_admin=False), session=None)
     assert exc.value.status_code == 403
 
 
@@ -42,7 +42,7 @@ async def test_admin_dependency_rejects_user_missing_the_attribute():
         id = 7
 
     with pytest.raises(fastapi.HTTPException) as exc:
-        await get_current_admin_user(current_user=_Legacy())
+        await get_current_admin_user(current_user=_Legacy(), session=None)
     assert exc.value.status_code == 403
 
 

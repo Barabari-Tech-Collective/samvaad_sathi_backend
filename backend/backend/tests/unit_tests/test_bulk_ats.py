@@ -94,6 +94,32 @@ def test_score_bands_separate_weak_candidates_from_average_candidates():
     assert pipeline.score_band_for(60.0) == "Average"
 
 
+def test_candidate_summary_exposes_bounded_private_note_preview():
+    candidate = SimpleNamespace(
+        id=1,
+        candidate_name="Example",
+        email_or_candidate_id="example@test.invalid",
+        final_score=82,
+        score_band="Good",
+        status="completed",
+        needs_review=False,
+        warnings=[],
+        confidence_score=90,
+        score_lower_bound=None,
+        score_upper_bound=None,
+        reviewer_decision="shortlist",
+        interview_outcome="interviewed",
+        reviewer_notes="  " + "A" * 500,
+        assigned_reviewer_id=None,
+        deterministic_report=None,
+    )
+    summary = bulk_ats_routes._candidate_summary(candidate)
+    assert summary["hasReviewerNotes"] is True
+    assert summary["reviewerNotesPreview"] == "A" * 240
+    assert summary["reviewerDecision"] == "shortlist"
+    assert summary["interviewOutcome"] == "interviewed"
+
+
 @pytest.mark.asyncio
 async def test_partial_recruiter_update_preserves_notes_and_outcome():
     candidate = SimpleNamespace(
@@ -563,9 +589,18 @@ async def test_stub_jev_provider_forces_manual_review():
 @pytest.mark.asyncio
 async def test_real_jev_provider_calls_system_one_and_maps_answers(monkeypatch):
     response = SimpleNamespace(
-        scores={"skills_score": SimpleNamespace(score=3.0, confidence=0.8)},
-        choices={"education_quality": SimpleNamespace(choice="Strong", confidence=0.9)},
-        nouls={"needs_manual_review": SimpleNamespace(noul=0.2)},
+        scores={
+            key: SimpleNamespace(score=3.0, confidence=0.8)
+            for key in jev_client.SCORE_LEVELS
+        },
+        choices={
+            "education_quality": SimpleNamespace(choice="Strong", confidence=0.9),
+            "project_tier": SimpleNamespace(choice="Good", confidence=0.8),
+        },
+        nouls={
+            "needs_manual_review": SimpleNamespace(noul=0.2),
+            "experience_mode_mismatch": SimpleNamespace(noul=0.1),
+        },
     )
     system_one = AsyncMock(return_value=response)
 
@@ -939,9 +974,7 @@ def test_candidate_link_normalization_rejects_contact_and_malformed_urls():
 
     assert validator._normalize_candidate_url("mailto:candidate@example.test") == ""
     assert (
-        validator._normalize_candidate_url(
-            "https://mailto:candidate@example.test"
-        )
+        validator._normalize_candidate_url("https://mailto:candidate@example.test")
         == ""
     )
     assert validator._normalize_candidate_url("candidate@example.test") == ""
@@ -1356,11 +1389,7 @@ def test_feedback_states_turn_stale_jobs_into_terminal_failures():
     ).isoformat()
 
     assert _feedback_states(
-        {
-            "shareableFeedback": {
-                "student": {"status": "generating", "startedAt": stale}
-            }
-        }
+        {"shareableFeedback": {"student": {"status": "generating", "startedAt": stale}}}
     ) == {"student": "failed", "team": None}
 
 

@@ -101,12 +101,12 @@ async def validate_audio_file(file: UploadFile) -> Tuple[bytes, dict]:
 
     # Estimate duration and validate against maximum
     estimated_duration = get_audio_duration_estimate(audio_bytes, content_type)
-    if estimated_duration and estimated_duration > MAX_DURATION_SECONDS:
+    if estimated_duration is not None and estimated_duration > MAX_DURATION_SECONDS:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Audio duration ({estimated_duration:.1f}s) exceeds maximum allowed ({MAX_DURATION_SECONDS}s)"
         )
-    if estimated_duration and estimated_duration < MIN_DURATION_SECONDS:
+    if estimated_duration is not None and estimated_duration < MIN_DURATION_SECONDS:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Audio duration ({estimated_duration:.1f}s) is too short to contain a real answer (minimum {MIN_DURATION_SECONDS}s)"
@@ -238,14 +238,12 @@ def get_audio_duration_estimate(audio_bytes: bytes, content_type: str) -> float 
     # This is a simplified estimation - in production you might want to use
     # libraries like mutagen or ffprobe for accurate duration detection
     try:
-        if content_type == "audio/wav" and len(audio_bytes) > 44:
-            # Basic WAV duration calculation (assumes standard format)
-            # Sample rate is at bytes 24-27, bits per sample at 34-35
-            sample_rate = int.from_bytes(audio_bytes[24:28], byteorder='little')
-            if sample_rate > 0:
-                data_size = len(audio_bytes) - 44  # Subtract header
-                duration = data_size / (sample_rate * 2 * 2)  # Assume 16-bit stereo
-                return max(0.1, min(duration, MAX_DURATION_SECONDS))
+        if content_type in {"audio/wav", "audio/x-wav", "audio/wave"}:
+            # Honor channel count, sample width and RIFF chunks; browser mono
+            # recordings must not be measured as stereo. Do not clamp the result:
+            # validate_audio_file must be able to reject recordings over the limit.
+            with wave.open(io.BytesIO(audio_bytes), "rb") as recording:
+                return recording.getnframes() / recording.getframerate()
         
         # For other formats, rough estimate based on file size and typical bitrates
         if content_type == "audio/mpeg":

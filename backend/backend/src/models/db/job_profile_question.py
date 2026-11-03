@@ -28,7 +28,7 @@ class JobProfileQuestion(Base):  # type: ignore
         sqlalchemy.DateTime(timezone=True), nullable=False, server_default=sqlalchemy_functions.now()
     )
 
-    job_profile = relationship("JobProfile")
+    job_profile = relationship("JobProfile", back_populates="questions")
 
     __mapper_args__ = {"eager_defaults": True}
 

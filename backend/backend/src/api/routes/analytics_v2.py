@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import datetime
+import decimal
 import math
 import re
 from collections import defaultdict
 from enum import Enum
-from typing import Annotated, Any, Sequence
+from typing import Annotated, Any, Literal, Sequence
 
 import fastapi
 import sqlalchemy
@@ -17,6 +18,7 @@ from src.api.dependencies.admin import (
     get_current_admin_user,
     get_user_allowed_colleges,
     verify_college_access,
+    is_admin_user,
 )
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.session import get_async_session
@@ -56,7 +58,9 @@ from src.models.schemas.analytics_v2 import (
     TimeSeriesPoint,
     TimeSeriesResponse,
 )
-from src.services.analytics import AnalyticsService
+from src.services.analytics import AnalyticsService, _extract_overall_score
+from src.services.people import student_interview, student_only
+from src.services.course_access import legacy_analytics_guard
 
 
 COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -76,9 +80,12 @@ router = fastapi.APIRouter(
     prefix="/v2/analytics",
     tags=["analytics-v2"],
     responses=COMMON_ERROR_RESPONSES,
-    dependencies=[Depends(get_current_admin_user)],
+    dependencies=[Depends(get_current_admin_user), Depends(legacy_analytics_guard)],
 )
 
+
+# Staff and students are in India; a "day" on the Overview is an Indian day.
+_IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 _DIFFICULTY_ORDER = {"easy": 0, "medium": 1, "hard": 2, "expert": 3}
 
@@ -143,7 +150,8 @@ def _apply_interview_filters(
     college: str | None,
     allowed_colleges: set[str] | list[str] | None = None,
 ) -> sqlalchemy.sql.Select:
-    filtered_stmt = stmt
+    # Staff test interviews never count toward student numbers.
+    filtered_stmt = stmt.where(student_interview())
     has_user = any(
         getattr(col, "table", None) is User.__table__
         for col in getattr(stmt, "selected_columns", [])
@@ -175,6 +183,13 @@ def _apply_interview_filters(
     return filtered_stmt
 
 
+def _mode(interview_mode: str | None):
+    """WHERE clause for one interview purpose, or no filter when none is chosen."""
+    if interview_mode is None:
+        return sqlalchemy.true()
+    return Interview.interview_mode == interview_mode
+
+
 def _safe_percent(numerator: float | int, denominator: float | int) -> float:
     if denominator == 0:
         return 0.0
@@ -200,6 +215,10 @@ def _safe_avg(values: Sequence[float | int | None]) -> float | None:
 
 
 def _metric_or_zero(value: Any, *, digits: int | None = None) -> int | float:
+    # SQL AVG() comes back as Decimal; treating it as "not a number" showed every
+    # average duration as 0.
+    if isinstance(value, decimal.Decimal):
+        value = float(value)
     if isinstance(value, (int, float)):
         if isinstance(value, float) and not math.isfinite(value):
             return 0
@@ -250,6 +269,16 @@ def _to_date(value: datetime.date | datetime.datetime | None) -> datetime.date |
     if isinstance(value, datetime.datetime):
         return value.date()
     return value
+
+
+def require_operations(user: User) -> None:
+    """Operations (failures and alerts) is for administrators only (architecture pack sec 3:
+    a secondary, permission-controlled destination), not everyone with analytics access."""
+    if not is_admin_user(user):
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_403_FORBIDDEN,
+            detail="Operations alerts are limited to administrators.",
+        )
 
 
 async def verify_student_access(
@@ -358,10 +387,10 @@ async def get_dashboard_overview(
 
     overview = system_metrics.get("overview", {})
     if allowed_colleges is not None:
-        users_count_stmt = sqlalchemy.select(sqlalchemy.func.count(User.id)).where(User.university.in_(list(allowed_colleges)))
+        users_count_stmt = sqlalchemy.select(sqlalchemy.func.count(User.id)).where(student_only()).where(User.university.in_(list(allowed_colleges)))
         total_students = int((await session.execute(users_count_stmt)).scalar() or 0)
     elif college:
-        users_count_stmt = sqlalchemy.select(sqlalchemy.func.count(User.id)).where(User.university == college)
+        users_count_stmt = sqlalchemy.select(sqlalchemy.func.count(User.id)).where(student_only()).where(User.university == college)
         total_students = int((await session.execute(users_count_stmt)).scalar() or 0)
     else:
         total_students = int(overview.get("total_users", 0))
@@ -460,7 +489,7 @@ async def get_dashboard_new_students_trend(
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     stmt = sqlalchemy.select(
         sqlalchemy.func.date(User.created_at), sqlalchemy.func.count(User.id)
-    ).group_by(
+    ).where(student_only()).group_by(
         sqlalchemy.func.date(User.created_at)
     )
 
@@ -595,7 +624,7 @@ async def get_dashboard_students_per_college(
         stmt = sqlalchemy.select(
             sqlalchemy.func.coalesce(User.university, "unknown").label("college"),
             sqlalchemy.func.count(sqlalchemy.distinct(User.id)).label("students_count")
-        ).select_from(Interview).join(User, User.id == Interview.user_id)
+        ).select_from(Interview).join(User, User.id == Interview.user_id).where(student_only())
         
         if college:
             stmt = stmt.where(User.university == college)
@@ -622,7 +651,7 @@ async def get_dashboard_students_per_college(
         stmt = sqlalchemy.select(
             sqlalchemy.func.coalesce(User.university, "unknown").label("college"),
             sqlalchemy.func.count(User.id).label("students_count")
-        ).select_from(User)
+        ).select_from(User).where(student_only())
         
         if college:
             stmt = stmt.where(User.university == college)
@@ -735,7 +764,7 @@ async def get_dashboard_recent_interviews(
         return TablePageResponse(table_type="recent_interviews", items=[], page=1, limit=limit_val, total=0)
 
     stmt = (
-        sqlalchemy.select(Interview, User.name, User.university, Report, SummaryReport)
+        sqlalchemy.select(Interview, User.name, User.university, Report, SummaryReport).where(student_interview())
         .join(User, User.id == Interview.user_id)
         .outerjoin(Report, Report.interview_id == Interview.id)
         .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
@@ -783,7 +812,7 @@ async def get_dashboard_recent_students(
     if allowed_colleges is not None and not allowed_colleges:
         limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 10))
         return TablePageResponse(table_type="recent_students", items=[], page=1, limit=limit_val, total=0)
-    stmt = sqlalchemy.select(User)
+    stmt = sqlalchemy.select(User).where(student_only())
     if allowed_colleges is not None:
         stmt = stmt.where(User.university.in_(list(allowed_colleges)))
     stmt = stmt.order_by(User.created_at.desc()).limit(limit)
@@ -810,6 +839,7 @@ async def get_dashboard_attention_required(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ) -> TablePageResponse:
+    require_operations(current_user)
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if allowed_colleges is not None and not allowed_colleges:
         limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 20))
@@ -866,7 +896,7 @@ async def get_students_summary(
 
     overview = system_metrics.get("overview", {})
     if allowed_colleges is not None:
-        total_students_stmt = sqlalchemy.select(sqlalchemy.func.count(User.id)).where(User.university.in_(list(allowed_colleges)))
+        total_students_stmt = sqlalchemy.select(sqlalchemy.func.count(User.id)).where(student_only()).where(User.university.in_(list(allowed_colleges)))
         total_students = int((await session.execute(total_students_stmt)).scalar() or 0)
     else:
         total_students = int(overview.get("total_users", 0))
@@ -901,7 +931,7 @@ async def get_students_table(
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if college:
         await verify_college_access(current_user, college, session)
-    users_stmt = sqlalchemy.select(User)
+    users_stmt = sqlalchemy.select(User).where(student_only())
     if college:
         users_stmt = users_stmt.where(User.university == college)
     elif allowed_colleges is not None:
@@ -1046,7 +1076,7 @@ async def get_student_college_filters(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
-    stmt = sqlalchemy.select(User.university).where(User.university.is_not(None)).distinct().order_by(User.university.asc())
+    stmt = sqlalchemy.select(User.university).where(student_only(), User.university.is_not(None)).distinct().order_by(User.university.asc())
     colleges = [row[0] for row in (await session.execute(stmt)).all() if row[0]]
     allowed = await get_user_allowed_colleges(current_user, session)
     if allowed is not None:
@@ -1109,12 +1139,15 @@ async def get_student_summary(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     performance = metrics.get("performance", {})
     attempts = metrics.get("attempt_behavior", {})
     practice = metrics.get("practice_compliance", {})
@@ -1144,12 +1177,15 @@ async def get_student_score_history(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     points = metrics.get("performance", {}).get("score_history", [])
     return StudentScoreHistoryResponse(student_id=student_id, chart_type="line", points=points)
 
@@ -1159,12 +1195,15 @@ async def get_student_speech_vs_knowledge_history(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     history = metrics.get("performance", {}).get("score_history", [])
     points = [
         {
@@ -1183,12 +1222,15 @@ async def get_student_skill_averages(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     speech_metrics = metrics.get("skill_breakdown", {}).get("speech", {})
     knowledge_metrics = metrics.get("skill_breakdown", {}).get("knowledge", {})
 
@@ -1210,12 +1252,15 @@ async def get_student_practice_completion(
     student_id: int,
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
     service = AnalyticsService(session)
-    metrics = await service.get_student_level_analytics(user_id=student_id, start_date=start_date, end_date=end_date)
+    metrics = await service.get_student_level_analytics(
+        user_id=student_id, start_date=start_date, end_date=end_date, interview_mode=interview_mode
+    )
     practice = metrics.get("practice_compliance", {})
     kpis = [
         KpiCard(key="recommended_exercises", label="Recommended Exercises", value=_metric_or_zero(practice.get("recommended_exercises"))),
@@ -1236,11 +1281,14 @@ async def get_student_interviews(
     student_id: int,
     page: int = fastapi.Query(default=1, ge=1),
     limit: int = fastapi.Query(default=20, ge=1, le=100),
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     await verify_student_access(student_id, current_user, session)
-    total_stmt = sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(Interview.user_id == student_id)
+    total_stmt = sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(
+        Interview.user_id == student_id, _mode(interview_mode)
+    )
     total = (await session.execute(total_stmt)).scalar() or 0
     offset = (page - 1) * limit
 
@@ -1248,7 +1296,7 @@ async def get_student_interviews(
         sqlalchemy.select(Interview, Report, SummaryReport)
         .outerjoin(Report, Report.interview_id == Interview.id)
         .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
-        .where(Interview.user_id == student_id)
+        .where(Interview.user_id == student_id, _mode(interview_mode))
         .order_by(Interview.created_at.desc())
         .offset(offset)
         .limit(limit)
@@ -1289,6 +1337,7 @@ async def get_student_interviews(
 )
 async def get_student_latest_feedback(
     student_id: int,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -1296,7 +1345,11 @@ async def get_student_latest_feedback(
     stmt = (
         sqlalchemy.select(SummaryReport)
         .join(Interview, Interview.id == SummaryReport.interview_id)
-        .where(Interview.user_id == student_id, SummaryReport.report_json.is_not(None))
+        .where(
+            Interview.user_id == student_id,
+            SummaryReport.report_json.is_not(None),
+            _mode(interview_mode),
+        )
         .order_by(SummaryReport.created_at.desc())
         .limit(1)
     )
@@ -1359,11 +1412,11 @@ async def get_colleges_summary(
 
     total_colleges = len(college_items)
     if allowed_colleges is not None:
-        total_students = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(User.id)).where(User.university.in_(list(allowed_colleges))))).scalar() or 0
-        total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)).join(User, User.id == Interview.user_id).where(User.university.in_(list(allowed_colleges))))).scalar() or 0
+        total_students = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(User.id)).where(student_only()).where(User.university.in_(list(allowed_colleges))))).scalar() or 0
+        total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)).join(User, User.id == Interview.user_id).where(student_only(), User.university.in_(list(allowed_colleges))))).scalar() or 0
     else:
-        total_students = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(User.id)))).scalar() or 0
-        total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)))).scalar() or 0
+        total_students = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(User.id)).where(student_only()))).scalar() or 0
+        total_interviews = (await session.execute(sqlalchemy.select(sqlalchemy.func.count(Interview.id)).where(student_interview()))).scalar() or 0
     valid_colleges = [
         item for item in college_items 
         if isinstance(item.get("avg_score"), (int, float))
@@ -1424,7 +1477,7 @@ async def get_colleges_table(
     students_by_college_stmt = sqlalchemy.select(
         coalesced_univ, 
         sqlalchemy.func.count(User.id)
-    )
+    ).where(student_only())
     if allowed_colleges is not None:
         students_by_college_stmt = students_by_college_stmt.where(User.university.in_(list(allowed_colleges)))
     
@@ -1483,6 +1536,10 @@ async def get_colleges_table(
     " average duration, and most popular role/difficulty.",
 )
 async def get_interviews_summary(
+    interview_mode: Literal["practice", "assessment"] | None = fastapi.Query(
+        default=None,
+        description="Mock interviews ('practice') and assessments are counted apart.",
+    ),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -1505,7 +1562,7 @@ async def get_interviews_summary(
         difficulty=None,
         college=None,
         allowed_colleges=allowed_colleges,
-    )
+    ).where(_mode(interview_mode))
     total_interviews = (await session.execute(total_stmt)).scalar() or 0
 
     completed_stmt = _apply_interview_filters(
@@ -1516,18 +1573,22 @@ async def get_interviews_summary(
         difficulty=None,
         college=None,
         allowed_colleges=allowed_colleges,
-    )
+    ).where(_mode(interview_mode))
     completed_interviews = (await session.execute(completed_stmt)).scalar() or 0
 
     duration_stmt = _apply_interview_filters(
-        sqlalchemy.select(sqlalchemy.func.avg(Interview.duration_seconds)),
+        # Median of finished interviews. Some sessions were left open for days (one for
+        # 135), which made any mean meaningless; the median is the typical interview.
+        sqlalchemy.select(
+            sqlalchemy.func.percentile_cont(0.5).within_group(Interview.duration_seconds)
+        ).where(Interview.status == "completed", Interview.duration_seconds > 0),
         start_date=None,
         end_date=None,
         role=None,
         difficulty=None,
         college=None,
         allowed_colleges=allowed_colleges,
-    )
+    ).where(_mode(interview_mode))
     average_duration = (await session.execute(duration_stmt)).scalar_one_or_none()
 
     role_stmt = _apply_interview_filters(
@@ -1538,7 +1599,7 @@ async def get_interviews_summary(
         difficulty=None,
         college=None,
         allowed_colleges=allowed_colleges,
-    )
+    ).where(_mode(interview_mode))
     popular_role = (
         await session.execute(
             role_stmt.group_by(Interview.track)
@@ -1555,7 +1616,7 @@ async def get_interviews_summary(
         difficulty=None,
         college=None,
         allowed_colleges=allowed_colleges,
-    )
+    ).where(_mode(interview_mode))
     popular_difficulty = (
         await session.execute(
             diff_stmt.group_by(Interview.difficulty)
@@ -1564,24 +1625,16 @@ async def get_interviews_summary(
         )
     ).first()
 
-    score_stmt = _apply_interview_filters(
-        sqlalchemy.select(sqlalchemy.func.avg(Report.overall_score))
-        .select_from(Interview)
-        .join(Report, Report.interview_id == Interview.id),
-        start_date=None,
-        end_date=None,
-        role=None,
-        difficulty=None,
-        college=None,
-        allowed_colleges=allowed_colleges,
+    # Same definition as the Students page, so the two numbers always agree.
+    average_score = await AnalyticsService(session).average_completed_score(
+        allowed_colleges=allowed_colleges, interview_mode=interview_mode
     )
-    average_score = (await session.execute(score_stmt)).scalar_one_or_none()
 
     kpis = [
         KpiCard(key="total_interviews", label="Total Interviews", value=total_interviews),
         KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(average_score, digits=2)),
         KpiCard(key="completion_rate", label="Completion Rate", value=_safe_percent(completed_interviews, total_interviews), unit="percent"),
-        KpiCard(key="average_duration", label="Average Duration", value=int(_metric_or_zero(average_duration)), unit="seconds"),
+        KpiCard(key="average_duration", label="Typical duration", value=int(_metric_or_zero(average_duration)), unit="seconds"),
         KpiCard(key="most_popular_role", label="Most Popular Role", value=popular_role[0] if popular_role else None),
         KpiCard(key="most_popular_difficulty", label="Most Popular Difficulty", value=popular_difficulty[0] if popular_difficulty else None),
     ]
@@ -1697,6 +1750,7 @@ async def global_search(
 
     users_stmt = (
         sqlalchemy.select(User.id, User.name, User.email, User.university)
+        .where(student_only())
         .where(sqlalchemy.or_(User.name.ilike(pattern), User.email.ilike(pattern), User.university.ilike(pattern)))
     )
     if allowed_colleges is not None:
@@ -1714,7 +1768,7 @@ async def global_search(
     colleges_rows = list((await session.execute(colleges_stmt)).all())
 
     interviews_stmt = (
-        sqlalchemy.select(Interview.id, Interview.track, Interview.difficulty, Interview.created_at, User.name)
+        sqlalchemy.select(Interview.id, Interview.track, Interview.difficulty, Interview.created_at, User.name).where(student_interview())
         .join(User, User.id == Interview.user_id)
         .where(sqlalchemy.or_(Interview.track.ilike(pattern), Interview.difficulty.ilike(pattern), User.name.ilike(pattern)))
     )
@@ -1774,7 +1828,7 @@ async def get_college_detail_summary(
     students_count = (
         (
             await session.execute(
-                sqlalchemy.select(sqlalchemy.func.count(User.id)).where(User.university == college_name)
+                sqlalchemy.select(sqlalchemy.func.count(User.id)).where(student_only()).where(User.university == college_name)
             )
         ).scalar()
         or 0
@@ -1817,7 +1871,7 @@ async def get_college_student_growth(
     await verify_college_access(current_user, college_name, session)
     stmt = (
         sqlalchemy.select(sqlalchemy.func.date(User.created_at), sqlalchemy.func.count(User.id))
-        .where(User.university == college_name)
+        .where(student_only(), User.university == college_name)
         .group_by(sqlalchemy.func.date(User.created_at))
         .order_by(sqlalchemy.func.date(User.created_at).asc())
     )
@@ -1881,7 +1935,7 @@ async def get_college_practice_metrics(
     stmt = (
         sqlalchemy.select(Interview.difficulty, sqlalchemy.func.count(Interview.id))
         .join(User, User.id == Interview.user_id)
-        .where(User.university == college_name)
+        .where(student_interview(), User.university == college_name)
         .where(Interview.status == "completed")
         .group_by(Interview.difficulty)
     )
@@ -2293,6 +2347,7 @@ async def get_difficulty_metrics(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
     role: str | None = None,
+    interview_mode: Literal["practice", "assessment"] | None = None,
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -2301,7 +2356,13 @@ async def get_difficulty_metrics(
         return TablePageResponse(table_type="difficulty_metrics", items=[], page=1, limit=1, total=0)
     service = AnalyticsService(session)
     clean_role = role.strip() if role and role.strip() else None
-    items = await service.get_difficulty_segment_analytics(start_date=start_date, end_date=end_date, role=clean_role, allowed_colleges=allowed_colleges)
+    items = await service.get_difficulty_segment_analytics(
+        start_date=start_date,
+        end_date=end_date,
+        role=clean_role,
+        allowed_colleges=allowed_colleges,
+        interview_mode=interview_mode,
+    )
     items = _sort_difficulty_items(items)
     normalized_items = _zero_fill_metric_nulls(items)
     return TablePageResponse(table_type="difficulty_metrics", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
@@ -2409,6 +2470,7 @@ async def get_predictive_alerts(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    require_operations(current_user)
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if allowed_colleges is not None and not allowed_colleges:
         page_val = page if isinstance(page, int) else int(getattr(page, "default", 1))
@@ -2453,12 +2515,24 @@ async def get_predictive_alerts(
 async def get_benchmarking(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
+    page: int = fastapi.Query(default=1, ge=1),
+    limit: int = fastapi.Query(default=10, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    # FastAPI resolves Query defaults before calling this route. The fallback
+    # also keeps direct service-level calls deterministic in unit tests.
+    resolved_page = page if isinstance(page, int) else 1
+    resolved_limit = limit if isinstance(limit, int) else 10
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if allowed_colleges is not None and not allowed_colleges:
-        return TablePageResponse(table_type="benchmarking", items=[], page=1, limit=1, total=0)
+        return TablePageResponse(
+            table_type="benchmarking",
+            items=[],
+            page=resolved_page,
+            limit=resolved_limit,
+            total=0,
+        )
     service = AnalyticsService(session)
     role_items = await service.get_role_segment_analytics(start_date=start_date, end_date=end_date, allowed_colleges=allowed_colleges)
     
@@ -2494,8 +2568,18 @@ async def get_benchmarking(
                 "tags": tags,
             }
         )
-    normalized_items = _zero_fill_metric_nulls(items)
-    return TablePageResponse(table_type="benchmarking", items=normalized_items, page=1, limit=len(items) or 1, total=len(items))
+    # Pagination must be applied here, not only in the UI. Returning every
+    # record with a changing page indicator made each page look identical.
+    total = len(items)
+    start = (resolved_page - 1) * resolved_limit
+    page_items = _zero_fill_metric_nulls(items[start : start + resolved_limit])
+    return TablePageResponse(
+        table_type="benchmarking",
+        items=page_items,
+        page=resolved_page,
+        limit=resolved_limit,
+        total=total,
+    )
 
 
 @router.get(
@@ -2514,7 +2598,7 @@ async def get_forecasting(
     if allowed_colleges is not None and not allowed_colleges:
         return ForecastResponse(chart_type="line", points=[])
     stmt = (
-        sqlalchemy.select(sqlalchemy.func.date(Interview.created_at), sqlalchemy.func.count(Interview.id))
+        sqlalchemy.select(sqlalchemy.func.date(Interview.created_at), sqlalchemy.func.count(Interview.id)).where(student_interview())
     )
     if allowed_colleges is not None:
         stmt = stmt.join(User, User.id == Interview.user_id).where(User.university.in_(list(allowed_colleges)))
@@ -2543,3 +2627,138 @@ async def get_forecasting(
             )
         )
     return ForecastResponse(chart_type="line", points=points)
+
+
+_PULSE_PERIOD_DAYS = (7, 30)
+
+
+def _count_by_ist_day(moments) -> dict[datetime.date, int]:
+    """Count timestamps per Indian calendar day. A timestamp without a zone is taken as UTC."""
+    counts: dict[datetime.date, int] = {}
+    for moment in moments:
+        if moment is None:
+            continue
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        day = moment.astimezone(_IST).date()
+        counts[day] = counts.get(day, 0) + 1
+    return counts
+
+
+@router.get(
+    "/dashboard/pulse",
+    summary="Programme pulse for the staff Overview",
+    description="Four headline figures for the chosen period with the previous period and a"
+    " per-day series for sparklines, plus mock and assessment interviews per day."
+    " Students only; averages use finished assessments only.",
+)
+async def get_dashboard_pulse(
+    days: int = fastapi.Query(default=7, description="Period length in days: 7 or 30."),
+    current_user: User = Depends(get_current_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    # Query-string values arrive as text, and a Literal[7, 30] parameter rejects "7" and
+    # "30" with a 422, so the overview's period buttons could never load. Accept the
+    # integer and enforce the two supported values here.
+    if days not in _PULSE_PERIOD_DAYS:
+        raise fastapi.HTTPException(
+            status_code=422, detail="days must be 7 or 30."
+        )
+    allowed_colleges = await get_user_allowed_colleges(current_user, session)
+    today = datetime.datetime.now(_IST).date()
+    start = today - datetime.timedelta(days=days - 1)
+    previous_start = start - datetime.timedelta(days=days)
+    dates = [start + datetime.timedelta(days=i) for i in range(days)]
+
+    service = AnalyticsService(session)
+    fetched = (
+        []
+        if allowed_colleges is not None and not allowed_colleges
+        else await service._list_interviews_all(
+            # One extra day each side: the list filters by UTC dates, the pulse groups by
+            # Indian days, and only interviews inside an Indian day range are counted below.
+            start_date=previous_start - datetime.timedelta(days=1),
+            end_date=today + datetime.timedelta(days=1),
+            allowed_colleges=allowed_colleges,
+        )
+    )
+    interviews = [
+        i for i in fetched if previous_start <= i.created_at.astimezone(_IST).date() <= today
+    ]
+
+    # Sign-ups: learners whose account was created in the period, under the same student and
+    # college rules as the sign-ups chart. One extra day each side for the UTC/IST edge.
+    signups_by_day: dict[datetime.date, int] = {}
+    if allowed_colleges is None or allowed_colleges:
+        signup_stmt = sqlalchemy.select(User.created_at).where(
+            student_only(),
+            User.created_at
+            >= datetime.datetime.combine(
+                previous_start - datetime.timedelta(days=1),
+                datetime.time.min,
+                tzinfo=datetime.timezone.utc,
+            ),
+            User.created_at
+            <= datetime.datetime.combine(
+                today + datetime.timedelta(days=1),
+                datetime.time.max,
+                tzinfo=datetime.timezone.utc,
+            ),
+        )
+        if allowed_colleges is not None:
+            signup_stmt = signup_stmt.where(User.university.in_(list(allowed_colleges)))
+        signups_by_day = _count_by_ist_day(
+            (await session.execute(signup_stmt)).scalars().all()
+        )
+    finished = [i for i in interviews if i.status == "completed" and i.interview_mode == "assessment"]
+    reports = await service._reports_by_interview([i.id for i in finished])
+    summaries = await service._summary_reports_by_interview([i.id for i in finished])
+    score = {i.id: _extract_overall_score(reports.get(i.id), summaries.get(i.id)) for i in finished}
+
+    def day_of(i):
+        return i.created_at.astimezone(_IST).date()
+
+    def in_range(i, lo, hi):
+        return lo <= day_of(i) <= hi
+
+    def figures(lo, hi):
+        rows = [i for i in interviews if in_range(i, lo, hi)]
+        done = [i for i in rows if i.status == "completed" and i.interview_mode == "assessment"]
+        scores = [score[i.id] for i in done if score.get(i.id) is not None]
+        return {
+            # A day with no sign-ups is a real zero, unlike a day with no average score.
+            "sign_ups": sum(n for day, n in signups_by_day.items() if lo <= day <= hi),
+            "active_learners": len({i.user_id for i in rows}),
+            "assessments_taken": len(done),
+            "average_assessment_score": round(sum(scores) / len(scores), 1) if scores else None,
+            "mock_interviews": sum(1 for i in rows if i.interview_mode == "practice"),
+        }
+
+    current = figures(start, today)
+    previous = figures(previous_start, start - datetime.timedelta(days=1))
+    per_day = [figures(d, d) for d in dates]
+
+    def metric(key):
+        now_value, before = current[key], previous[key]
+        return {
+            "value": now_value,
+            "previous": before,
+            "change": None if now_value is None or before is None else round(now_value - before, 1),
+            # A day with no finished assessment has no average: None, never a zero.
+            "series": [p[key] for p in per_day],
+        }
+
+    return {
+        "days": days,
+        "start": start.isoformat(),
+        "end": today.isoformat(),
+        "metrics": {key: metric(key) for key in current},
+        "interviews_by_day": [
+            {
+                "date": d.isoformat(),
+                "mock": sum(1 for i in interviews if day_of(i) == d and i.interview_mode == "practice"),
+                "assessment": sum(1 for i in interviews if day_of(i) == d and i.interview_mode == "assessment"),
+            }
+            for d in dates
+        ],
+    }

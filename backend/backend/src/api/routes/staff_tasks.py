@@ -1,0 +1,445 @@
+"""The staff Overview's work queue: what needs this person now, and what to do next.
+
+Architecture pack sec 13 (task-oriented Overview), sec 10 (clear next owner) and sec 12
+(truthful status). Every task is filtered by the same rules as the page it links to, carries
+its next action, and is omitted when nothing is pending, so the Overview never shows a wall
+of zeros. Counts only; no student answers, feedback or names leave this endpoint.
+"""
+
+import datetime as dt
+
+import fastapi
+import sqlalchemy as sa
+
+from src.api.dependencies.admin import get_current_admin_user, is_admin_user
+from src.api.dependencies.session import get_async_session
+from src.models.db.human_interview import HumanInterview
+from src.models.db.job_profile import JobProfile
+from src.models.db.user import User
+from src.services import human_interviews as interviews
+from src.services.analytics import AnalyticsService
+
+router = fastapi.APIRouter(prefix="/v2/staff", tags=["staff-tasks"])
+
+HUMAN = "/dashboard/samvaad/human-interviews"
+
+
+# Staff are in India: "today" is an Indian day.
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+
+
+def _task(id, title, count, detail, owner, action, href, attention, oldest_at=None):
+    return {
+        "id": id,
+        "title": title,
+        "count": count,
+        "detail": detail,
+        "owner": owner,
+        "action": {"label": action, "href": href},
+        "attention": attention,
+        # When the oldest pending item became due, so the Overview can say how long it waited.
+        "oldest_at": oldest_at.isoformat() if oldest_at else None,
+    }
+
+
+def _interview_scope(user):
+    """Admins see every interview; anyone else only those they host."""
+    scope = [interviews.student_only()]
+    if not is_admin_user(user):
+        scope.append(interviews.involved(user))
+    return scope
+
+
+def _day_bounds(now):
+    local = now.astimezone(IST)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start, start + dt.timedelta(days=1)
+
+
+async def _human_tasks(user, session, now):
+    """Interviews this person runs: admins see all, others only the ones they host."""
+    if not interviews.permitted(user, "read"):
+        return []
+    base = (
+        sa.select(sa.func.count(HumanInterview.id), sa.func.min(HumanInterview.ends_at))
+        .join(User, User.id == HumanInterview.student_id)
+        .where(*_interview_scope(user))
+    )
+
+    async def stats(*where):
+        n, oldest = (await session.execute(base.where(*where))).one()
+        return int(n or 0), oldest
+
+    day_start, day_end = _day_bounds(now)
+    scheduled = HumanInterview.status == "scheduled"
+    upcoming, _ = await stats(
+        scheduled,
+        HumanInterview.starts_at >= now,
+        HumanInterview.starts_at < now + dt.timedelta(days=7),
+    )
+    today, _ = await stats(
+        scheduled, HumanInterview.starts_at >= now, HumanInterview.starts_at < day_end
+    )
+    # Meeting time passing is not proof of attendance (pack sec 12).
+    overdue, overdue_since = await stats(scheduled, HumanInterview.ends_at < now)
+    no_feedback, feedback_since = await stats(
+        HumanInterview.status == "completed", HumanInterview.result.is_(None)
+    )
+    unreleased, unreleased_since = await stats(
+        HumanInterview.result.is_not(None), HumanInterview.result_released_at.is_(None)
+    )
+    owner = "You" if not is_admin_user(user) else "The interviewer"
+    tasks = []
+    if overdue:
+        tasks.append(_task(
+            "interviews_awaiting_attendance", "Awaiting attendance update", overdue,
+            "The meeting time has passed but nobody recorded whether it happened.",
+            owner, "Record what happened", HUMAN, True, overdue_since,
+        ))
+    if no_feedback:
+        tasks.append(_task(
+            "interviews_awaiting_feedback", "Feedback awaiting submission", no_feedback,
+            "The interview took place; the result and feedback are not in yet.",
+            owner, "Add the result", HUMAN, True, feedback_since,
+        ))
+    if unreleased:
+        tasks.append(_task(
+            "interviews_release_pending", "Result not shared yet", unreleased,
+            "A result is recorded but the student cannot see it until it is shared.",
+            "Placement lead", "Review and share", HUMAN, True, unreleased_since,
+        ))
+    if upcoming:
+        tasks.append(_task(
+            "interviews_upcoming", "Human interviews in the next 7 days", upcoming,
+            f"{today} today." if today else "None today.",
+            owner, "See the schedule", HUMAN, False,
+        ))
+    return tasks
+
+
+async def _today(user, session, now):
+    """Today's scheduled human interviews, in order, for the people who may see them.
+    Same scope as the human-interview list: the student's name is already visible there."""
+    if not interviews.permitted(user, "read"):
+        return []
+    day_start, day_end = _day_bounds(now)
+    rows = (
+        await session.execute(
+            sa.select(HumanInterview, User.name)
+            .join(User, User.id == HumanInterview.student_id)
+            .where(
+                *_interview_scope(user),
+                HumanInterview.status == "scheduled",
+                HumanInterview.starts_at >= day_start,
+                HumanInterview.starts_at < day_end,
+            )
+            .order_by(HumanInterview.starts_at)
+            .limit(8)
+        )
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "starts_at": row.starts_at.isoformat(),
+            "ends_at": row.ends_at.isoformat(),
+            "student_name": name,
+            "round": row.role_name or row.title,
+            "can_join": interviews.joinable(row, now),
+            # Joining happens on the interviews list; otherwise open the one record.
+            "href": (
+                HUMAN
+                if interviews.joinable(row, now)
+                else f"/dashboard/samvaad/assessments/human/{row.id}"
+            ),
+        }
+        for row, name in rows
+    ]
+
+
+async def _support_tasks(user, session, now):
+    """Learners whose practice needs a look (pack F23), summed across every course where this
+    person may open the support queue, under that queue's own consent and scope rules."""
+    from src.api.routes.course_workspace import _shared_student_predicate
+    from src.models.db.interview import Interview
+    from src.services import course_support
+    from src.services.course_access import grants_for
+
+    if not course_support.allowed(user):
+        return []
+    if is_admin_user(user):
+        # Courses with practice in the last two weeks; older sittings are not new follow-ups.
+        courses = (
+            await session.execute(
+                sa.select(Interview.course_id)
+                .where(
+                    Interview.course_id.is_not(None),
+                    Interview.created_at >= now - dt.timedelta(days=14),
+                )
+                .distinct()
+            )
+        ).scalars().all()
+    else:
+        courses = sorted({c for g in await grants_for(user, session) for c in g.course_ids})
+    waiting, oldest_course, oldest = 0, None, None
+    for course_id in courses:
+        if not await course_support.can_open(user, course_id, session):
+            continue
+        try:
+            authorized = await _shared_student_predicate(
+                course_id, user, session, coaching_only=True
+            )
+        except fastapi.HTTPException:
+            continue
+        signals = course_support.support_query(course_id, authorized)
+        n, first = (
+            await session.execute(
+                sa.select(sa.func.count(), sa.func.min(signals.c.created_at))
+                .select_from(signals)
+                .where(signals.c.issue.is_not(None))
+            )
+        ).one()
+        if n:
+            waiting += int(n)
+            if oldest is None or first < oldest:
+                oldest, oldest_course = first, course_id
+    if not waiting:
+        return []
+    return [_task(
+        "support_follow_ups", "Learners whose practice needs a look", waiting,
+        "Blocked sessions, delayed feedback or failed answers. Saved work is kept.",
+        "Facilitator", "Open support",
+        f"/dashboard/samvaad/courses/{oldest_course}/support", True, oldest,
+    )]
+
+
+async def _scorecard_tasks(user, session):
+    """Human interview scorecards submitted and waiting for a reviewer (pack F20)."""
+    from src.api.routes.human_scorecards import can_review
+    from src.models.db.human_scorecard import HumanScorecard
+    from src.services.course_access import grants_for
+
+    if not can_review(user):
+        return []
+    submitted = (
+        await session.execute(
+            sa.select(HumanInterview.course_id, HumanInterview.id, HumanScorecard.submitted_at,
+                      HumanScorecard.submitted_by)
+            .join(HumanScorecard, HumanScorecard.appointment_id == HumanInterview.id)
+            .where(HumanScorecard.status == "submitted")
+            .order_by(HumanScorecard.submitted_at)
+        )
+    ).all()
+    if not is_admin_user(user):
+        mine = {c for g in await grants_for(user, session) for c in g.course_ids}
+        submitted = [r for r in submitted if r.course_id in mine and r.submitted_by != user.id]
+    if not submitted:
+        return []
+    first = submitted[0]
+    return [_task(
+        "scorecards_to_review", "Interview scorecards to review", len(submitted),
+        "Approve or return each one; only an approved scorecard can be shared with the student.",
+        "Reviewer", "Review scorecards",
+        f"/dashboard/samvaad/assessments/human/{first.id}", True, first.submitted_at,
+    )]
+
+
+async def _issue_tasks(user, session):
+    """Transcript or feedback problems students reported (pack F11), for content reviewers."""
+    from src.api.routes.feedback_issues import reviewer
+    from src.models.db.feedback_issue import FeedbackIssue
+
+    if not reviewer(user):
+        return []
+    n, oldest = (
+        await session.execute(
+            sa.select(sa.func.count(FeedbackIssue.id), sa.func.min(FeedbackIssue.created_at)).where(
+                FeedbackIssue.status == "open"
+            )
+        )
+    ).one()
+    if not n:
+        return []
+    return [_task(
+        "feedback_issues_open", "Reported transcript or feedback issues", int(n),
+        "A student says something looks wrong. Their saved answer is unchanged until you decide.",
+        "Content reviewer", "Review issues", "/dashboard/samvaad/issues", True, oldest,
+    )]
+
+
+async def _release_tasks(user, session):
+    """AI assessment results held for review (pack F16), for people who may release them."""
+    from src.api.routes.assessment_records import may_release
+    from src.models.db.interview import Interview
+    from src.services.people import student_interview
+
+    if not may_release(user):
+        return []
+    n, oldest, first = (
+        await session.execute(
+            sa.select(
+                sa.func.count(Interview.id),
+                sa.func.min(Interview.completed_at),
+                sa.func.min(Interview.id),
+            ).where(
+                Interview.interview_mode == "assessment",
+                Interview.result_release == "review",
+                Interview.result_released_at.is_(None),
+                Interview.status == "completed",
+                student_interview(),
+            )
+        )
+    ).one()
+    if not n:
+        return []
+    return [_task(
+        "assessment_results_to_release", "Assessment results to release", int(n),
+        "Students see “Feedback needs review” until a result is released.",
+        "Reviewer", "Review and release",
+        f"/dashboard/samvaad/assessments/ai/{first}", True, oldest,
+    )]
+
+
+async def _review_tasks(user, session):
+    """Templates waiting for a reviewer. Only admins may review and publish them."""
+    if not is_admin_user(user):
+        return []
+    rows = (
+        await session.execute(
+            sa.select(
+                JobProfile.interview_mode,
+                sa.func.count(JobProfile.id),
+                sa.func.min(sa.func.coalesce(JobProfile.submitted_at, JobProfile.updated_at)),
+            )
+            .where(JobProfile.status == "under_review")
+            .group_by(JobProfile.interview_mode)
+        )
+    ).all()
+    counts = {mode: int(n) for mode, n, _ in rows}
+    since = {mode: oldest for mode, _, oldest in rows}
+    tasks = []
+    if counts.get("assessment"):
+        tasks.append(_task(
+            "templates_review_assessment", "Assessment templates to review",
+            counts["assessment"],
+            "Students cannot take these until someone approves and publishes them.",
+            "Reviewer", "Review and publish", "/dashboard/samvaad/roles", True,
+            since["assessment"],
+        ))
+    if counts.get("practice"):
+        tasks.append(_task(
+            "templates_review_mock", "Mock interview templates to review",
+            counts["practice"],
+            "Students cannot practise with these until they are published.",
+            "Reviewer", "Review and publish", "/dashboard/samvaad/practice-templates",
+            True, since["practice"],
+        ))
+    return tasks
+
+
+async def _operations_tasks(user, session, now):
+    """Saved answers whose processing failed or stalled. Operations is admins only."""
+    if not is_admin_user(user):
+        return []
+    alerts = await AnalyticsService(session)._answer_processing_alerts(
+        user_id=None, start_date=None, end_date=None, now=now
+    )
+    stuck = sum(a["count"] for a in alerts)
+    if not stuck:
+        return []
+    failed = sum(a["count"] for a in alerts if a["severity"] == "high")
+    oldest = now - dt.timedelta(minutes=max(a["oldest_age_minutes"] for a in alerts))
+    return [_task(
+        "processing_failures", "Answers waiting on processing", stuck,
+        f"{failed} failed, {stuck - failed} stalled for over 10 minutes. "
+        "Answers are saved; feedback needs recovery.",
+        "Operations", "Open failures", "/dashboard/samvaad/alerts", True, oldest,
+    )]
+
+
+async def _selection_tasks(user, session):
+    from src.models.db.opportunity import Opportunity
+    from src.services import course_shortlists, opportunity_selection, opportunities
+
+    if not course_shortlists.permission(user, "read"):
+        return []
+    courses = await course_shortlists.placement_course_ids(user, session)
+    stmt = sa.select(Opportunity).where(Opportunity.status.in_(("open", "closed")))
+    if courses is not None:
+        stmt = stmt.where(Opportunity.course_id.in_(courses))
+    tasks = []
+    for opening in (
+        await session.execute(stmt.order_by(Opportunity.id.desc()))
+    ).scalars():
+        predicate = await opportunities.authorize(
+            user, opening.course_id, session, "read"
+        )
+        selection = await opportunity_selection.latest(session, opening.id)
+        view = await opportunity_selection.detail(
+            session, user, opening, selection, predicate
+        )
+        if not view["items"] or view["status"] == "released":
+            continue
+        if view["can_release"]:
+            title, count, action = (
+                "Opportunity outcomes awaiting release",
+                len(view["items"]),
+                "Review and release",
+            )
+        elif view["can_decide"]:
+            count = sum(not i["decision"] for i in view["items"])
+            title, action = (
+                ("Opportunity decisions awaiting review", "Review decisions")
+                if count
+                else (
+                    ("Opportunity review needs attention", "Resolve review blockers")
+                    if view["lock_blockers"]
+                    else ("Opportunity ready for lock review", "Review and lock")
+                )
+            )
+            count = count or 1
+        elif view["can_recommend"]:
+            count = sum(not i["recommendation"] for i in view["items"])
+            title, action = "Opportunity recommendations pending", "Review candidates"
+        else:
+            continue
+        if count:
+            tasks.append(
+                _task(
+                    f"selection_{opening.id}",
+                    title,
+                    count,
+                    opening.title,
+                    "You",
+                    action,
+                    f"/dashboard/samvaad/opportunities/{opening.id}#selection",
+                    True,
+                )
+            )
+    return tasks
+
+
+@router.get("/tasks")
+async def my_tasks(
+    response: fastapi.Response,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    now = dt.datetime.now(dt.timezone.utc)
+    tasks = [
+        *await _human_tasks(user, session, now),
+        *await _selection_tasks(user, session),
+        *await _support_tasks(user, session, now),
+        *await _scorecard_tasks(user, session),
+        *await _issue_tasks(user, session),
+        *await _release_tasks(user, session),
+        *await _review_tasks(user, session),
+        *await _operations_tasks(user, session, now),
+    ]
+    # Things to act on first, then things to know about.
+    tasks.sort(key=lambda t: not t["attention"])
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "tasks": tasks,
+        "today": await _today(user, session, now),
+        "generated_at": now.isoformat(),
+    }

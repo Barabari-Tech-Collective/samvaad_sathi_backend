@@ -3,6 +3,6 @@ from src.config.settings.environment import Environment
 
 
 class BackendStageSettings(BackendBaseSettings):
-    DESCRIPTION: str | None = "Test Environment."
-    DEBUG: bool = True
+    DESCRIPTION: str | None = "Isolated staging environment."
+    DEBUG: bool = False
     ENVIRONMENT: Environment = Environment.STAGING

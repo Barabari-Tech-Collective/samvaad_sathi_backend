@@ -4,6 +4,7 @@ from typing import List, Optional
 from pydantic import Field, field_validator
 
 from src.models.schemas.base import BaseSchemaModel
+from src.services.staff_roles import canonical_role
 
 
 class TeamRoleEnum(str, enum.Enum):
@@ -42,7 +43,14 @@ class TeamMemberBase(BaseSchemaModel):
     colleges: Optional[List[str]] = Field(None, description="Assigned colleges")
 
 
+
+
 class TeamMemberCreate(TeamMemberBase):
+    @field_validator("access_role")
+    @classmethod
+    def supported_role(cls, value: str) -> str:
+        return canonical_role(value)
+
     name: str = Field(..., description="Name of the user to be added")
     email: str = Field(..., description="Email of the user to be added")
     password: Optional[str] = Field(
@@ -72,6 +80,11 @@ class TeamMemberUpdate(BaseSchemaModel):
         max_length=128,
         description="Password to update user credentials (minimum 8 characters)",
     )
+
+    @field_validator("access_role")
+    @classmethod
+    def supported_role(cls, value: str | None) -> str | None:
+        return canonical_role(value) if value is not None else None
 
     @field_validator("password", mode="before")
     @classmethod

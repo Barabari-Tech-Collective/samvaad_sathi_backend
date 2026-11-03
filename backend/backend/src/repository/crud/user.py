@@ -10,6 +10,46 @@ from src.utilities.exceptions.password import PasswordDoesNotMatch
 
 
 class UserCRUDRepository(BaseCRUDRepository):
+    async def get_user_by_central_identity(self, central_id: str) -> User:
+        result = await self.async_session.execute(sqlalchemy.select(User).where(User.central_identity_id == central_id))
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise EntityDoesNotExist("Central identity is not bound")
+        return user
+
+    async def get_user_by_legacy_sso_identity(self, central_id: str) -> User:
+        """Find a pre-central-binding SSO user without treating it as a new account.
+
+        Early SSO releases accidentally stored the central user ID in ``student_id``.
+        This narrow compatibility lookup is only used after the proper stable binding
+        misses, so a successful sign-in can move that existing learner to
+        ``central_identity_id`` instead of creating a second learner record.
+        """
+        result = await self.async_session.execute(
+            sqlalchemy.select(User).where(User.student_id == central_id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise EntityDoesNotExist("Legacy SSO identity is not bound")
+        return user
+
+    async def bind_central_identity(self, user: User, central_id: str) -> User:
+        from sqlalchemy.exc import IntegrityError
+        if user.central_identity_id not in (None, central_id):
+            raise EntityAlreadyExists("This local account is bound to another central identity")
+        if user.central_identity_id == central_id:
+            return user
+        try:
+            result = await self.async_session.execute(sqlalchemy.update(User).where(User.id == user.id, User.central_identity_id.is_(None)).values(central_identity_id=central_id))
+            if result.rowcount != 1:
+                raise EntityAlreadyExists("Identity binding changed; sign in again")
+            await self.async_session.commit()
+            await self.async_session.refresh(user)
+            return user
+        except IntegrityError:
+            await self.async_session.rollback()
+            raise EntityAlreadyExists("Central identity is already bound")
+
     async def get_user_by_id(self, *, user_id: int) -> User:
         stmt = sqlalchemy.select(User).where(User.id == user_id)
         query = await self.async_session.execute(statement=stmt)
@@ -81,10 +121,25 @@ class UserCRUDRepository(BaseCRUDRepository):
 
     async def verify_password(self, *, email: str, password: str) -> User:
         user = await self.get_user_by_email(email=email)
-        if not user.password_hash:
-            raise PasswordDoesNotMatch("This account is configured for Central SSO login.")
-        if not pwd_generator.is_password_authenticated(hash_salt="", password=password, hashed_password=user.password_hash):
-            raise PasswordDoesNotMatch("Password does not match!")
+        
+        is_authed = False
+        if user.password_hash:
+            try:
+                is_authed = pwd_generator.is_password_authenticated(
+                    hash_salt="", password=password, hashed_password=user.password_hash
+                )
+            except Exception:
+                is_authed = False
+
+        if not is_authed:
+            from src.services.central_auth_service import check_and_apply_credential_reconciliation
+            reconciled = await check_and_apply_credential_reconciliation(
+                user=user, password=password, async_session=self.async_session
+            )
+            if not reconciled:
+                if not user.password_hash:
+                    raise PasswordDoesNotMatch("This account is configured for Central SSO login.")
+                raise PasswordDoesNotMatch("Password does not match!")
         return user
 
     async def update_resume_data(
@@ -177,9 +232,15 @@ class UserCRUDRepository(BaseCRUDRepository):
     ) -> User:
         """Link the stable central ID and refresh only fields owned by the registry."""
         user = await self.get_user_by_id(user_id=user_id)
-        if user.student_id and user.student_id != central_user_id:
+        if user.central_identity_id not in (None, central_user_id):
             raise EntityAlreadyExists("This Samvaad account is linked to another central account")
-        user.student_id = central_user_id
+        # ``student_id`` belongs to the legacy Sampark roster. It is not a Central Auth
+        # identifier. Keeping those identifiers separate prevents a later roster import
+        # or an email change from silently splitting one learner into two local accounts.
+        # The conditional UPDATE in bind_central_identity makes simultaneous browser
+        # callbacks deterministic: exactly one can establish a previously-empty binding.
+        if user.central_identity_id is None:
+            user = await self.bind_central_identity(user, central_user_id)
         if name:
             user.name = name
         if degree:

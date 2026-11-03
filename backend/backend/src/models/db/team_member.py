@@ -22,6 +22,7 @@ class TeamMember(Base):  # type: ignore
     
     purposes: SQLAlchemyMapped[list | None] = sqlalchemy_mapped_column(JSONB, nullable=True)
     domain: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.String(length=128), nullable=True)
+    course_ids: SQLAlchemyMapped[list | None] = sqlalchemy_mapped_column(JSONB, nullable=True)
     colleges: SQLAlchemyMapped[list | None] = sqlalchemy_mapped_column(JSONB, nullable=True)
     
     status: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(

@@ -12,12 +12,29 @@ from src.repository.crud.base import BaseCRUDRepository
 
 logger = logging.getLogger(__name__)
 
+ProcessingGuard = tuple[str, int, datetime.datetime]
+
 
 class AttemptIdempotencyConflict(ValueError):
     """A client key was reused for a different question in one interview."""
 
 
 class QuestionAttemptCRUDRepository(BaseCRUDRepository):
+    @staticmethod
+    def processing_conditions(processing_guard: ProcessingGuard | None):
+        """Fence writes to one claimed answer, even when audio bytes repeat."""
+        if processing_guard is None:
+            return []
+        checksum, version, claimed_at = processing_guard
+        if claimed_at is None:
+            raise ValueError("A processing claim requires a timestamp")
+        return [
+            QuestionAttempt.answer_checksum == checksum,
+            QuestionAttempt.answer_version == version,
+            QuestionAttempt.transcription_status == "processing",
+            QuestionAttempt.transcription_updated_at == claimed_at,
+        ]
+
     async def create_attempt(
         self,
         *,
@@ -110,10 +127,22 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         question_attempt_id: int,
         audio_url: str,
         checksum: str,
+        immutable: bool = False,
+        follow_up_expected: bool = True,
     ) -> QuestionAttempt | None:
-        attempt = await self.get_by_id(question_attempt_id=question_attempt_id)
+        result = await self.async_session.execute(
+            sqlalchemy.select(QuestionAttempt)
+            .where(QuestionAttempt.id == question_attempt_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        attempt = result.scalar_one_or_none()
         if attempt is None:
             return None
+        if immutable and attempt.answer_saved_at is not None:
+            if attempt.answer_checksum != checksum:
+                raise ValueError("ASSESSMENT_ANSWER_COMMITTED")
+            return attempt
         if attempt.answer_checksum != checksum:
             attempt.answer_version = (attempt.answer_version or 0) + 1
         attempt.audio_url = audio_url
@@ -122,7 +151,9 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         attempt.answer_saved_at = datetime.datetime.now(datetime.timezone.utc)
         attempt.attempt_state = "answer_saved"
         attempt.skipped_at = None
-        attempt.follow_up_disposition = "pending"
+        attempt.follow_up_disposition = (
+            "pending" if follow_up_expected else "not_applicable"
+        )
         attempt.follow_up_resolved_at = None
         attempt.transcription = None
         # The HTTP request owns durable storage only.  Transcription is queued
@@ -139,14 +170,101 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         await self.async_session.refresh(attempt)
         return attempt
 
+    async def reserve_transcription_retry(
+        self,
+        *,
+        question_attempt_id: int,
+        user_id: int,
+        checksum: str,
+        answer_version: int,
+        expected_status: str | None,
+        expected_updated_at: datetime.datetime | None,
+    ) -> QuestionAttempt | None:
+        """Only one observer of this exact failed/stalled state may requeue it."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # Worker calls time out at five minutes. Give timeout handling and queue
+        # retries a further buffer before manually reclaiming processing work.
+        cutoff = now - datetime.timedelta(minutes=10)
+        retryable = sqlalchemy.or_(
+            QuestionAttempt.transcription_status == "failed",
+            sqlalchemy.and_(
+                sqlalchemy.or_(
+                    QuestionAttempt.transcription_status.is_(None),
+                    QuestionAttempt.transcription_status.in_(["pending", "processing"]),
+                ),
+                sqlalchemy.or_(
+                    QuestionAttempt.transcription_updated_at.is_(None),
+                    QuestionAttempt.transcription_updated_at <= cutoff,
+                ),
+            ),
+        )
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(
+                QuestionAttempt.id == question_attempt_id,
+                QuestionAttempt.interview.has(user_id=user_id),
+                QuestionAttempt.answer_checksum == checksum,
+                QuestionAttempt.answer_version == answer_version,
+                QuestionAttempt.answer_kind == "audio",
+                QuestionAttempt.audio_url.is_not(None),
+                QuestionAttempt.transcription_status == expected_status,
+                QuestionAttempt.transcription_updated_at == expected_updated_at,
+                retryable,
+            )
+            .values(
+                transcription_status="pending",
+                transcription_error=None,
+                transcription_updated_at=now,
+            )
+            .returning(QuestionAttempt)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        return row
+
+    async def fail_transcription_retry_reservation(
+        self,
+        *,
+        question_attempt_id: int,
+        checksum: str,
+        reserved_at: datetime.datetime,
+        error: str,
+    ) -> QuestionAttempt | None:
+        """A failed enqueue must not overwrite a worker or a newer answer."""
+        stmt = (
+            sqlalchemy.update(QuestionAttempt)
+            .where(
+                QuestionAttempt.id == question_attempt_id,
+                QuestionAttempt.answer_checksum == checksum,
+                QuestionAttempt.transcription_status == "pending",
+                QuestionAttempt.transcription_updated_at == reserved_at,
+            )
+            .values(
+                transcription_status="failed",
+                transcription_error=error[:1000],
+                transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            .returning(QuestionAttempt)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self.async_session.execute(stmt)).scalar_one_or_none()
+        await self.async_session.commit()
+        return row
+
     async def mark_transcription_pending(
-        self, *, question_attempt_id: int, checksum: str
+        self,
+        *,
+        question_attempt_id: int,
+        checksum: str,
+        processing_guard: ProcessingGuard | None = None,
     ) -> QuestionAttempt | None:
         """Reset one still-current audio answer so it can be queued again."""
         stmt = (
             sqlalchemy.update(QuestionAttempt)
             .where(
                 QuestionAttempt.id == question_attempt_id,
+                *self.processing_conditions(processing_guard),
                 QuestionAttempt.answer_checksum == checksum,
                 QuestionAttempt.answer_kind == "audio",
                 sqlalchemy.or_(
@@ -170,7 +288,7 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         return attempt
 
     async def mark_transcription_processing(
-        self, *, question_attempt_id: int, checksum: str
+        self, *, question_attempt_id: int, checksum: str, answer_version: int | None = None
     ) -> QuestionAttempt | None:
         """Mark the exact answer version a worker is about to process."""
         stmt = (
@@ -179,6 +297,11 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
                 QuestionAttempt.id == question_attempt_id,
                 QuestionAttempt.answer_checksum == checksum,
                 QuestionAttempt.answer_kind == "audio",
+                *(
+                    [QuestionAttempt.answer_version == answer_version]
+                    if answer_version is not None
+                    else []
+                ),
                 sqlalchemy.or_(
                     QuestionAttempt.transcription_status.is_(None),
                     QuestionAttempt.transcription_status == "pending",
@@ -190,21 +313,25 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
                 transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
             )
             .returning(QuestionAttempt)
+            .execution_options(populate_existing=True)
         )
         attempt = (await self.async_session.execute(stmt)).scalar_one_or_none()
         await self.async_session.commit()
-        if attempt is not None:
-            await self.async_session.refresh(attempt)
         return attempt
 
     async def mark_transcription_complete(
-        self, *, question_attempt_id: int, checksum: str
+        self,
+        *,
+        question_attempt_id: int,
+        checksum: str,
+        processing_guard: ProcessingGuard | None = None,
     ) -> QuestionAttempt | None:
         """Publish a transcript only after follow-up processing has finished."""
         stmt = (
             sqlalchemy.update(QuestionAttempt)
             .where(
                 QuestionAttempt.id == question_attempt_id,
+                *self.processing_conditions(processing_guard),
                 QuestionAttempt.answer_checksum == checksum,
                 QuestionAttempt.transcription.is_not(None),
             )
@@ -222,12 +349,18 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         return attempt
 
     async def mark_transcription_failed(
-        self, *, question_attempt_id: int, checksum: str, error: str
+        self,
+        *,
+        question_attempt_id: int,
+        checksum: str,
+        error: str,
+        processing_guard: ProcessingGuard | None = None,
     ) -> QuestionAttempt | None:
         stmt = (
             sqlalchemy.update(QuestionAttempt)
             .where(
                 QuestionAttempt.id == question_attempt_id,
+                *self.processing_conditions(processing_guard),
                 QuestionAttempt.answer_checksum == checksum,
             )
             .values(
@@ -248,6 +381,7 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
             sqlalchemy.select(QuestionAttempt)
             .where(QuestionAttempt.id == question_attempt_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return (await self.async_session.execute(stmt)).scalar_one_or_none()
 
@@ -268,11 +402,13 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         *,
         question_attempt_id: int,
         disposition: str,
+        processing_guard: ProcessingGuard | None = None,
     ) -> QuestionAttempt | None:
         stmt = (
             sqlalchemy.update(QuestionAttempt)
             .where(
                 QuestionAttempt.id == question_attempt_id,
+                *self.processing_conditions(processing_guard),
                 sqlalchemy.or_(
                     QuestionAttempt.follow_up_disposition.is_(None),
                     QuestionAttempt.follow_up_disposition != "skipped",
@@ -429,7 +565,7 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
                 QuestionAttempt.interview.has(user_id=user_id),
             )
         )
-        query = await self.async_session.execute(statement=stmt)
+        query = await self.async_session.execute(statement=stmt.execution_options(populate_existing=True))
         result = query.scalar_one_or_none()
 
         logger.info(
@@ -450,6 +586,7 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
         transcription: dict,
         checksum: str | None = None,
         finalize: bool = True,
+        processing_guard: ProcessingGuard | None = None,
     ) -> QuestionAttempt | None:
         db_start = time.perf_counter()
 
@@ -458,7 +595,10 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
             question_attempt_id,
         )
         """Update a question attempt with audio URL and transcription data"""
-        conditions = [QuestionAttempt.id == question_attempt_id]
+        conditions = [
+            QuestionAttempt.id == question_attempt_id,
+            *self.processing_conditions(processing_guard),
+        ]
         if checksum is not None:
             conditions.append(QuestionAttempt.answer_checksum == checksum)
         stmt = (
@@ -469,7 +609,11 @@ class QuestionAttemptCRUDRepository(BaseCRUDRepository):
                 transcription=transcription,
                 transcription_status="transcribed" if finalize else "processing",
                 transcription_error=None,
-                transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
+                transcription_updated_at=(
+                    processing_guard[2]
+                    if processing_guard is not None and not finalize
+                    else datetime.datetime.now(datetime.timezone.utc)
+                ),
             )
             .returning(QuestionAttempt)
         )

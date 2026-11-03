@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import fastapi
+from src.services.result_release import HELD_DETAIL, withheld
+from src.api.dependencies.rate_limit import student_action_limit
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
@@ -23,6 +25,7 @@ router = fastapi.APIRouter(tags=["report"])
 
 @router.post(
     "/summary-report",
+    dependencies=[fastapi.Depends(student_action_limit("summary_report", limit=60))],
     response_model=SummaryReportResponse,
     response_model_exclude_none=True,
     status_code=200,
@@ -88,6 +91,8 @@ async def generate_summary_report(
         await session.rollback()
         logger.exception("/summary-report failed to persist for interview_id=%s: %s", interview.id, exc)
 
+    if withheld(interview):
+        raise fastapi.HTTPException(status_code=409, detail=HELD_DETAIL)
     return SummaryReportResponse(**result)
 
 
@@ -125,6 +130,8 @@ async def get_summary_report(
         event_data={"report_type": "summary", "source": "summary_report.get_summary_report"},
     )
 
+    if withheld(interview):
+        raise fastapi.HTTPException(status_code=409, detail=HELD_DETAIL)
     return SummaryReportResponse(**record.report_json)
 
 
@@ -150,6 +157,9 @@ async def get_summary_reports(
     # Convert to response format
     items = []
     for summary_report, interview in reports_data:
+        # A held assessment result is not listed until it is released.
+        if withheld(interview):
+            continue
         # Extract overall score from the report JSON if available
         overall_score = None
         if summary_report.report_json:

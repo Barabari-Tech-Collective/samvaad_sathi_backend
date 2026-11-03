@@ -60,7 +60,7 @@ _FACILITATOR_ROLES = {
     "lead",
     "team lead",
 }
-_PLACEMENT_ROLES = {"recruiter", "placement staff", "placement com"}
+_PLACEMENT_ROLES = {"recruiter", "placement staff", "placement com", "partnership staff"}
 _CONTROL_KEYS = {"practice_new_starts", "question_generation", "report_generation"}
 
 
@@ -114,7 +114,7 @@ def _membership_parts(item: Any) -> tuple[Any, Any]:
         return item, getattr(item, "team", None)
 
 
-def resolve_dashboard_role(user: User, memberships: list[Any]) -> DashboardRole | None:
+def resolve_dashboard_role(user: User, memberships: list[Any], *, preferred: str | None = None) -> DashboardRole | None:
     """Resolve the narrowest dashboard persona from trusted server-side data."""
 
     if is_super_admin_user(user):
@@ -124,15 +124,32 @@ def resolve_dashboard_role(user: User, memberships: list[Any]) -> DashboardRole 
     token_role = normalize_role(
         getattr(user, "_token_role", "") or getattr(user, "role", "")
     )
-    if token_role in _PLACEMENT_ROLES or is_bulk_ats_user(user):
+    if not memberships and getattr(user, "_token_source", None) is None and (token_role in _PLACEMENT_ROLES or is_bulk_ats_user(user)):
         return "placements"
-    if token_role in _FACILITATOR_ROLES:
+    if not memberships and getattr(user, "_token_source", None) is None and token_role in _FACILITATOR_ROLES:
         return "facilitator"
     for item in memberships:
         member, team = _membership_parts(item)
         team_name = (getattr(team, "name", "") or "").casefold()
         role = normalize_role(getattr(member, "access_role", ""))
-        if any(word in team_name for word in ("placement", "partnership")):
+        raw_purposes = getattr(member, "purposes", None)
+        domain = getattr(member, "domain", None)
+        purposes = {value.strip().casefold() for value in raw_purposes if isinstance(value, str)} if isinstance(raw_purposes, list) else set()
+        if isinstance(domain, str) and domain.strip():
+            purposes.add(domain.strip().casefold())
+        # Explicit assigned responsibility precedes a display name. Course and
+        # college clauses remain paired with this specific membership.
+        placement = bool(purposes & {"placement", "placements", "partnership"})
+        coaching = bool(purposes & {"program", "programme", "coaching"})
+        if preferred == "facilitator" and coaching:
+            return "facilitator"
+        if placement:
+            return "placements"
+        if coaching:
+            return "facilitator"
+        if role in _PLACEMENT_ROLES:
+            return "placements"
+        if not purposes and any(word in team_name for word in ("placement", "partnership")):
             return "placements"
         if role in _FACILITATOR_ROLES:
             return "facilitator"
@@ -148,6 +165,11 @@ async def _context(
         raise fastapi.HTTPException(
             status_code=403, detail="Practice staff access required"
         )
+    # These older aggregations do not bind evidence to a course. Course-limited
+    # staff must use the course workspace until each workflow is migrated.
+    from src.services.course_access import require_global_legacy_analytics
+
+    await require_global_legacy_analytics(user, session)
     permissions = calculate_user_permissions(user, memberships)
     colleges = permissions.get("colleges")
     return role, (
@@ -173,12 +195,8 @@ def _purpose(role: DashboardRole) -> ConsentPurpose | None:
 
 
 def _consent_is_active(consent: PracticeConsent | None, now: datetime.datetime) -> bool:
-    return bool(
-        consent
-        and consent.granted
-        and consent.withdrawn_at is None
-        and (consent.expires_at is None or consent.expires_at > now)
-    )
+    # Sharing is not a student choice any more; access is decided by staff grants alone.
+    return True
 
 
 async def _active_consent(
@@ -415,17 +433,8 @@ async def update_my_consent(
         raise fastapi.HTTPException(
             status_code=400, detail="Consent expiry must be in the future"
         )
-    consent = await _active_consent(session, current_user.id, body.purpose)
-    if consent is None:
-        consent = PracticeConsent(user_id=current_user.id, purpose=body.purpose)
-        session.add(consent)
-    consent.granted = body.granted
-    consent.policy_version = body.policy_version
-    consent.expires_at = body.expires_at if body.granted else None
-    consent.granted_at = now if body.granted else None
-    consent.withdrawn_at = None if body.granted else now
-    await session.commit()
-    return {"purpose": body.purpose, "granted": body.granted, "updated_at": now}
+    # Retired: nothing a student sends here changes who can see their practice data.
+    return {"purpose": body.purpose, "granted": True, "updated_at": now}
 
 
 @router.get("/overview")
@@ -771,21 +780,7 @@ async def shortlist_detail(
         .all()
     )
     consented_ids = list(
-        (
-            await session.execute(
-                sqlalchemy.select(PracticeConsent.user_id).where(
-                    PracticeConsent.purpose == "opportunity_readiness",
-                    PracticeConsent.granted.is_(True),
-                    PracticeConsent.withdrawn_at.is_(None),
-                    sqlalchemy.or_(
-                        PracticeConsent.expires_at.is_(None),
-                        PracticeConsent.expires_at > _utcnow(),
-                    ),
-                )
-            )
-        )
-        .scalars()
-        .all()
+        (await session.execute(sqlalchemy.select(User.id))).scalars().all()
     )
     users_stmt = sqlalchemy.select(User).where(User.id.in_(consented_ids or [-1]))
     if colleges is not None:

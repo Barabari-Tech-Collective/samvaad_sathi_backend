@@ -24,6 +24,9 @@ class Interview(Base):  # type: ignore
     track: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=64), nullable=False, index=True
     )
+    course_id: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=128), nullable=True, index=True
+    )
     difficulty: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=16), nullable=False, index=True, default="medium"
     )
@@ -51,6 +54,23 @@ class Interview(Base):  # type: ignore
     )
     question_set_version: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(
         sqlalchemy.Integer, nullable=False, default=0, server_default="0"
+    )
+    # Private immutable preparation snapshot; contains approved source/rubric
+    # data and must never be serialized wholesale into a student response.
+    integrity_events: SQLAlchemyMapped[list | None] = sqlalchemy_mapped_column(
+        JSONB, nullable=True
+    )
+    question_plan: SQLAlchemyMapped[dict | None] = sqlalchemy_mapped_column(
+        JSONB, nullable=True
+    )
+    started_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(
+        sqlalchemy.DateTime(timezone=True), nullable=True
+    )
+    answer_deadline_at: SQLAlchemyMapped[datetime.datetime | None] = (
+        sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True), nullable=True)
+    )
+    submission_receipt: SQLAlchemyMapped[dict | None] = sqlalchemy_mapped_column(
+        JSONB, nullable=True
     )
     question_set_hash: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
         sqlalchemy.String(length=64), nullable=True
@@ -130,6 +150,18 @@ class Interview(Base):  # type: ignore
     )
     proctoring_violation_reason: SQLAlchemyMapped[str | None] = (
         sqlalchemy_mapped_column(sqlalchemy.String(length=32), nullable=True)
+    )
+    # The template's release rule, frozen when the sitting starts (architecture pack F16).
+    result_release: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=16), nullable=False, server_default="immediate"
+    )
+    result_released_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(
+        sqlalchemy.DateTime(timezone=True), nullable=True
+    )
+    # Who released it; a plain id so Interview keeps one path to its student. The audit
+    # event carries the full record.
+    result_released_by: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.Integer, nullable=True
     )
 
     user = relationship("User", back_populates="interviews")

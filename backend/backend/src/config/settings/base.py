@@ -55,6 +55,10 @@ class BackendBaseSettings(BaseSettings):
     DB_POSTGRES_PASSWORD: str = decouple.config("POSTGRES_PASSWORD", cast=str)  # type: ignore
     DB_POOL_SIZE: int = decouple.config("DB_POOL_SIZE", cast=int)  # type: ignore
     DB_POOL_OVERFLOW: int = decouple.config("DB_POOL_OVERFLOW", cast=int)  # type: ignore
+    # Ping each pooled connection before use. Safe but costs three database round trips
+    # per request; with a far-away database turn it off and lower the recycle time.
+    DB_POOL_PRE_PING: bool = decouple.config("DB_POOL_PRE_PING", cast=bool, default=True)  # type: ignore
+    DB_POOL_RECYCLE_SECONDS: int = decouple.config("DB_POOL_RECYCLE_SECONDS", cast=int, default=3600)  # type: ignore
     # The arq worker keeps its own, smaller pool. It is sized for concurrent
     # jobs - a number we choose - rather than concurrent HTTP requests, and it
     # is spent from the same server-wide connection ceiling as the API pool
@@ -116,10 +120,15 @@ class BackendBaseSettings(BaseSettings):
         "https://master.d1ljdkppy5vau1.amplifyapp.com",  # new aws dashboard prod
         # staging
         "https://samvaad-saathi-staging.barabaricollective.org",
-        "https://api-staging.barabaricollective.org",
         # Staging on render
         "https://samvaad-sathi-backend-tdd0.onrender.com",
         "https://samvaad-saathi-frontend.onrender.com",
+        # Sampark Saathi frontend staging on Amplify
+        "https://staging.d1zdqqsxijaw3t.amplifyapp.com",
+        # Samvaad Saathi Student frontend staging on Amplify
+        "https://staging.d36hlrn367i0rr.amplifyapp.com",
+        # Samvaad Saathi Student frontend staging on Amplify (current app)
+        "https://staging.dt9pv8g2dv65q.amplifyapp.com",
     ]
     ALLOWED_METHODS: list[str] = ["*"]
     ALLOWED_HEADERS: list[str] = ["*"]
@@ -133,6 +142,13 @@ class BackendBaseSettings(BaseSettings):
         matches nothing, so the origin looks allow-listed but silently gets CORS-rejected.
         Fail at import time instead of at 2am in a browser console.
         """
+        extra = decouple.config("CORS_ALLOWED_ORIGINS", cast=str, default="").strip()
+        if extra:
+            for item in extra.split(","):
+                cleaned = item.strip().rstrip("/")
+                if cleaned and cleaned not in origins:
+                    origins.append(cleaned)
+
         for origin in origins:
             parsed = urllib.parse.urlparse(origin)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -179,6 +195,8 @@ class BackendBaseSettings(BaseSettings):
     # ------------------------------
     # Public origin of the barabari-auth-service, e.g. https://barabari-auth-service.onrender.com
     AUTH_SERVICE_BASE_URL: str = decouple.config("AUTH_SERVICE_BASE_URL", cast=str, default="")  # type: ignore
+    # Optional browser-facing origin when server-to-server auth uses a private TLS endpoint.
+    AUTH_SERVICE_PUBLIC_BASE_URL: str = decouple.config("AUTH_SERVICE_PUBLIC_BASE_URL", cast=str, default="")
     # Same value as auth-service's JWT_SECRET env var (a Base64 string decoded to raw HMAC key
     # bytes on both sides - see src/securities/authorizations/sso_jwt.py). Shares auth-service's
     # own local-dev default so both services validate each other's tokens out of the box.
@@ -199,6 +217,11 @@ class BackendBaseSettings(BaseSettings):
     # yields http:// unless uvicorn is told to trust X-Forwarded-Proto, which silently
     # produces a value that will never match the registered https:// entry. Set this
     # explicitly per environment; it falls back to url_for() only for local dev.
+    PRODUCT_COOKIE_API_ENABLED: bool = decouple.config("PRODUCT_COOKIE_API_ENABLED", cast=bool, default=False)
+    PRODUCT_SESSION_ENABLED: bool = decouple.config("PRODUCT_SESSION_ENABLED", cast=bool, default=False)
+    PRODUCT_SESSION_ENCRYPTION_KEYS: str = decouple.config("PRODUCT_SESSION_ENCRYPTION_KEYS", default="")
+    SSO_V2_ENABLED: bool = decouple.config("SSO_V2_ENABLED", cast=bool, default=False)
+    SSO_TRANSACTION_ENABLED: bool = decouple.config("SSO_TRANSACTION_ENABLED", cast=bool, default=False)
     SSO_REDIRECT_URI: str = decouple.config("SSO_REDIRECT_URI", cast=str, default="")  # type: ignore
     # auth-service issues one token type across every Barabari product using a shared
     # JWT secret, and the token carries no audience/product claim - so a token minted
@@ -320,6 +343,17 @@ class BackendBaseSettings(BaseSettings):
     JEV_API_BASE_URL: str = decouple.config("JEV_API_BASE_URL", cast=str, default="")  # type: ignore
     JEV_MODEL: str = decouple.config("JEV_MODEL", cast=str, default="")  # type: ignore
     JEV_TIMEOUT_SECONDS: float = decouple.config("JEV_TIMEOUT_SECONDS", cast=float, default=60.0)  # type: ignore
+    # A key alone does not approve processing. Pin reviewed offline evidence and
+    # explicitly admit a stable batch cohort; 0 is the immediate kill switch.
+    JEV_BULK_ATS_ROLLOUT_PERCENT: int = decouple.config("JEV_BULK_ATS_ROLLOUT_PERCENT", cast=int, default=0)  # type: ignore
+    JEV_BULK_ATS_EVALUATION_PATH: str = decouple.config("JEV_BULK_ATS_EVALUATION_PATH", cast=str, default="")  # type: ignore
+    JEV_BULK_ATS_EVALUATION_SHA256: str = decouple.config("JEV_BULK_ATS_EVALUATION_SHA256", cast=str, default="")  # type: ignore
+
+    # Practice-only rubric feedback; separately evaluated and disabled by default.
+    JEV_PRACTICE_ROLLOUT_PERCENT: int = decouple.config("JEV_PRACTICE_ROLLOUT_PERCENT", cast=int, default=0)  # type: ignore
+    JEV_PRACTICE_EVALUATION_PATH: str = decouple.config("JEV_PRACTICE_EVALUATION_PATH", cast=str, default="")  # type: ignore
+    JEV_PRACTICE_EVALUATION_SHA256: str = decouple.config("JEV_PRACTICE_EVALUATION_SHA256", cast=str, default="")  # type: ignore
+    JEV_PRACTICE_TIMEOUT_SECONDS: float = decouple.config("JEV_PRACTICE_TIMEOUT_SECONDS", cast=float, default=8.0)  # type: ignore
 
     # Bulk ATS ingestion limits.
     BULK_ATS_MAX_FILES_PER_BATCH: int = decouple.config("BULK_ATS_MAX_FILES_PER_BATCH", cast=int, default=100)  # type: ignore
@@ -352,6 +386,16 @@ class BackendBaseSettings(BaseSettings):
     GOOGLE_DRIVE_OAUTH_CLIENT_ID: str = decouple.config("GOOGLE_DRIVE_OAUTH_CLIENT_ID", cast=str, default="")  # type: ignore
     GOOGLE_DRIVE_OAUTH_CLIENT_SECRET: str = decouple.config("GOOGLE_DRIVE_OAUTH_CLIENT_SECRET", cast=str, default="")  # type: ignore
     GOOGLE_DRIVE_OAUTH_REDIRECT_URI: str = decouple.config("GOOGLE_DRIVE_OAUTH_REDIRECT_URI", cast=str, default="")  # type: ignore
+    # Brevo SMTP relay, the same credentials auth-service uses for sign-up codes.
+    # EMAIL_FROM_ADDRESS must be a sender verified in Brevo, or mail is silently dropped.
+    SMTP_HOST: str = decouple.config("SMTP_HOST", cast=str, default="smtp-relay.brevo.com")  # type: ignore
+    SMTP_PORT: int = decouple.config("SMTP_PORT", cast=int, default=587)  # type: ignore
+    SMTP_LOGIN: str = decouple.config("SMTP_LOGIN", cast=str, default="")  # type: ignore
+    SMTP_PASSWORD: str = decouple.config("SMTP_PASSWORD", cast=str, default="")  # type: ignore
+    EMAIL_FROM_ADDRESS: str = decouple.config("EMAIL_FROM_ADDRESS", cast=str, default="")  # type: ignore
+    EMAIL_FROM_NAME: str = decouple.config("EMAIL_FROM_NAME", cast=str, default="The Barabari Collective")  # type: ignore
+    # Student app address used for buttons in emails, e.g. https://samvaad-saathi.barabaricollective.org
+    STUDENT_APP_URL: str = decouple.config("STUDENT_APP_URL", cast=str, default="https://samvaad-saathi.barabaricollective.org")  # type: ignore
     GOOGLE_DRIVE_OAUTH_FRONTEND_RETURN_URL: str = decouple.config("GOOGLE_DRIVE_OAUTH_FRONTEND_RETURN_URL", cast=str, default="")  # type: ignore
     GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY: str = decouple.config("GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY", cast=str, default="")  # type: ignore
     GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY_ID: str = decouple.config("GOOGLE_DRIVE_TOKEN_ENCRYPTION_KEY_ID", cast=str, default="v1")  # type: ignore
@@ -378,10 +422,28 @@ class BackendBaseSettings(BaseSettings):
     MOCK_TTS: bool = decouple.config("MOCK_TTS", cast=bool, default=False)  # type: ignore
 
     # Barabari Sampark Saathi resume-round callback
+    # Explicit opt-in until both local/staging migrations and source mapping are verified.
+    SAMPARK_ENROLLMENT_SYNC_ENABLED: bool = decouple.config("SAMPARK_ENROLLMENT_SYNC_ENABLED", cast=bool, default=False)
+    SAMPARK_ENROLLMENT_SYNC_URL: str = decouple.config("SAMPARK_ENROLLMENT_SYNC_URL", default="")
+    SAMPARK_ENROLLMENT_SYNC_KEY: str = decouple.config("SAMPARK_ENROLLMENT_SYNC_KEY", default="")
+    SAMPARK_ENROLLMENT_MAX_AGE_SECONDS: int = decouple.config("SAMPARK_ENROLLMENT_MAX_AGE_SECONDS", cast=int, default=900)
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
+    # Where Samvaad reads Sampark's open batches and reports a learner's batch choice. Optional:
+    # when empty the SAMPARK_SAATHI_* pair above is used. Set these to point the batch list at
+    # one Sampark while the resume-score callback stays on another.
+    SAMPARK_BATCHES_BASE_URL: str = decouple.config("SAMPARK_BATCHES_BASE_URL", cast=str, default="")  # type: ignore
+    SAMPARK_BATCHES_API_KEY: str = decouple.config("SAMPARK_BATCHES_API_KEY", cast=str, default="")  # type: ignore
     # Auth-service Central Student Registry. Product backends use this server-side key to
     # hydrate common profile fields; it must match auth-service CENTRAL_PROFILE_API_KEY.
+    CENTRAL_IDENTITY_CHECK_ENABLED: bool = decouple.config("CENTRAL_IDENTITY_CHECK_ENABLED", cast=bool, default=True)  # type: ignore
+    # Refuse to start when central authentication is on but its settings are missing, instead of
+    # answering 503 to every request. Set to False only for local work and tests.
+    REQUIRE_CENTRAL_AUTH_CONFIG: bool = decouple.config("REQUIRE_CENTRAL_AUTH_CONFIG", cast=bool, default=True)  # type: ignore
+    # Seconds a verified central identity is reused. 0 (default) keeps fresh per-request verification;
+    # any positive value trades that guarantee for fewer auth-service calls (bounded staleness).
+    CENTRAL_IDENTITY_CACHE_SECONDS: int = decouple.config("CENTRAL_IDENTITY_CACHE_SECONDS", cast=int, default=0)  # type: ignore
+    PRODUCT_IDENTITY_API_KEY: str = decouple.config("PRODUCT_IDENTITY_API_KEY", cast=str, default="")  # type: ignore
     CENTRAL_PROFILE_API_KEY: str = decouple.config("CENTRAL_PROFILE_API_KEY", cast=str, default="")  # type: ignore
 
     # Super-admin plan, Phase 12: shared secret for the *inbound* direction (auth-service's
@@ -406,13 +468,26 @@ class BackendBaseSettings(BaseSettings):
     REDIS_PORT: int = decouple.config("REDIS_PORT", cast=int, default=6379)  # type: ignore
     REDIS_DB: int = decouple.config("REDIS_DB", cast=int, default=0)  # type: ignore
     REDIS_PASSWORD: str = decouple.config("REDIS_PASSWORD", cast=str, default="")  # type: ignore
+    # Managed Redis (Upstash) needs a username and only accepts TLS. Without these the
+    # client spoke plain text, every call timed out and Redis features failed open.
+    REDIS_USERNAME: str = decouple.config("REDIS_USERNAME", cast=str, default="")  # type: ignore
+    REDIS_SSL_ENABLED: bool = decouple.config("REDIS_SSL_ENABLED", cast=bool, default=False)  # type: ignore
     # Hosted environments such as Render expose one connection string instead
     # of split host/port/password fields. When present it takes precedence.
     REDIS_URL: str = decouple.config("REDIS_URL", cast=str, default="")  # type: ignore
 
+    # Adds a Server-Timing header (central auth, Redis, user lookup, total) to every
+    # response. For diagnosing slow requests on staging; leave off in production.
+    SERVER_TIMING_ENABLED: bool = decouple.config("SERVER_TIMING_ENABLED", cast=bool, default=False)  # type: ignore
+
     # Per-user rate limits on endpoints calling metered third-party APIs
     # (OpenAI/ElevenLabs) - protects the API bill from runaway usage by a
     # single user or a client-side bug, not primarily a security control.
+    RATE_LIMIT_TRANSCRIBE_PER_HOUR: int = decouple.config("RATE_LIMIT_TRANSCRIBE_PER_HOUR", cast=int, default=240)  # type: ignore
+    RATE_LIMIT_GENERATE_QUESTIONS_PER_HOUR: int = decouple.config("RATE_LIMIT_GENERATE_QUESTIONS_PER_HOUR", cast=int, default=60)  # type: ignore
+    RATE_LIMIT_SUMMARY_REPORT_PER_HOUR: int = decouple.config("RATE_LIMIT_SUMMARY_REPORT_PER_HOUR", cast=int, default=60)  # type: ignore
+    RATE_LIMIT_RESUME_BUILDER_PER_HOUR: int = decouple.config("RATE_LIMIT_RESUME_BUILDER_PER_HOUR", cast=int, default=40)  # type: ignore
+    RATE_LIMIT_PRACTICE_SESSION_PER_HOUR: int = decouple.config("RATE_LIMIT_PRACTICE_SESSION_PER_HOUR", cast=int, default=120)  # type: ignore
     RATE_LIMIT_TTS_PER_MINUTE: int = decouple.config("RATE_LIMIT_TTS_PER_MINUTE", cast=int, default=20)  # type: ignore
     RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR: int = decouple.config("RATE_LIMIT_RESUME_ANALYSIS_PER_HOUR", cast=int, default=10)  # type: ignore
 

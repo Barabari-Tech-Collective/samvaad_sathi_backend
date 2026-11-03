@@ -1,5 +1,6 @@
 """Background speech processing never changes or loses a newer answer."""
 
+import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,7 +22,9 @@ def worker_dependencies(monkeypatch):
         answer_kind="audio",
         audio_url="answers/42.webm",
         transcription=None,
-        transcription_status="pending",
+        transcription_status="processing",
+        answer_version=1,
+        transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
     )
     repo = SimpleNamespace(
         get_by_id=AsyncMock(return_value=attempt),
@@ -114,8 +117,11 @@ async def test_worker_transcribes_saved_audio_and_publishes_after_follow_up(
         },
         checksum=deps.checksum,
         finalize=False,
+        processing_guard=(deps.checksum, 1, deps.attempt.transcription_updated_at),
     )
-    deps.follow_up.assert_awaited_once_with(42)
+    deps.follow_up.assert_awaited_once_with(
+        42, processing_guard=(deps.checksum, 1, deps.attempt.transcription_updated_at)
+    )
     deps.repo.mark_transcription_complete.assert_awaited_once()
     assert all(session.close.await_count == 1 for session in deps.sessions)
 
@@ -214,6 +220,7 @@ async def test_stalled_transcription_sweep_requeues_saved_audio(monkeypatch):
     attempt = SimpleNamespace(
         id=73,
         answer_checksum=checksum,
+        answer_version=1,
         answer_kind="audio",
         audio_url="answer-audio/73.wav",
         transcription_status="processing",
@@ -222,11 +229,11 @@ async def test_stalled_transcription_sweep_requeues_saved_audio(monkeypatch):
     )
     session = SimpleNamespace(close=AsyncMock())
     session.execute = AsyncMock(
-        return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [attempt]))
+        return_value=SimpleNamespace(all=lambda: [(attempt, 7)])
     )
     repo = SimpleNamespace(
-        mark_transcription_pending=AsyncMock(return_value=attempt),
-        mark_transcription_failed=AsyncMock(),
+        reserve_transcription_retry=AsyncMock(return_value=attempt),
+        fail_transcription_retry_reservation=AsyncMock(),
     )
 
     import src.repository.crud.question as question_module
@@ -242,8 +249,13 @@ async def test_stalled_transcription_sweep_requeues_saved_audio(monkeypatch):
     result = await sweep_stalled_answer_transcriptions_task({})
 
     assert result == {"scanned": 1, "requeued": 1}
-    repo.mark_transcription_pending.assert_awaited_once_with(
-        question_attempt_id=73, checksum=checksum
+    repo.reserve_transcription_retry.assert_awaited_once_with(
+        question_attempt_id=73,
+        user_id=7,
+        checksum=checksum,
+        answer_version=1,
+        expected_status="processing",
+        expected_updated_at=None,
     )
     queue_module.enqueue_job.assert_awaited_once_with(
         "process_answer_transcription_task",

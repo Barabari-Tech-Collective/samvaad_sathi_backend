@@ -1,9 +1,14 @@
 import json
 import fastapi
+from src.api.dependencies.rate_limit import student_action_limit
+from src.services.interview_course_access import require_interview_course_access
+from src.services.interview_question_plan import planned_count, snapshotted_questions
 import logging
 import re
 from typing import Any
 from fastapi import Form, UploadFile, File
+import sqlalchemy as sa
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.dependencies.auth import get_current_user
@@ -40,6 +45,7 @@ from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.repository.crud.pronunciation_practice import (
     PronunciationPracticeCRUDRepository,
 )
+from src.models.db.pronunciation_practice import PronunciationPractice
 from src.repository.crud.structure_practice import (
     StructurePracticeCRUDRepository,
     StructurePracticeAnswerCRUDRepository,
@@ -94,6 +100,12 @@ from src.services.analytics_events import track_analytics_event
 from src.services.practice_feature_controls import require_practice_feature
 
 logger = logging.getLogger(__name__)
+
+
+class PronunciationProgress(BaseModel):
+    word_index: int = Field(ge=0, le=99)
+
+
 FOLLOW_UP_STRATEGY = "llm_transcription_based"
 FULL_STACK_ROLE = "Full Stack Developer"
 #: Questions served from a facilitator's published bank per curated interview.
@@ -103,6 +115,8 @@ CURATED_QUESTION_COUNT = 5
 # Applies to every track - tech and non-tech alike, per product decision.
 MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS = 2
 
+
+from src.services import assessment_assignments  # noqa: E402
 
 router = fastapi.APIRouter(prefix="/v2", tags=["interviews-v2"])
 
@@ -201,12 +215,7 @@ def _prepare_audio_for_questions(questions: list[dict]) -> list[dict]:
         return []
 
     import hashlib
-    from decouple import config
-
-    from src.services.s3_service import tts_audio_s3_key
-
-    bucket = config("AWS_S3_BUCKET_NAME", default="barabari-edtech-service-staging")
-    region = config("AWS_REGION", default="ap-south-1")
+    from src.services.s3_service import tts_audio_public_url
 
     questions_to_process = []
 
@@ -216,8 +225,9 @@ def _prepare_audio_for_questions(questions: list[dict]) -> list[dict]:
             continue
 
         h_id = int(hashlib.md5(text.encode()).hexdigest()[:12], 16)
-        s3_file_path = tts_audio_s3_key(h_id)
-        public_url = f"https://{bucket}.s3.{region}.amazonaws.com/{s3_file_path}"
+        public_url = tts_audio_public_url(h_id)
+        if public_url is None:
+            continue
 
         if q_data.get("audio_url") == public_url:
             continue
@@ -328,6 +338,8 @@ async def create_or_resume_interview_v2(
         get_repository(repo_type=JobProfileCRUDRepository)
     ),
 ) -> InterviewInResponse:
+    if payload.course_id is not None and payload.course_id not in (getattr(current_user, "enrolled_course_ids", None) or []):
+        raise fastapi.HTTPException(403, "Current enrollment in this course is required.")
     difficulty = (payload.difficulty or "medium").lower()
     # Refuse rather than coerce. This used to silently fall back to medium, so a
     # typo started a different interview than the student asked for - and on a
@@ -338,6 +350,8 @@ async def create_or_resume_interview_v2(
             detail=f"Unknown difficulty '{difficulty}'. Choose one of: {', '.join(DIFFICULTIES)}.",
         )
 
+    if payload.question_count is not None and payload.client_contract != "fixed-round-v1":
+        raise fastapi.HTTPException(409, "Refresh to the current app before starting a fixed-length practice round.")
     active = await interview_repo.get_active_by_user(user_id=current_user.id)
     # Difficulty is part of an interview's identity, not a detail of it. Without
     # it here, a student holding an active easy interview who started a medium
@@ -348,7 +362,12 @@ async def create_or_resume_interview_v2(
         and active.track == payload.track
         and active.job_profile_id == payload.job_profile_id
         and active.difficulty == difficulty
+        and getattr(active, "course_id", None) == payload.course_id
+        and (payload.question_count is None or planned_count(active) == payload.question_count)
     ):
+        await require_interview_course_access(getattr(interview_repo, "async_session", None), active)
+        if planned_count(active) is not None and payload.client_contract != "fixed-round-v1":
+            raise fastapi.HTTPException(409, "Refresh to the current app to resume this fixed-length round.")
         res = InterviewInResponse(
             interview_id=active.id,
             track=active.track,
@@ -357,6 +376,7 @@ async def create_or_resume_interview_v2(
             created_at=active.created_at,
             resumed=True,
             interview_mode=active.interview_mode,
+            planned_question_count=planned_count(active),
         )
 
         # Resumed Interview Response
@@ -371,7 +391,8 @@ async def create_or_resume_interview_v2(
     await require_practice_feature(interview_repo.async_session, "practice_new_starts")
 
     if (
-        payload.track == FULL_STACK_ROLE
+        payload.job_profile_id is None
+        and payload.track == FULL_STACK_ROLE
         and difficulty == "medium"
         and getattr(payload, "use_resume", True)
     ):
@@ -392,18 +413,41 @@ async def create_or_resume_interview_v2(
         # A curated interview is an assessment against questions a facilitator
         # published for this level. If there are none, the honest answer is no -
         # not a set the LLM invented, which is what used to happen downstream.
+        if getattr(job_profile, "questions_per_interview", None) is not None and payload.client_contract != "fixed-round-v1":
+            raise fastapi.HTTPException(409, "Refresh to the current app before starting this fixed-length assessment.")
         refusal = unavailable_reason(job_profile, difficulty)
         if refusal is not None:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_409_CONFLICT, detail=refusal
             )
+        from src.services import template_scope
 
+        await template_scope.require_start_allowed(
+            interview_repo.async_session, current_user, job_profile, payload.course_id
+        )
+
+    assignment = None
+    if payload.job_profile_id is not None and job_profile.interview_mode == "assessment":
+        assignment = await assessment_assignments.start_check(
+            interview_repo.async_session, current_user.id, job_profile, payload.course_id
+        )
+        if assignment is not None and assignment.difficulty != difficulty:
+            raise fastapi.HTTPException(
+                409, f"This assessment was assigned at the {assignment.difficulty} level."
+            )
     interview = await interview_repo.create_interview(
         user_id=current_user.id,
+        course_id=payload.course_id,
         track=payload.track,
         difficulty=difficulty,
         job_profile_id=payload.job_profile_id,
+        question_count=payload.question_count,
+        fixed_length=payload.client_contract == "fixed-round-v1",
     )
+    if assignment is not None and assignment.status == "assigned":
+        assignment.status, assignment.interview_id = "started", interview.id
+        assignment.version += 1
+        await interview_repo.async_session.commit()
     await track_analytics_event(
         interview_repo.async_session,
         event_type="interview_started",
@@ -430,6 +474,7 @@ async def create_or_resume_interview_v2(
         created_at=interview.created_at,
         resumed=False,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
     # =========================================================================
@@ -447,6 +492,7 @@ async def create_or_resume_interview_v2(
 
 @router.post(
     path="/interviews/generate-questions",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews-v2:generate-questions",
     response_model=GeneratedQuestionsInResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -494,6 +540,8 @@ async def generate_questions_v2(
                 detail="No active interview to generate questions for",
             )
 
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
+
     if interview.track and interview.track.startswith("Non-Tech:"):
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
@@ -521,7 +569,9 @@ async def generate_questions_v2(
         has_skills = bool(skills_list)
 
         if (
-            interview.track == FULL_STACK_ROLE
+            not getattr(interview, "job_profile_id", None)
+            and snapshotted_questions(interview) is None
+            and interview.track == FULL_STACK_ROLE
             and interview.difficulty == "medium"
             and not has_resume
         ):
@@ -571,6 +621,7 @@ async def generate_questions_v2(
                 llm_latency_ms=qs.get("latency_ms"),
                 llm_error=qs.get("llm_error"),
                 interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
             )
 
             # Static Resume Warning Response
@@ -582,7 +633,7 @@ async def generate_questions_v2(
 
             return res
 
-        question_count = (
+        question_count = planned_count(interview) or (
             7 if interview.track == FULL_STACK_ROLE else 5
         )  # Base questions, leaves room for dynamic follow-ups
 
@@ -592,8 +643,13 @@ async def generate_questions_v2(
         llm_model = "static"
         items = None
 
-        is_curated = bool(getattr(interview, "job_profile_id", None))
-        if is_curated:
+        frozen = snapshotted_questions(interview)
+        is_curated = bool(getattr(interview, "job_profile_id", None)) or frozen is not None
+        if frozen is not None:
+            questions = [q["text"] for q in frozen]
+            llm_model = "facilitator_published_snapshot_v1"
+            items = [{**q, "audioUrl": q.get("audio_url")} for q in frozen]
+        elif is_curated:
             admin_questions = await job_profile_repo.get_job_profile_questions(
                 interview.job_profile_id
             )
@@ -815,6 +871,7 @@ async def generate_questions_v2(
         llm_latency_ms=latency_val,
         llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
     # =========================================================================
@@ -832,6 +889,7 @@ async def generate_questions_v2(
 
 @router.post(
     path="/interviews/non-tech/generate-questions",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews-v2:generate-non-tech-questions",
     response_model=GeneratedQuestionsInResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -878,6 +936,9 @@ async def generate_non_tech_questions_v2(
             detail="Job profile not found",
         )
 
+    if getattr(job_profile, "questions_per_interview", None) is not None and payload.client_contract != "fixed-round-v1":
+        raise fastapi.HTTPException(409, "Refresh to the current app before starting this fixed-length interview.")
+
     # Recorded for analytics only. This flow shows the student no level picker,
     # so whatever arrives here is a client default rather than a choice, and
     # honouring it would be honouring a phantom.
@@ -900,12 +961,13 @@ async def generate_non_tech_questions_v2(
     normalized_job_name = _normalize_non_tech_job_name(job_profile.job_name)
     track = f"Non-Tech: {normalized_job_name}"
     interview = await interview_repo.get_active_by_user(user_id=current_user.id)
-    if interview is None or interview.track != track:
+    if interview is None or interview.track != track or interview.job_profile_id != job_profile.id or interview.difficulty != difficulty:
         interview = await interview_repo.create_interview(
             user_id=current_user.id,
             track=track,
             difficulty=difficulty,
             job_profile_id=job_profile.id,
+            fixed_length=payload.client_contract == "fixed-round-v1",
         )
         await track_analytics_event(
             interview_repo.async_session,
@@ -922,6 +984,8 @@ async def generate_non_tech_questions_v2(
                 "api": "interviews_v2.generate_non_tech_questions",
             },
         )
+
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
 
     # After the interview-creation commit above, never before it: a commit ends
     # the transaction the lock is scoped to and would release it mid-generation.
@@ -943,8 +1007,8 @@ async def generate_non_tech_questions_v2(
             )
         )
 
-        questions_data = None
-        if getattr(interview, "job_profile_id", None):
+        questions_data = snapshotted_questions(interview)
+        if questions_data is None and getattr(interview, "job_profile_id", None):
             admin_questions = await job_profile_repo.get_job_profile_questions(
                 interview.job_profile_id
             )
@@ -981,7 +1045,7 @@ async def generate_non_tech_questions_v2(
                 past_interview_count=past_interview_count,
             )
 
-        if payload.use_resume and isinstance(
+        if snapshotted_questions(interview) is None and payload.use_resume and isinstance(
             getattr(current_user, "resume_text", None), str
         ):
             resume_context = (getattr(current_user, "resume_text", None) or "").strip()
@@ -1083,11 +1147,13 @@ async def generate_non_tech_questions_v2(
         llm_latency_ms=latency_val,
         llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
 
 @router.post(
     path="/interviews/structure-practice",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews-v2:structure-practice",
     response_model=StructurePracticeQuestionsResponse,
     status_code=fastapi.status.HTTP_200_OK,
@@ -1216,6 +1282,7 @@ async def generate_supplements_v2(
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
         )
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
     if not _supplements_enabled_for_track(interview.track):
         return QuestionSupplementsResponse(interview_id=interview.id, supplements=[])
 
@@ -1251,6 +1318,7 @@ async def get_supplements_v2(
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
         )
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
     if not _supplements_enabled_for_track(interview.track):
         return QuestionSupplementsResponse(interview_id=interview.id, supplements=[])
 
@@ -1405,6 +1473,7 @@ async def _backfill_follow_up_parents(
 
 @router.post(
     path="/pronunciation/create",
+    dependencies=[fastapi.Depends(student_action_limit("practice_session", limit=120))],
     name="pronunciation:create",
     response_model=PronunciationPracticeResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -1469,6 +1538,84 @@ async def create_pronunciation_practice(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create pronunciation practice session",
         )
+
+
+@router.post(
+    path="/pronunciation/{practice_id}/advance",
+    name="pronunciation:advance",
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Record one ordered pronunciation-word interaction",
+)
+async def advance_pronunciation_practice(
+    practice_id: int,
+    payload: PronunciationProgress,
+    current_user=fastapi.Depends(get_current_user),
+    pronunciation_repo: PronunciationPracticeCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=PronunciationPracticeCRUDRepository)
+    ),
+) -> dict[str, int | str]:
+    record = (
+        await pronunciation_repo.async_session.execute(
+            sa.select(PronunciationPractice)
+            .where(
+                PronunciationPractice.id == practice_id,
+                PronunciationPractice.user_id == current_user.id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        raise fastapi.HTTPException(404, "Pronunciation practice session not found.")
+    total_words = len(record.words) if isinstance(record.words, list) else 0
+    if record.status != "active" or total_words == 0:
+        raise fastapi.HTTPException(409, "This pronunciation session cannot advance.")
+    if payload.word_index == record.completed_word_count - 1:
+        return {
+            "practice_id": record.id,
+            "completed_words": record.completed_word_count,
+            "status": "active",
+        }
+    if payload.word_index != record.completed_word_count or record.completed_word_count >= total_words:
+        raise fastapi.HTTPException(409, "Refresh this pronunciation session before continuing.")
+    record.completed_word_count += 1
+    await pronunciation_repo.async_session.commit()
+    return {"practice_id": record.id, "completed_words": record.completed_word_count, "status": "active"}
+
+
+@router.post(
+    path="/pronunciation/{practice_id}/complete",
+    name="pronunciation:complete",
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Mark a completed pronunciation session after the learner reaches its final word",
+)
+async def complete_pronunciation_practice(
+    practice_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    pronunciation_repo: PronunciationPracticeCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=PronunciationPracticeCRUDRepository)
+    ),
+) -> dict[str, int | str]:
+    record = (
+        await pronunciation_repo.async_session.execute(
+            sa.select(PronunciationPractice)
+            .where(
+                PronunciationPractice.id == practice_id,
+                PronunciationPractice.user_id == current_user.id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        raise fastapi.HTTPException(404, "Pronunciation practice session not found.")
+    total_words = len(record.words) if isinstance(record.words, list) else 0
+    if record.status not in {"active", "completed"} or total_words == 0:
+        raise fastapi.HTTPException(409, "This pronunciation session cannot be completed.")
+    if record.status == "active" and record.completed_word_count != total_words:
+        raise fastapi.HTTPException(409, "Complete every pronunciation word before finishing this session.")
+    if record.status == "active":
+        record.status = "completed"
+        await pronunciation_repo.async_session.commit()
+    return {"practice_id": record.id, "status": "completed"}
 
 
 @router.get(
@@ -1572,6 +1719,7 @@ async def get_pronunciation_audio(
 
 @router.post(
     path="/structure-practice/session",
+    dependencies=[fastapi.Depends(student_action_limit("practice_session", limit=120))],
     name="structure-practice:create-session",
     response_model=StructurePracticeSessionResponse,
     status_code=fastapi.status.HTTP_201_CREATED,

@@ -82,12 +82,14 @@ async def test_create_profile_defaults_to_assessment(repo):
     assert profile.interview_mode == "assessment"
 
 
-async def test_update_profile_can_change_mode(repo):
+async def test_update_profile_cannot_repurpose_existing_template(repo):
     profile = await repo.create_profile(job_name="QA Engineer", interview_mode="assessment")
 
-    updated = await repo.update_profile(profile.id, {"interview_mode": "practice"})
-
-    assert updated.interview_mode == "practice"
+    import fastapi
+    with pytest.raises(fastapi.HTTPException) as error:
+        await repo.update_profile(profile.id, {"interview_mode": "practice"})
+    assert error.value.status_code == 409
+    assert (await repo.get_by_id(job_profile_id=profile.id)).interview_mode == "assessment"
 
 
 async def test_update_profile_omitting_mode_leaves_it_unchanged(repo):

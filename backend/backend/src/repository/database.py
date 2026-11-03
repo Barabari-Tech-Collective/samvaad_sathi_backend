@@ -42,8 +42,11 @@ class AsyncDatabase:
             max_overflow=settings.DB_POOL_OVERFLOW,
             # Database connection optimizations
             pool_timeout=settings.DB_TIMEOUT,
-            pool_pre_ping=True,  # Validate connections before use
-            pool_recycle=3600,   # Recycle connections every hour
+            # The ping costs three round trips on every request (about 0.7s when the
+            # database is in another region). Turn it off there, with a short recycle so
+            # idle connections are replaced before the network drops them.
+            pool_pre_ping=settings.DB_POOL_PRE_PING,
+            pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
             # SSL configuration for asyncpg (Aiven/Supabase)
             connect_args=connect_args,
         )

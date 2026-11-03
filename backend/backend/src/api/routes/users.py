@@ -1,3 +1,4 @@
+from src.services.staff_roles import unpack_membership
 import datetime
 import fastapi
 import pydantic
@@ -23,6 +24,8 @@ from src.models.schemas.user import (
     UserLogin,
     UserInResponse,
     UserWithToken,
+    SessionUserProfile,
+    SessionUserResponse,
     UserProfileUpdate,
     UserProfileOut,
 )
@@ -136,6 +139,16 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
     is_team_lead = perms["is_team_lead"]
     effective_role = access_role or getattr(user, "_token_role", None) or getattr(user, "role", None)
 
+    can_access_dashboard = perms.get("can_access_dashboard", False)
+    can_access_students = perms.get("can_access_students", False)
+    can_access_colleges = perms.get("can_access_colleges", False)
+    can_access_interviews = perms.get("can_access_interviews", False)
+    can_access_practice_interview = perms.get("can_access_practice_interview", False)
+    # Staff holding an explicit course assignment work in the course workspace; the dashboards
+    # built on legacy, course-blind analytics are not offered to them.
+    from src.services.course_access import membership_grants
+    course_limited = (not is_admin_flag) and bool(membership_grants(memberships))
+
     role_claim = (
         "SUPER_ADMIN" if is_super_admin_flag
         else ("ADMIN" if is_admin_flag
@@ -143,7 +156,7 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
     )
 
     extra_claims = {
-        "role": role_claim,
+        "role": "STAFF" if memberships and not is_admin_flag else role_claim,
         "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else ""),
     }
 
@@ -174,10 +187,17 @@ def _extract_primary_membership_and_claims(user: User, memberships: list) -> dic
         "can_edit": can_edit,
         "is_view_only": is_view_only,
         "is_team_lead": is_team_lead,
+        "can_access_dashboard": can_access_dashboard,
+        "can_access_students": can_access_students,
+        "can_access_colleges": can_access_colleges,
+        "can_access_interviews": can_access_interviews,
+        "can_access_practice_interview": can_access_practice_interview,
+        "course_limited": course_limited,
         "effective_role": effective_role,
         "role_claim": role_claim,
         "extra_claims": extra_claims,
         "team_name": team_name,
+        "membership_roles": sorted({str(getattr(unpack_membership(item)[0], "access_role", "")) for item in memberships}),
     }
 
 
@@ -241,7 +261,14 @@ async def login_user(
             can_access_ats=claims_data["can_access_ats"],
             can_edit=claims_data["can_edit"],
             is_view_only=claims_data["is_view_only"],
+            can_access_dashboard=claims_data.get("can_access_dashboard", False),
+            can_access_students=claims_data.get("can_access_students", False),
+            can_access_colleges=claims_data.get("can_access_colleges", False),
+            can_access_interviews=claims_data.get("can_access_interviews", False),
+            can_access_practice_interview=claims_data.get("can_access_practice_interview", False),
+            course_limited=claims_data.get("course_limited", False),
             team_name=claims_data["team_name"],
+            membership_roles=claims_data["membership_roles"],
             can_use_bulk_ats=is_bulk_ats_user(user),
             degree=None,
             university=None,
@@ -316,6 +343,13 @@ async def get_me(
     summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
     session=fastapi.Depends(get_async_session),
 ) -> UserInResponse:
+    profile, _claims = await build_user_profile(current_user, summary_repo, session)
+    return UserInResponse(user_id=current_user.id,
+        authorized_user=UserWithToken(**profile.model_dump(), token=None, refresh_token=None))
+
+
+async def build_user_profile(current_user, summary_repo, session):
+    # Shared profile assembly contains no credential issuance.
     # Get total interview attempts count
     total_attempts = await summary_repo.count_by_user(user_id=current_user.id)
 
@@ -345,16 +379,7 @@ async def get_me(
     memberships = await get_user_active_memberships(current_user.id, session)
     claims_data = _extract_primary_membership_and_claims(current_user, memberships)
 
-    token = jwt_generator.generate_access_token_for_user(
-        user=current_user,
-        extra_claims=claims_data["extra_claims"],
-    )
-
-    return UserInResponse(
-        user_id=current_user.id,
-        authorized_user=UserWithToken(
-            token=token,
-            refresh_token=None,
+    profile = SessionUserProfile(
             email=current_user.email,
             name=current_user.name,
             created_at=current_user.created_at,
@@ -371,7 +396,14 @@ async def get_me(
             can_access_ats=claims_data["can_access_ats"],
             can_edit=claims_data["can_edit"],
             is_view_only=claims_data["is_view_only"],
+            can_access_dashboard=claims_data.get("can_access_dashboard", False),
+            can_access_students=claims_data.get("can_access_students", False),
+            can_access_colleges=claims_data.get("can_access_colleges", False),
+            can_access_interviews=claims_data.get("can_access_interviews", False),
+            can_access_practice_interview=claims_data.get("can_access_practice_interview", False),
+            course_limited=claims_data.get("course_limited", False),
             team_name=claims_data["team_name"],
+            membership_roles=claims_data["membership_roles"],
             can_use_bulk_ats=is_bulk_ats_user(current_user),
             degree=current_user.degree,
             university=current_user.university,
@@ -385,8 +417,39 @@ async def get_me(
             ats_resume_id=ats_resume_id,
             skills=current_user.skills.get("items", []) if isinstance(getattr(current_user, "skills", None), dict) else [],
             company=current_user.company,
-        ),
     )
+    return profile, claims_data
+
+
+from src.api.dependencies.product_session import get_session_user
+from src.api.routes.product_session import SessionRoute
+
+session_profile_router = fastapi.APIRouter(route_class=SessionRoute)
+
+
+@session_profile_router.get("/auth/profile", response_model=SessionUserResponse)
+async def get_credential_free_profile(
+    current_user=fastapi.Depends(get_current_user),
+    summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
+    session=fastapi.Depends(get_async_session),
+):
+    # Server-session BFFs authenticate with their server-held central bearer.
+    # Profile reads must never mint an unrelated legacy product credential.
+    profile, _ = await build_user_profile(current_user, summary_repo, session)
+    return SessionUserResponse(user_id=current_user.id, authorized_user=profile)
+
+
+@session_profile_router.get("/auth/session/me", response_model=SessionUserResponse)
+async def get_session_me(
+    current_user=fastapi.Depends(get_session_user),
+    summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
+    session=fastapi.Depends(get_async_session),
+):
+    profile, _ = await build_user_profile(current_user, summary_repo, session)
+    return SessionUserResponse(user_id=current_user.id, authorized_user=profile)
+
+
+router.include_router(session_profile_router)
 
 @router.put(
     path="/users/profile",
@@ -443,3 +506,23 @@ async def update_profile(
     )
 
 
+
+
+@router.post("/auth/upload-grant")
+async def create_upload_grant(
+    request: fastapi.Request,
+    payload: dict,
+    current_user=fastapi.Depends(get_current_user),
+):
+    from src.services.upload_grant import issue
+    from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTokenError
+    bearer = request.headers.get("authorization", "")
+    token = bearer[7:] if bearer.startswith("Bearer ") else ""
+    try:
+        claims = decode_sso_access_token(token)
+    except SsoTokenError:
+        raise fastapi.HTTPException(403, "Central authentication required.") from None
+    if claims.get("role") == "STUDENT":
+        raise fastapi.HTTPException(403, "Staff upload access required.")
+    grant = await issue(token, payload.get("path"), payload.get("method"))
+    return fastapi.responses.JSONResponse({"grant": grant, "expires_in": 60}, headers={"Cache-Control":"no-store"})
