@@ -22,6 +22,7 @@ from src.models.db.user import User
 from src.services import assessment_assignments as service
 from src.services import notifications
 from src.services.accommodations import confirmed_conditions
+from src.services import template_scope
 from src.services.interview_eligibility import unavailable_reason
 
 router = fastapi.APIRouter(prefix="/v2/assessment-assignments", tags=["assessment-assignments"])
@@ -205,6 +206,7 @@ async def create(
     reason = unavailable_reason(template, body.difficulty)
     if reason is not None:
         raise fastapi.HTTPException(422, reason)
+    template_scope.require_assignable(template, course_id)
     if body.closes_at is not None and body.closes_at <= dt.datetime.now(UTC):
         raise fastapi.HTTPException(422, "The window must end in the future.")
     if body.cohort_id is not None:

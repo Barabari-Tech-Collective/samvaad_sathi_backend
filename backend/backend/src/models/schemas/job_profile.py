@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional, Literal
+from typing import Dict, List, Optional, Literal
 import datetime
 import pydantic
 from src.models.schemas.base import BaseSchemaModel
@@ -11,6 +11,29 @@ InterviewMode = Literal["practice", "assessment"]
 
 
 # --- feature/roles-page-api schemas ---
+MAX_COURSES_PER_TEMPLATE = 20
+
+
+def clean_course_ids(value):
+    """Course ids as trimmed, de-duplicated text. Nothing chosen means 'every learner' (None)."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("courseIds must be a list")
+    cleaned: list[str] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise ValueError("Each course id must be text or a number")
+        text = str(item).strip()
+        if not text or len(text) > 128:
+            raise ValueError("Each course id must be 1 to 128 characters")
+        if text not in cleaned:
+            cleaned.append(text)
+    if len(cleaned) > MAX_COURSES_PER_TEMPLATE:
+        raise ValueError(f"Choose at most {MAX_COURSES_PER_TEMPLATE} courses")
+    return cleaned or None
+
+
 class JobProfileBase(BaseSchemaModel):
     authoring_mode: Literal["ai", "manual"] | None = None
     content_revision: int = 0
@@ -41,6 +64,18 @@ class JobProfileBase(BaseSchemaModel):
     skills: Optional[List[str]] = None
     additional_context: Optional[str] = None
     category: Optional[str] = None
+    # Courses this template is for. Missing or empty: open to every learner.
+    course_ids: Optional[List[str]] = pydantic.Field(
+        default=None,
+        validation_alias=pydantic.AliasChoices("course_ids", "courseIds"),
+        serialization_alias="courseIds",
+    )
+
+    @pydantic.field_validator("course_ids", mode="before")
+    @classmethod
+    def _clean_course_ids(cls, value):
+        return clean_course_ids(value)
+
     employment_type: Optional[str] = pydantic.Field(
         default=None,
         alias="employmentType",
@@ -105,6 +140,17 @@ class JobProfileUpdateV2(BaseSchemaModel):
     skills: Optional[List[str]] = None
     additional_context: Optional[str] = None
     category: Optional[str] = None
+    # Send courseIds to change which courses this is for; an empty list opens it to everyone.
+    course_ids: Optional[List[str]] = pydantic.Field(
+        default=None,
+        validation_alias=pydantic.AliasChoices("course_ids", "courseIds"),
+        serialization_alias="courseIds",
+    )
+
+    @pydantic.field_validator("course_ids", mode="before")
+    @classmethod
+    def _clean_course_ids(cls, value):
+        return clean_course_ids(value)
     employment_type: Optional[str] = pydantic.Field(
         default=None,
         alias="employmentType",
@@ -219,6 +265,18 @@ class JobProfileResponse(JobProfileBase):
         serialization_alias="submittedAt",
     )
 
+    @pydantic.computed_field(  # type: ignore[prop-decorator]
+        alias="created_at",
+        description=(
+            "The same instant as createdAt, under the snake_case name the student "
+            "app's role-catalogue check requires. Without it the check rejects the "
+            "whole role list and no student can start any interview."
+        ),
+    )
+    @property
+    def createdAtSnake(self) -> datetime.datetime:
+        return self.created_at
+
     @pydantic.computed_field
     @property
     def jobName(self) -> str:
@@ -250,6 +308,8 @@ class JobProfileSummaryResponse(BaseSchemaModel):
 class JobProfileListResponse(BaseSchemaModel):
     items: List[JobProfileResponse]
     total: int
+    # Templates per status for the same filters (statusCounts), when the endpoint reports it.
+    status_counts: Optional[Dict[str, int]] = None
 
 
 class JobProfileActivityResponse(BaseSchemaModel):
@@ -405,6 +465,12 @@ class JobProfileQuestionsListResponse(BaseSchemaModel):
     profile_status: str | None = None
     authoring_mode: str | None = None
     content_revision: int = 0
+    # The profile, rather than a browser tab, owns asynchronous-generation state.
+    # This lets a refresh or a second tab resume the right job without ever
+    # accepting a job token copied from a different profile.
+    generation_state: str | None = None
+    generation_job_id: str | None = None
+    generation_error: str | None = None
     job_profile_id: str
     total_questions: int
     level_counts: JobProfileQuestionLevelCounts

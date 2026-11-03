@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from arq.worker import Retry
 from sqlalchemy import select
 
-from src.services.barabari_integration import submit_resume_score_to_barabari
+from src.services.barabari_integration import (
+    submit_batch_choice_to_sampark,
+    submit_resume_score_to_barabari,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +266,12 @@ async def generate_questions_task(
         track = profile.job_name
         context_text = profile.job_description
         skills_list = profile.skills or []
+        # The LLM call must not keep the database transaction open.  A rollback
+        # expires ORM attributes, however, and touching an expired attribute in
+        # async SQLAlchemy attempts implicit I/O outside greenlet_spawn.  Copy
+        # every profile value the worker needs before releasing the transaction.
+        experience_level = profile.experience_level
+        category = profile.category
 
         await session.rollback()
         results = await generate_question_levels(
@@ -270,8 +279,8 @@ async def generate_questions_task(
             track=track,
             context_text=context_text,
             skills_list=skills_list,
-            experience_level=profile.experience_level,
-            category=profile.category,
+            experience_level=experience_level,
+            category=category,
             knowledge_reference_context=knowledge_reference_context,
         )
 
@@ -593,6 +602,15 @@ async def submit_resume_score_task(
     except Exception as exc:
         job_try = ctx.get("job_try", 1)
         raise Retry(defer=2 * job_try) from exc
+
+
+async def submit_batch_choice_task(ctx: dict, *, email: str, batch_key: str, request_id: str) -> None:
+    """Tells Sampark which batch a learner chose. Retries with a growing delay, like the
+    resume-score callback; WorkerSettings.max_tries caps the attempts."""
+    try:
+        await submit_batch_choice_to_sampark(email=email, batch_key=batch_key, request_id=request_id)
+    except Exception as exc:
+        raise Retry(defer=2 * ctx.get("job_try", 1)) from exc
 
 
 async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> dict:

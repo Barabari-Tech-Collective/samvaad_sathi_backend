@@ -28,6 +28,7 @@ from src.models.db.user import User
 from src.services.course_access import grants_for, require_course, student_predicate
 from src.services.feature_access import permits, require_permission
 from src.services.people import student_only
+from src.services.student_placement import GROUP_PREFIX
 
 router = fastapi.APIRouter(prefix="/v2/cohorts", tags=["cohorts"])
 
@@ -265,6 +266,11 @@ async def change_members(
 ):
     predicate = await scope(user, course_id, session, "update")
     row = await load(session, course_id, cohort_id, lock=True)
+    if row.request_key.startswith(GROUP_PREFIX):
+        # Made from what learners chose for themselves: their choice is the only way in or out.
+        raise fastapi.HTTPException(
+            409, "This group follows what learners chose for their batch, so its members cannot be edited here."
+        )
     if row.archived_at is not None:
         raise fastapi.HTTPException(409, "Restore this cohort before changing its members.")
     if row.version != body.expected_version:
@@ -453,6 +459,9 @@ async def assign_to_cohort(
             template = await session.get(JobProfile, body.job_profile_id)
             if template is None or template.interview_mode != "practice" or template.status != "published":
                 raise fastapi.HTTPException(422, "Choose a published mock interview template.")
+            from src.services import template_scope
+
+            template_scope.require_assignable(template, course_id)
         from src.api.routes.course_workspace import _shared_student_predicate
 
         coaching = await _shared_student_predicate(course_id, user, session, coaching_only=True)

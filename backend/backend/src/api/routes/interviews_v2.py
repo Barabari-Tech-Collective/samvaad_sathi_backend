@@ -420,6 +420,11 @@ async def create_or_resume_interview_v2(
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_409_CONFLICT, detail=refusal
             )
+        from src.services import template_scope
+
+        await template_scope.require_start_allowed(
+            interview_repo.async_session, current_user, job_profile, payload.course_id
+        )
 
     assignment = None
     if payload.job_profile_id is not None and job_profile.interview_mode == "assessment":

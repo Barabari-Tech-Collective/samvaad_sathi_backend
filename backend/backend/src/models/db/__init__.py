@@ -46,6 +46,7 @@ from .graduation import Graduation, GraduationEvent  # noqa: F401
 from .opportunity_selection import OpportunitySelection, OpportunitySelectionEntry  # noqa: F401
 from .assessment_correction import AssessmentScoreCorrection  # noqa: F401
 from .cohort import Cohort, CohortMember  # noqa: F401
+from .student_placement import StudentPlacement  # noqa: F401
 from .mock_assignment import MockInterviewAssignment  # noqa: F401
 from .learning_plan import LearningPlan, LearningPlanAssignment, LearningPlanStep, LearningPlanStepProgress  # noqa: F401
 from .human_scorecard import HumanScorecard  # noqa: F401

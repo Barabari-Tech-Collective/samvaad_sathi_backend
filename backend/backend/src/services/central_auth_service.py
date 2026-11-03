@@ -1,4 +1,6 @@
 import logging
+import re
+
 import httpx
 from src.config.manager import settings
 
@@ -8,6 +10,18 @@ logger = logging.getLogger(__name__)
 class CentralAuthProvisioningError(Exception):
     """Raised when staff provisioning or invitation in Central Auth fails, is misconfigured, or unreachable."""
     pass
+
+
+class CentralAuthNonStaffAccountError(CentralAuthProvisioningError):
+    """Raised when the email already belongs to a non-staff identity (e.g. a STUDENT) in Central Auth.
+
+    Central Auth only allows staff identities (STAFF, FACILITATOR) to be provisioned or modified
+    through this flow, so this is a conflict caused by the supplied email, not a service outage.
+    """
+
+    def __init__(self, message: str, existing_role: str | None = None):
+        super().__init__(message)
+        self.existing_role = existing_role
 
 
 class CentralAuthReconciliationError(Exception):
@@ -57,6 +71,18 @@ def derive_central_role(access_role: str | None) -> str:
     if access_role and "facilitator" in access_role.lower():
         return "FACILITATOR"
     return "STAFF"
+
+
+_NON_STAFF_ROLE_RE = re.compile(r"role\s+'([A-Za-z_ ]+)'", re.IGNORECASE)
+
+
+def _extract_non_staff_role(err_msg: str) -> str | None:
+    """Return the existing role if Central Auth rejected the call because the identity is non-staff."""
+    lowered = err_msg.lower()
+    if "restricted to staff" not in lowered and "non-staff" not in lowered:
+        return None
+    match = _NON_STAFF_ROLE_RE.search(err_msg)
+    return match.group(1).strip().upper() if match else "NON-STAFF"
 
 
 async def provision_or_invite_staff(
@@ -118,6 +144,16 @@ async def provision_or_invite_staff(
     if resp.status_code not in (200, 201) or not body.get("isSuccess"):
         err_msg = body.get("errorMessage") or f"HTTP {resp.status_code}"
         logger.error(f"[central-auth] Provisioning failed for {email}: {err_msg}")
+        # Match on the rejection text, not the HTTP status: Central Auth may report this
+        # business rule with any status code (including 200 + isSuccess=false).
+        existing_role = _extract_non_staff_role(err_msg)
+        if existing_role is not None:
+            raise CentralAuthNonStaffAccountError(
+                f"The email '{email.strip().lower()}' already belongs to a "
+                f"{existing_role.lower()} account, so it cannot be added as a team member. "
+                "Please use a different email address.",
+                existing_role=existing_role,
+            ) from None
         raise CentralAuthProvisioningError(f"Central Auth rejected provisioning: {err_msg}")
 
     data = body.get("data") or {}

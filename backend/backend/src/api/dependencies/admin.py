@@ -23,6 +23,8 @@ which keeps the dashboard operable without weakening the gate for
 students - they appear in neither list.
 """
 
+import logging
+
 import fastapi
 
 from src.api.dependencies.auth import get_current_user
@@ -533,7 +535,17 @@ async def get_user_active_memberships(
         res = await session.execute(stmt)
         return extract_memberships_from_result(res)
     except Exception:
-        return []
+        # A failed lookup is not "this person has no team". Answering [] made a signed-in
+        # staff member look like a stranger (403 "Administrator access required", or a menu
+        # with nothing in it) whenever the database hiccuped, and left no trace in the logs.
+        # It is a temporary failure: say so, so clients retry instead of showing a refusal.
+        logging.getLogger(__name__).exception(
+            "Team membership lookup failed for user_id=%s", user_id
+        )
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="We could not check your account just now. Please try again in a moment.",
+        )
 
 
 async def get_current_admin_user(

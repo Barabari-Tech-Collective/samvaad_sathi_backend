@@ -182,6 +182,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             "interview_mode",
             "questions_per_interview",
             "authoring_mode",
+            "course_ids",
         )
         draft = JobProfile(
             **{field: copy.deepcopy(getattr(profile, field)) for field in fields},
@@ -279,6 +280,81 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             "rejected": rejected_count,
         }
 
+    @staticmethod
+    def _like_pattern(search: str) -> str:
+        """A contains-match pattern with the user's own % and _ taken literally."""
+        escaped = (
+            search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        return f"%{escaped}%"
+
+    @classmethod
+    def _listing_filters(
+        cls,
+        query,
+        *,
+        category: Optional[str],
+        is_admin: bool,
+        interview_mode: str | None,
+        search: str | None,
+        status: JobProfileStatus | None = None,
+        visible_to: tuple[list[str], list[int]] | None = None,
+    ):
+        if visible_to is not None:
+            # A learner: templates for everyone, for one of their courses, or assigned to them.
+            from src.services.template_scope import visible_to_courses as in_courses
+
+            query = query.where(in_courses(*visible_to))
+        if status is not None:
+            query = query.where(JobProfile.status == status)
+        if interview_mode is not None:
+            query = query.where(JobProfile.interview_mode == interview_mode)
+        if not is_admin:
+            query = query.where(JobProfile.status == JobProfileStatus.PUBLISHED)
+        if category and category.strip():
+            query = query.where(func.lower(JobProfile.category) == category.strip().lower())
+        if search and search.strip():
+            query = query.where(
+                JobProfile.job_name.ilike(cls._like_pattern(search), escape="\\")
+            )
+        return query
+
+    @classmethod
+    def build_listing_query(
+        cls,
+        *,
+        category: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        is_admin: bool = False,
+        interview_mode: str | None = None,
+        search: str | None = None,
+        status: JobProfileStatus | None = None,
+        visible_to: tuple[list[str], list[int]] | None = None,
+    ):
+        from sqlalchemy.orm import selectinload
+
+        query = (
+            select(JobProfile)
+            .options(selectinload(JobProfile.questions))
+            # id breaks ties so a page boundary never repeats or skips a template.
+            .order_by(JobProfile.created_at.desc(), JobProfile.id.desc())
+        )
+        query = cls._listing_filters(
+            query,
+            category=category,
+            is_admin=is_admin,
+            interview_mode=interview_mode,
+            search=search,
+            status=status,
+            visible_to=visible_to,
+        )
+        if offset:
+            query = query.offset(offset)
+        if limit is not None:
+            query = query.limit(limit)
+        return query
+
     async def list_profiles(
         self,
         *,
@@ -286,25 +362,70 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         limit: Optional[int] = None,
         is_admin: bool = False,
         interview_mode: str | None = None,
+        offset: int = 0,
+        search: str | None = None,
+        status: JobProfileStatus | None = None,
+        visible_to: tuple[list[str], list[int]] | None = None,
     ) -> List[JobProfile]:
-        from sqlalchemy.orm import selectinload
-
-        query = (
-            select(JobProfile)
-            .options(selectinload(JobProfile.questions))
-            .order_by(JobProfile.created_at.desc())
+        query = self.build_listing_query(
+            category=category,
+            limit=limit,
+            offset=offset,
+            is_admin=is_admin,
+            interview_mode=interview_mode,
+            search=search,
+            status=status,
+            visible_to=visible_to,
         )
-
-        if interview_mode is not None:
-            query = query.where(JobProfile.interview_mode == interview_mode)
-        if not is_admin:
-            query = query.where(JobProfile.status == JobProfileStatus.PUBLISHED)
-        if category and category.strip():
-            query = query.where(func.lower(JobProfile.category) == category.strip().lower())
-        if limit is not None:
-            query = query.limit(limit)
         result = await self.async_session.execute(query)
         return list(result.scalars().all())
+
+    async def count_profiles(
+        self,
+        *,
+        category: Optional[str] = None,
+        is_admin: bool = False,
+        interview_mode: str | None = None,
+        search: str | None = None,
+        status: JobProfileStatus | None = None,
+    ) -> int:
+        query = self._listing_filters(
+            select(func.count(JobProfile.id)),
+            category=category,
+            is_admin=is_admin,
+            interview_mode=interview_mode,
+            search=search,
+            status=status,
+        )
+        return int((await self.async_session.execute(query)).scalar() or 0)
+
+    async def status_counts(
+        self,
+        *,
+        category: Optional[str] = None,
+        is_admin: bool = False,
+        interview_mode: str | None = None,
+        search: str | None = None,
+    ) -> dict[str, int]:
+        """How many templates are in each status for the same filters, whichever status is shown.
+
+        Every status is present (zero when empty), so a client can label all its tabs from
+        one response, and the counts stay right beyond the page being viewed.
+        """
+        query = self._listing_filters(
+            select(JobProfile.status, func.count(JobProfile.id)).group_by(
+                JobProfile.status
+            ),
+            category=category,
+            is_admin=is_admin,
+            interview_mode=interview_mode,
+            search=search,
+        )
+        rows = (await self.async_session.execute(query)).all()
+        counts = {member.value: 0 for member in JobProfileStatus}
+        for status, number in rows:
+            counts[getattr(status, "value", str(status))] = int(number)
+        return counts
 
     async def create_profile(
         self,
@@ -320,6 +441,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         questions_per_interview: int | None = None,
         created_by: Optional[int] = None,
         authoring_mode: str | None = None,
+        course_ids: Optional[List[str]] = None,
     ) -> JobProfile:
         new_profile = JobProfile(
             job_name=job_name,
@@ -336,6 +458,9 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             status=JobProfileStatus.DRAFT,
             created_by=created_by,
         )
+        if course_ids:
+            # Left unset otherwise, so the column stays a plain NULL for "every learner".
+            new_profile.course_ids = list(course_ids)
         self.async_session.add(new_profile)
         await self.async_session.commit()
         await self.async_session.refresh(new_profile)

@@ -2629,6 +2629,22 @@ async def get_forecasting(
     return ForecastResponse(chart_type="line", points=points)
 
 
+_PULSE_PERIOD_DAYS = (7, 30)
+
+
+def _count_by_ist_day(moments) -> dict[datetime.date, int]:
+    """Count timestamps per Indian calendar day. A timestamp without a zone is taken as UTC."""
+    counts: dict[datetime.date, int] = {}
+    for moment in moments:
+        if moment is None:
+            continue
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        day = moment.astimezone(_IST).date()
+        counts[day] = counts.get(day, 0) + 1
+    return counts
+
+
 @router.get(
     "/dashboard/pulse",
     summary="Programme pulse for the staff Overview",
@@ -2637,10 +2653,17 @@ async def get_forecasting(
     " Students only; averages use finished assessments only.",
 )
 async def get_dashboard_pulse(
-    days: Literal[7, 30] = fastapi.Query(default=7),
+    days: int = fastapi.Query(default=7, description="Period length in days: 7 or 30."),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
+    # Query-string values arrive as text, and a Literal[7, 30] parameter rejects "7" and
+    # "30" with a 422, so the overview's period buttons could never load. Accept the
+    # integer and enforce the two supported values here.
+    if days not in _PULSE_PERIOD_DAYS:
+        raise fastapi.HTTPException(
+            status_code=422, detail="days must be 7 or 30."
+        )
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     today = datetime.datetime.now(_IST).date()
     start = today - datetime.timedelta(days=days - 1)
@@ -2662,6 +2685,31 @@ async def get_dashboard_pulse(
     interviews = [
         i for i in fetched if previous_start <= i.created_at.astimezone(_IST).date() <= today
     ]
+
+    # Sign-ups: learners whose account was created in the period, under the same student and
+    # college rules as the sign-ups chart. One extra day each side for the UTC/IST edge.
+    signups_by_day: dict[datetime.date, int] = {}
+    if allowed_colleges is None or allowed_colleges:
+        signup_stmt = sqlalchemy.select(User.created_at).where(
+            student_only(),
+            User.created_at
+            >= datetime.datetime.combine(
+                previous_start - datetime.timedelta(days=1),
+                datetime.time.min,
+                tzinfo=datetime.timezone.utc,
+            ),
+            User.created_at
+            <= datetime.datetime.combine(
+                today + datetime.timedelta(days=1),
+                datetime.time.max,
+                tzinfo=datetime.timezone.utc,
+            ),
+        )
+        if allowed_colleges is not None:
+            signup_stmt = signup_stmt.where(User.university.in_(list(allowed_colleges)))
+        signups_by_day = _count_by_ist_day(
+            (await session.execute(signup_stmt)).scalars().all()
+        )
     finished = [i for i in interviews if i.status == "completed" and i.interview_mode == "assessment"]
     reports = await service._reports_by_interview([i.id for i in finished])
     summaries = await service._summary_reports_by_interview([i.id for i in finished])
@@ -2678,6 +2726,8 @@ async def get_dashboard_pulse(
         done = [i for i in rows if i.status == "completed" and i.interview_mode == "assessment"]
         scores = [score[i.id] for i in done if score.get(i.id) is not None]
         return {
+            # A day with no sign-ups is a real zero, unlike a day with no average score.
+            "sign_ups": sum(n for day, n in signups_by_day.items() if lo <= day <= hi),
             "active_learners": len({i.user_id for i in rows}),
             "assessments_taken": len(done),
             "average_assessment_score": round(sum(scores) / len(scores), 1) if scores else None,

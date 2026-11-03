@@ -19,6 +19,7 @@ from src.worker.tasks import (
     process_bulk_ats_candidate_task,
     purge_expired_bulk_ats_batches_task,
     sweep_stalled_answer_transcriptions_task,
+    submit_batch_choice_task,
     submit_resume_score_task,
     synchronize_sampark_enrollments_task,
 )
@@ -28,6 +29,7 @@ class WorkerSettings:
     functions = [
         func(synchronize_sampark_enrollments_task,max_tries=1,timeout=300),
         submit_resume_score_task,
+        submit_batch_choice_task,
         generate_questions_task,
         func(process_answer_transcription_task, max_tries=3, timeout=300),
         process_bulk_ats_candidate_task,

@@ -993,6 +993,11 @@ async def test_ai_queue_appends_to_manual_bank_and_is_bound_to_profile(client, d
     response = await client.post(f"/v2/job-profiles/{profile_id}/questions/generate", json={"levels":[{"level":1,"count":2}]})
     assert response.status_code == 202, response.text
     token = response.json()["jobId"]
+    # Refreshing or opening the draft in another tab must discover the active
+    # job from the profile itself, never from a browser-wide saved token.
+    queued_bank = (await client.get(f"/v2/job-profiles/{profile_id}/questions")).json()
+    assert queued_bank["generationState"] == "queued"
+    assert queued_bank["generationJobId"] == token
     assert (await client.post(f"/v2/job-profiles/{profile_id}/questions/generate",json={"levels":[{"level":1,"count":1}]})).status_code == 409
     other = (await authoring_draft(client))[1]
     assert (await client.get(f"/v2/job-profiles/{other}/questions/generate/status/{token}")).status_code == 404
@@ -1000,7 +1005,10 @@ async def test_ai_queue_appends_to_manual_bank_and_is_bound_to_profile(client, d
         revision = (await session.get(JobProfile,profile_id)).content_revision
     result = await generate_questions_task({},job_profile_id=profile_id,levels=[{"level":1,"count":2}],generation_token=token,expected_revision=revision)
     assert result["count"] == 2
-    bank = (await client.get(f"/v2/job-profiles/{profile_id}/questions")).json()["questions"]
+    completed_bank = (await client.get(f"/v2/job-profiles/{profile_id}/questions")).json()
+    assert completed_bank["generationState"] == "complete"
+    assert completed_bank["generationJobId"] is None
+    bank = completed_bank["questions"]
     assert len(bank)==3 and bank[0]["question"] == "Keep my manual prompt"
     assert bank[0]["isAiGenerated"] is False and bank[1]["isAiGenerated"] is True
     result = (await client.get(f"/v2/job-profiles/{profile_id}/questions/generate/status/{token}")).json()
