@@ -322,6 +322,98 @@ async def test_an_unconfigured_connection_is_a_503_not_an_empty_list(monkeypatch
     assert err.value.status_code == 503
 
 
+# --- telling Sampark -------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_each_new_choice_is_queued_for_sampark_after_it_is_saved(db):
+    uid = await make_user(db, "asha@example.org")
+    queued = AsyncMock(return_value="job-1")
+    with opened(FULL_STACK_2026, DATA_2025), patch("src.worker.queue.enqueue_job", queued):
+        await choose(db, uid, "fs-2026", "da-2025")
+        await choose(db, uid, "fs-2026", "da-2025")  # nothing new: nothing more to say
+    sent = [(c.args[0], c.kwargs["email"], c.kwargs["batch_key"]) for c in queued.await_args_list]
+    assert sent == [
+        ("submit_batch_choice_task", "asha@example.org", "fs-2026"),
+        ("submit_batch_choice_task", "asha@example.org", "da-2025"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_queue_outage_never_undoes_a_saved_choice(db):
+    uid = await make_user(db, "asha@example.org")
+    for broken in (AsyncMock(return_value=None), AsyncMock(side_effect=RuntimeError("redis down"))):
+        with opened(FULL_STACK_2026), patch("src.worker.queue.enqueue_job", broken):
+            result = await choose(db, uid, "fs-2026")
+        assert [s["batch_key"] for s in result["selected"]] == ["fs-2026"]
+        assert (await load_user(db, uid)).enrolled_course_ids == ["7"]
+        async with db() as session:  # reset for the second round
+            await session.execute(sa.delete(StudentPlacement))
+            await session.execute(sa.update(User).values(enrolled_course_ids=None, enrollment_source=None))
+            await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_removing_a_choice_tells_sampark_nothing(db):
+    uid = await make_user(db, "asha@example.org")
+    with opened(FULL_STACK_2026, DATA_2025), patch("src.worker.queue.enqueue_job", AsyncMock(return_value="j")):
+        await choose(db, uid, "fs-2026", "da-2025")
+    queued = AsyncMock(return_value="j")
+    with opened(FULL_STACK_2026, DATA_2025), patch("src.worker.queue.enqueue_job", queued):
+        await choose(db, uid, "fs-2026")  # drops Data Analytics
+    queued.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_the_callback_posts_email_and_batch_with_the_service_key(connected):
+    seen = []
+
+    def handler(request):
+        seen.append((str(request.url), request.headers.get("SAMVAAD-SAATHI-API-KEY"), request.content))
+        return httpx.Response(200, json={"isSuccess": True, "data": {"recorded": False, "reason": "not_in_sampark"}})
+
+    from src.services import barabari_integration as integration
+
+    real = httpx.AsyncClient
+    with patch.object(integration.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw)):
+        await integration.submit_batch_choice_to_sampark("asha@example.org", "fs-2026", "req-1")
+    url, key, body = seen[0]
+    assert url == "https://sampark.test/api/samvaad-saathi/v1/batch-choice"
+    assert key == "service-key"
+    assert b'"email":"asha@example.org"' in body.replace(b" ", b"") and b'"batchKey":"fs-2026"' in body.replace(b" ", b"")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_callback_raises_so_it_is_retried_and_an_unconfigured_one_is_skipped(connected, monkeypatch):
+    from src.services import barabari_integration as integration
+
+    real = httpx.AsyncClient
+    down = httpx.MockTransport(lambda request: httpx.Response(503))
+    with patch.object(integration.httpx, "AsyncClient", lambda **kw: real(transport=down, **kw)):
+        with pytest.raises(httpx.HTTPStatusError):
+            await integration.submit_batch_choice_to_sampark("asha@example.org", "fs-2026", "req-2")
+    monkeypatch.setattr(integration.settings, "SAMPARK_SAATHI_BASE_URL", "", raising=False)
+    await integration.submit_batch_choice_to_sampark("asha@example.org", "fs-2026", "req-3")  # no error
+
+
+@pytest.mark.asyncio
+async def test_the_worker_turns_a_failure_into_a_delayed_retry():
+    from arq.worker import Retry
+
+    from src.worker import tasks
+
+    with patch.object(tasks, "submit_batch_choice_to_sampark", AsyncMock(side_effect=RuntimeError("down"))):
+        with pytest.raises(Retry):
+            await tasks.submit_batch_choice_task({"job_try": 2}, email="a@b.org", batch_key="k", request_id="r")
+
+
+def test_the_worker_registers_the_task():
+    from src.worker import main
+
+    names = {getattr(f, "name", getattr(f, "__name__", "")) for f in main.WorkerSettings.functions}
+    assert "submit_batch_choice_task" in names
+
+
 # --- the rest of the system respects a self-declared course ------------------------------------
 
 

@@ -9,6 +9,7 @@ adds them to a group for that batch inside the course. Changing a choice ends th
 table is also the history. A student may belong to several courses but only one batch of each."""
 
 import datetime as dt
+import logging
 import time
 
 import fastapi
@@ -24,6 +25,7 @@ from src.models.db.user import User
 from src.services.people import student_only
 from src.services.sampark_enrollment_sync import SELF_SOURCE
 
+logger = logging.getLogger(__name__)
 UTC = dt.timezone.utc
 OPEN_BATCHES_PATH = "/samvaad-saathi/v1/open-batches"
 CACHE_SECONDS = 120
@@ -261,5 +263,24 @@ async def replace(session, user, batch_keys: list[str], *, transport=None) -> di
             )
         )
     await session.commit()
+    for row in added:
+        await tell_sampark(student.email, row.batch_key)
     rows = await active_rows(session, student.id)
     return {"needs_placement": False, "college": student.university, "selected": [serialize(r) for r in rows]}
+
+
+async def tell_sampark(email: str, batch_key: str) -> None:
+    """Best effort, after the choice is saved: Sampark's records follow the learner's choice.
+    If the queue is down the choice still stands and Sampark simply is not told this time."""
+    from uuid import uuid4
+
+    from src.worker.queue import enqueue_job
+
+    try:
+        queued = await enqueue_job(
+            "submit_batch_choice_task", email=email, batch_key=batch_key, request_id=str(uuid4())
+        )
+    except Exception:  # never fail a saved choice
+        queued = None
+    if not queued:
+        logger.warning("Could not queue the Sampark batch-choice callback for batch %s", batch_key)

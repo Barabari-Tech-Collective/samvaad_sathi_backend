@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from arq.worker import Retry
 from sqlalchemy import select
 
-from src.services.barabari_integration import submit_resume_score_to_barabari
+from src.services.barabari_integration import (
+    submit_batch_choice_to_sampark,
+    submit_resume_score_to_barabari,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +575,15 @@ async def submit_resume_score_task(
     except Exception as exc:
         job_try = ctx.get("job_try", 1)
         raise Retry(defer=2 * job_try) from exc
+
+
+async def submit_batch_choice_task(ctx: dict, *, email: str, batch_key: str, request_id: str) -> None:
+    """Tells Sampark which batch a learner chose. Retries with a growing delay, like the
+    resume-score callback; WorkerSettings.max_tries caps the attempts."""
+    try:
+        await submit_batch_choice_to_sampark(email=email, batch_key=batch_key, request_id=request_id)
+    except Exception as exc:
+        raise Retry(defer=2 * ctx.get("job_try", 1)) from exc
 
 
 async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> dict:
