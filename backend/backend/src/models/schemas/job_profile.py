@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional, Literal
+from typing import Dict, List, Optional, Literal
 import datetime
 import pydantic
 from src.models.schemas.base import BaseSchemaModel
@@ -250,6 +250,8 @@ class JobProfileSummaryResponse(BaseSchemaModel):
 class JobProfileListResponse(BaseSchemaModel):
     items: List[JobProfileResponse]
     total: int
+    # Templates per status for the same filters (statusCounts), when the endpoint reports it.
+    status_counts: Optional[Dict[str, int]] = None
 
 
 class JobProfileActivityResponse(BaseSchemaModel):

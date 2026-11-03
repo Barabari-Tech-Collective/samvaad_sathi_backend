@@ -1513,19 +1513,51 @@ async def list_practice_templates(
     limit: int = fastapi.Query(100, ge=1, le=200),
     offset: int = fastapi.Query(0, ge=0, le=1_000_000),
     q: str | None = fastapi.Query(None, max_length=100, description="Name contains"),
+    status: JobProfileStatus | None = fastapi.Query(
+        None, description="Only templates in this status"
+    ),
+    category: str | None = fastapi.Query(
+        None, max_length=50, description="Only this domain/category"
+    ),
     current_user=fastapi.Depends(get_current_creator_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
         get_repository(repo_type=JobProfileCRUDRepository)
     ),
 ):
-    # One page of templates, newest first, plus the real total so a client can page.
+    # A domain is only applied when asked for, through the same rule as the other list
+    # endpoints: staff scoped to a domain get their own domain whatever they request.
+    effective_category = (
+        await resolve_effective_category(
+            current_user=current_user,
+            session=job_profile_repo.async_session,
+            requested_category=category,
+        )
+        if category and category != "all"
+        else None
+    )
+    # One page of templates, newest first, plus the real total and the count in each status.
     profiles = await job_profile_repo.list_profiles(
-        limit=limit, offset=offset, is_admin=True, interview_mode="practice", search=q
+        category=effective_category,
+        limit=limit,
+        offset=offset,
+        is_admin=True,
+        interview_mode="practice",
+        search=q,
+        status=status,
     )
     total = await job_profile_repo.count_profiles(
-        is_admin=True, interview_mode="practice", search=q
+        category=effective_category,
+        is_admin=True,
+        interview_mode="practice",
+        search=q,
+        status=status,
     )
-    return JobProfileListResponse(items=profiles, total=total)
+    status_counts = await job_profile_repo.status_counts(
+        category=effective_category, is_admin=True, interview_mode="practice", search=q
+    )
+    return JobProfileListResponse(
+        items=profiles, total=total, status_counts=status_counts
+    )
 
 
 @router.delete(
@@ -1583,19 +1615,51 @@ async def list_assessment_roles(
     limit: int = fastapi.Query(100, ge=1, le=200),
     offset: int = fastapi.Query(0, ge=0, le=1_000_000),
     q: str | None = fastapi.Query(None, max_length=100, description="Name contains"),
+    status: JobProfileStatus | None = fastapi.Query(
+        None, description="Only templates in this status"
+    ),
+    category: str | None = fastapi.Query(
+        None, max_length=50, description="Only this domain/category"
+    ),
     current_user=fastapi.Depends(get_current_creator_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
         get_repository(repo_type=JobProfileCRUDRepository)
     ),
 ):
-    # One page of templates, newest first, plus the real total so a client can page.
+    # A domain is only applied when asked for, through the same rule as the other list
+    # endpoints: staff scoped to a domain get their own domain whatever they request.
+    effective_category = (
+        await resolve_effective_category(
+            current_user=current_user,
+            session=job_profile_repo.async_session,
+            requested_category=category,
+        )
+        if category and category != "all"
+        else None
+    )
+    # One page of templates, newest first, plus the real total and the count in each status.
     profiles = await job_profile_repo.list_profiles(
-        limit=limit, offset=offset, is_admin=True, interview_mode="assessment", search=q
+        category=effective_category,
+        limit=limit,
+        offset=offset,
+        is_admin=True,
+        interview_mode="assessment",
+        search=q,
+        status=status,
     )
     total = await job_profile_repo.count_profiles(
-        is_admin=True, interview_mode="assessment", search=q
+        category=effective_category,
+        is_admin=True,
+        interview_mode="assessment",
+        search=q,
+        status=status,
     )
-    return JobProfileListResponse(items=profiles, total=total)
+    status_counts = await job_profile_repo.status_counts(
+        category=effective_category, is_admin=True, interview_mode="assessment", search=q
+    )
+    return JobProfileListResponse(
+        items=profiles, total=total, status_counts=status_counts
+    )
 
 
 @router.post(
