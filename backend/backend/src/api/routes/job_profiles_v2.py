@@ -893,7 +893,12 @@ async def generate_questions_v2(
         raise fastapi.HTTPException(
             422, "Choose each level once and at most 200 bank questions per request."
         )
-    token, revision = await job_profile_repo.reserve_generation(job_profile_id)
+    # Reserve each difficulty's capacity under the profile lock as well as the
+    # generation token. This preserves the configured 4 × 50 bank while
+    # closing stale-tab and concurrent-writer races.
+    token, revision = await job_profile_repo.reserve_generation(
+        job_profile_id, {level.level: level.count for level in payload.levels}
+    )
 
     # 4. Enqueue background job — returns immediately so Cloudflare never times out
     job_id = await enqueue_job(

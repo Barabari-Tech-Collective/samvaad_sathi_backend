@@ -6,6 +6,11 @@ from src.models.db.job_profile import JobProfile, JobProfileStatus
 from src.repository.crud.base import BaseCRUDRepository
 from src.services.interview_eligibility import LEVEL_TO_DIFFICULTY
 
+# A template is intentionally a four-level question bank.  Each level may hold
+# up to 50 questions, giving a creator a valid 200-question bank.  A single
+# template-wide cap made the configured 4 × 50 authoring flow impossible.
+MAX_BANK_QUESTIONS_PER_LEVEL = 50
+
 
 def _difficulty_for_level(level: int) -> str:
     """Derive the difficulty label from the level, never trust a supplied one.
@@ -95,7 +100,26 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
                 409, "This question already exists at this level."
             )
 
-    async def reserve_generation(self, profile_id: int):
+    @staticmethod
+    def require_level_capacity(profile, *, level: int, incoming: int = 1) -> None:
+        """Enforce the configured ceiling for one difficulty while locked.
+
+        Client limits alone cannot protect against stale tabs, concurrent staff
+        editors, or direct API callers.  Every writer reaches this method after
+        ``editable_profile`` has acquired the profile lock.
+        """
+        import fastapi
+
+        existing = sum(1 for question in profile.questions if question.level == level)
+        if incoming < 1 or existing + incoming > MAX_BANK_QUESTIONS_PER_LEVEL:
+            remaining = max(0, MAX_BANK_QUESTIONS_PER_LEVEL - existing)
+            raise fastapi.HTTPException(
+                409,
+                f"Level {level} can hold at most {MAX_BANK_QUESTIONS_PER_LEVEL} questions. "
+                f"It has {existing}; only {remaining} more can be added at this level.",
+            )
+
+    async def reserve_generation(self, profile_id: int, requested_by_level: dict[int, int]):
         import uuid
         import fastapi
 
@@ -105,6 +129,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
                 409,
                 "AI generation is already active. Cancel it before requesting another batch.",
             )
+        for level, count in requested_by_level.items():
+            self.require_level_capacity(profile, level=level, incoming=count)
         profile.generation_token = str(uuid.uuid4())
         profile.generation_state = "queued"
         profile.generation_result_count = None
@@ -588,6 +614,15 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
                 )
             known.add(key)
         for profile in parents:
+            for level in (1, 2, 3, 4):
+                incoming = sum(
+                    1
+                    for question in questions
+                    if question["job_profile_id"] == profile.id
+                    and question["level"] == level
+                )
+                if incoming:
+                    self.require_level_capacity(profile, level=level, incoming=incoming)
             self.content_changed(profile)
             if generation_token is not None:
                 profile.generation_state = "complete"
@@ -654,6 +689,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
 
         profile = await self.editable_profile(job_profile_id)
         self.validate_question(profile, text=question_text, level=level)
+        self.require_level_capacity(profile, level=level)
         self.content_changed(profile)
         obj = JobProfileQuestion(
             job_profile_id=job_profile_id,
