@@ -58,3 +58,34 @@ async def submit_resume_score_to_barabari(
             request_id, student_id,
         )
         raise
+
+
+BATCH_CHOICE_PATH = "/samvaad-saathi/v1/batch-choice"
+
+
+async def submit_batch_choice_to_sampark(email: str, batch_key: str, request_id: str) -> None:
+    """Tell Sampark which batch a learner chose, so its own records can follow.
+
+    Runs as an arq job, never inline, so a Sampark outage can never fail the learner's choice.
+    A learner who is not in Sampark is an ordinary answer (200), not a failure, so it is not
+    retried. Anything else (a network error, a non-2xx reply) raises so arq retries."""
+    api_key = settings.SAMPARK_SAATHI_API_KEY
+    base_url = (settings.SAMPARK_SAATHI_BASE_URL or "").rstrip("/")
+    if not api_key or not base_url:
+        logger.warning(
+            "RequestId: %s | SAMPARK_SAATHI_API_KEY/BASE_URL not configured, skipping batch-choice callback",
+            request_id,
+        )
+        return
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(
+            f"{base_url}{BATCH_CHOICE_PATH}",
+            headers={"SAMVAAD-SAATHI-API-KEY": api_key, "requestId": request_id},
+            json={"email": email, "batchKey": batch_key},
+        )
+    response.raise_for_status()
+    outcome = (response.json() or {}).get("data") or {}
+    logger.info(
+        "RequestId: %s | Sampark batch choice for batch %s: recorded=%s reason=%s",
+        request_id, batch_key, outcome.get("recorded"), outcome.get("reason"),
+    )
