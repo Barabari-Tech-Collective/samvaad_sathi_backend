@@ -213,7 +213,21 @@ async def list_job_profiles(
         session=job_profile_repo.async_session,
         requested_category=category,
     )
-    profiles = await job_profile_repo.list_profiles(category=effective_category, limit=limit, is_admin=is_admin)
+    # A learner only sees templates for everyone or for one of their own courses.
+    from src.services import template_scope
+
+    learner = not is_admin and await template_scope.is_learner(job_profile_repo.async_session, current_user)
+    visible_to = (
+        (
+            sorted(template_scope.learner_courses(current_user)),
+            await template_scope.assigned_template_ids(job_profile_repo.async_session, current_user.id),
+        )
+        if learner
+        else None
+    )
+    profiles = await job_profile_repo.list_profiles(
+        category=effective_category, limit=limit, is_admin=is_admin, visible_to=visible_to
+    )
     if is_admin:
         return JobProfileListResponse(items=profiles, total=len(profiles))
     # Students only see published templates, without reviewer notes meant for authors.
@@ -260,6 +274,7 @@ async def create_job_profile(
         interview_mode=payload.interview_mode,
         questions_per_interview=payload.questions_per_interview,
         authoring_mode=payload.authoring_mode,
+        course_ids=payload.course_ids,
         created_by=current_user.id,
     )
     return JobProfileResponse.model_validate(profile)

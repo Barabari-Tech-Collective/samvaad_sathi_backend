@@ -178,6 +178,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             "interview_mode",
             "questions_per_interview",
             "authoring_mode",
+            "course_ids",
         )
         draft = JobProfile(
             **{field: copy.deepcopy(getattr(profile, field)) for field in fields},
@@ -293,7 +294,13 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         interview_mode: str | None,
         search: str | None,
         status: JobProfileStatus | None = None,
+        visible_to: tuple[list[str], list[int]] | None = None,
     ):
+        if visible_to is not None:
+            # A learner: templates for everyone, for one of their courses, or assigned to them.
+            from src.services.template_scope import visible_to_courses as in_courses
+
+            query = query.where(in_courses(*visible_to))
         if status is not None:
             query = query.where(JobProfile.status == status)
         if interview_mode is not None:
@@ -319,6 +326,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         interview_mode: str | None = None,
         search: str | None = None,
         status: JobProfileStatus | None = None,
+        visible_to: tuple[list[str], list[int]] | None = None,
     ):
         from sqlalchemy.orm import selectinload
 
@@ -335,6 +343,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             interview_mode=interview_mode,
             search=search,
             status=status,
+            visible_to=visible_to,
         )
         if offset:
             query = query.offset(offset)
@@ -352,6 +361,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         offset: int = 0,
         search: str | None = None,
         status: JobProfileStatus | None = None,
+        visible_to: tuple[list[str], list[int]] | None = None,
     ) -> List[JobProfile]:
         query = self.build_listing_query(
             category=category,
@@ -361,6 +371,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             interview_mode=interview_mode,
             search=search,
             status=status,
+            visible_to=visible_to,
         )
         result = await self.async_session.execute(query)
         return list(result.scalars().all())
@@ -426,6 +437,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         questions_per_interview: int | None = None,
         created_by: Optional[int] = None,
         authoring_mode: str | None = None,
+        course_ids: Optional[List[str]] = None,
     ) -> JobProfile:
         new_profile = JobProfile(
             job_name=job_name,
@@ -442,6 +454,9 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             status=JobProfileStatus.DRAFT,
             created_by=created_by,
         )
+        if course_ids:
+            # Left unset otherwise, so the column stays a plain NULL for "every learner".
+            new_profile.course_ids = list(course_ids)
         self.async_session.add(new_profile)
         await self.async_session.commit()
         await self.async_session.refresh(new_profile)

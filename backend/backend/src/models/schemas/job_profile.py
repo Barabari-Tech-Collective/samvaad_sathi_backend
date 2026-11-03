@@ -11,6 +11,29 @@ InterviewMode = Literal["practice", "assessment"]
 
 
 # --- feature/roles-page-api schemas ---
+MAX_COURSES_PER_TEMPLATE = 20
+
+
+def clean_course_ids(value):
+    """Course ids as trimmed, de-duplicated text. Nothing chosen means 'every learner' (None)."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("courseIds must be a list")
+    cleaned: list[str] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise ValueError("Each course id must be text or a number")
+        text = str(item).strip()
+        if not text or len(text) > 128:
+            raise ValueError("Each course id must be 1 to 128 characters")
+        if text not in cleaned:
+            cleaned.append(text)
+    if len(cleaned) > MAX_COURSES_PER_TEMPLATE:
+        raise ValueError(f"Choose at most {MAX_COURSES_PER_TEMPLATE} courses")
+    return cleaned or None
+
+
 class JobProfileBase(BaseSchemaModel):
     authoring_mode: Literal["ai", "manual"] | None = None
     content_revision: int = 0
@@ -41,6 +64,18 @@ class JobProfileBase(BaseSchemaModel):
     skills: Optional[List[str]] = None
     additional_context: Optional[str] = None
     category: Optional[str] = None
+    # Courses this template is for. Missing or empty: open to every learner.
+    course_ids: Optional[List[str]] = pydantic.Field(
+        default=None,
+        validation_alias=pydantic.AliasChoices("course_ids", "courseIds"),
+        serialization_alias="courseIds",
+    )
+
+    @pydantic.field_validator("course_ids", mode="before")
+    @classmethod
+    def _clean_course_ids(cls, value):
+        return clean_course_ids(value)
+
     employment_type: Optional[str] = pydantic.Field(
         default=None,
         alias="employmentType",
@@ -105,6 +140,17 @@ class JobProfileUpdateV2(BaseSchemaModel):
     skills: Optional[List[str]] = None
     additional_context: Optional[str] = None
     category: Optional[str] = None
+    # Send courseIds to change which courses this is for; an empty list opens it to everyone.
+    course_ids: Optional[List[str]] = pydantic.Field(
+        default=None,
+        validation_alias=pydantic.AliasChoices("course_ids", "courseIds"),
+        serialization_alias="courseIds",
+    )
+
+    @pydantic.field_validator("course_ids", mode="before")
+    @classmethod
+    def _clean_course_ids(cls, value):
+        return clean_course_ids(value)
     employment_type: Optional[str] = pydantic.Field(
         default=None,
         alias="employmentType",
