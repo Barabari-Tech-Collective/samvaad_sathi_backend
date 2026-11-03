@@ -90,3 +90,35 @@ async def test_sso_login_refuses_to_redirect_without_auth_service(settings_stub)
         await auth_sso.sso_login(request)
     assert raised.value.status_code == fastapi.status.HTTP_503_SERVICE_UNAVAILABLE
     assert "unavailable" in raised.value.detail.lower()
+
+
+def _login_request():
+    from starlette.requests import Request
+
+    scope = {"type": "http", "method": "GET", "path": "/", "headers": [], "session": {}}
+    return Request(scope)
+
+
+@pytest.mark.asyncio
+async def test_login_redirects_the_browser_to_the_public_auth_origin(settings_stub):
+    import src.api.routes.auth_sso as auth_sso
+
+    settings_stub.AUTH_SERVICE_BASE_URL = "https://internal-auth.example"
+    settings_stub.AUTH_SERVICE_PUBLIC_BASE_URL = "https://student-auth.example/"
+    settings_stub.SAMPARK_PRODUCT_UNIQUE_ID = "prod-1"
+    settings_stub.SSO_REDIRECT_URI = "https://api.example/cb"
+    response = await auth_sso.sso_login(_login_request())
+    assert response.headers["location"].startswith(
+        "https://student-auth.example/barabari-auth/api/auth/public/v1/authorize?"
+    )
+
+
+@pytest.mark.asyncio
+async def test_login_falls_back_to_the_service_origin_without_a_public_one(settings_stub):
+    import src.api.routes.auth_sso as auth_sso
+
+    settings_stub.AUTH_SERVICE_BASE_URL = "https://internal-auth.example"
+    settings_stub.SAMPARK_PRODUCT_UNIQUE_ID = "prod-1"
+    settings_stub.SSO_REDIRECT_URI = "https://api.example/cb"
+    response = await auth_sso.sso_login(_login_request())
+    assert response.headers["location"].startswith("https://internal-auth.example/barabari-auth")
