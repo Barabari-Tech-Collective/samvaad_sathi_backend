@@ -74,6 +74,12 @@ def published_question_counts(job_profile) -> dict[str, int]:
     Reads the `JobProfile` count properties, which aggregate the eagerly loaded
     `questions` relationship, so this needs no extra query.
     """
+    from src.services.interview_question_plan import unique_questions
+    if getattr(job_profile, "questions_per_interview", None) is not None and hasattr(job_profile, "questions"):
+        return {
+            difficulty: len(unique_questions(q for q in job_profile.questions if q.level == level))
+            for difficulty, level in DIFFICULTY_TO_LEVEL.items()
+        }
     return {
         "easy": job_profile.easy_questions,
         "medium": job_profile.medium_questions,
@@ -92,10 +98,11 @@ def available_difficulties(job_profile) -> list[str]:
     if not is_profile_interviewable(job_profile):
         return []
     counts = published_question_counts(job_profile)
+    required = getattr(job_profile, "questions_per_interview", None) or MINIMUM_QUESTIONS_PER_LEVEL
     return [
         difficulty
         for difficulty in DIFFICULTIES
-        if counts[difficulty] >= MINIMUM_QUESTIONS_PER_LEVEL
+        if counts[difficulty] >= required
     ]
 
 
@@ -162,7 +169,7 @@ def select_published_questions(questions, *, difficulty: str, count: int, offset
     """
     level = level_for_difficulty(difficulty)
     level_questions = [question for question in questions if question.level == level]
-    if len(level_questions) < MINIMUM_QUESTIONS_PER_LEVEL:
+    if len(level_questions) < max(count, MINIMUM_QUESTIONS_PER_LEVEL):
         return []
 
     total = len(level_questions)

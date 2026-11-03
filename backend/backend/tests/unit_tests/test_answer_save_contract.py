@@ -27,8 +27,8 @@ def dependencies(monkeypatch):
     repo = SimpleNamespace(
         get_by_id_and_user=AsyncMock(return_value=attempt),
         save_audio_asset=AsyncMock(),
-        mark_transcription_pending=AsyncMock(),
-        mark_transcription_failed=AsyncMock(),
+        reserve_transcription_retry=AsyncMock(),
+        fail_transcription_retry_reservation=AsyncMock(),
         get_follow_up_payload_for_attempt=AsyncMock(return_value=None),
         async_session=SimpleNamespace(rollback=AsyncMock()),
     )
@@ -49,8 +49,8 @@ def dependencies(monkeypatch):
         return attempt
 
     repo.save_audio_asset.side_effect = save_asset
-    repo.mark_transcription_pending.side_effect = mark_pending
-    repo.mark_transcription_failed.side_effect = mark_failed
+    repo.reserve_transcription_retry.side_effect = mark_pending
+    repo.fail_transcription_retry_reservation.side_effect = mark_failed
     monkeypatch.setattr(
         audio,
         "validate_audio_file",
@@ -114,7 +114,7 @@ async def test_queue_failure_keeps_the_durable_answer(dependencies):
     assert result.saved is True
     assert result.transcription_status == "failed"
     assert "saved" in result.message.lower()
-    repo.mark_transcription_failed.assert_awaited_once()
+    repo.fail_transcription_retry_reservation.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -200,3 +200,56 @@ async def test_an_ended_interviews_attempt_cannot_be_transcribed(dependencies, s
     assert exc.value.status_code == 409
     audio.upload_answer_audio_to_s3.assert_not_called()
     queued.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["processing", "transcribed"])
+async def test_enqueue_failure_returns_worker_state_without_overwriting_it(
+    dependencies, state
+):
+    repo, attempt, queue = dependencies
+
+    async def worker_starts(*args, **kwargs):
+        attempt.transcription_status = state
+        return None
+
+    queue.side_effect = worker_starts
+    repo.fail_transcription_retry_reservation.side_effect = None
+    repo.fail_transcription_retry_reservation.return_value = None
+    result = await upload(repo)
+    assert result.saved and result.transcription_status == state
+
+
+@pytest.mark.asyncio
+async def test_enqueue_response_does_not_acknowledge_a_replaced_recording(dependencies):
+    repo, attempt, queue = dependencies
+
+    async def newer_recording(*args, **kwargs):
+        attempt.answer_checksum = "b" * 64
+        attempt.answer_version = 2
+        return "job"
+
+    queue.side_effect = newer_recording
+    with pytest.raises(fastapi.HTTPException) as error:
+        await upload(repo)
+    assert error.value.status_code == 409
+    assert attempt.answer_checksum == "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_same_audio_failed_upload_cannot_reset_a_new_worker(dependencies):
+    repo, attempt, queue = dependencies
+    attempt.audio_url = "private/answer.wav"
+    attempt.answer_checksum = hashlib.sha256(b"audio").hexdigest()
+    attempt.answer_kind = "audio"
+    attempt.answer_version = 1
+    attempt.transcription_status = "failed"
+
+    async def already_recovered(**kwargs):
+        attempt.transcription_status = "processing"
+        return None
+
+    repo.reserve_transcription_retry.side_effect = already_recovered
+    result = await upload(repo)
+    assert result.saved and result.transcription_status == "processing"
+    queue.assert_not_awaited()

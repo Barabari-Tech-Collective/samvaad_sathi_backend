@@ -1,6 +1,8 @@
 """CRUD repository for speech pacing practice sessions."""
 
 import sqlalchemy
+import fastapi
+from sqlalchemy.exc import IntegrityError, DBAPIError
 from typing import Optional
 
 from src.models.db.pacing_practice import PacingPracticeSession
@@ -17,17 +19,41 @@ class PacingPracticeSessionCRUDRepository(BaseCRUDRepository):
         level: int,
         prompt_text: str,
         prompt_index: int,
+        client_request_id: str | None = None,
     ) -> PacingPracticeSession:
         """Create a new pending pacing practice session."""
+        stmt = sqlalchemy.select(PacingPracticeSession).where(
+            PacingPracticeSession.user_id == user_id,
+            PacingPracticeSession.client_request_id == client_request_id,
+        )
+        def match(existing):
+            if existing.level != level:
+                raise fastapi.HTTPException(409, "This request belongs to a different practice level.")
+            existing._creation_replayed = True
+            return existing
+        if client_request_id:
+            existing = (await self.async_session.execute(stmt)).scalar_one_or_none()
+            if existing is not None:
+                return match(existing)
         session = PacingPracticeSession(
             user_id=user_id,
+            client_request_id=client_request_id,
             level=level,
             prompt_text=prompt_text,
             prompt_index=prompt_index,
             status="pending",
         )
         self.async_session.add(session)
-        await self.async_session.commit()
+        try:
+            await self.async_session.commit()
+        except IntegrityError:
+            await self.async_session.rollback()
+            if not client_request_id:
+                raise
+            existing = (await self.async_session.execute(stmt)).scalar_one_or_none()
+            if existing is None:
+                raise
+            return match(existing)
         await self.async_session.refresh(session)
         return session
 
@@ -44,6 +70,7 @@ class PacingPracticeSessionCRUDRepository(BaseCRUDRepository):
         *,
         session_id: int,
         user_id: int,
+        for_update: bool = False,
     ) -> Optional[PacingPracticeSession]:
         """Get a pacing practice session by ID and user ID."""
         stmt = (
@@ -51,7 +78,15 @@ class PacingPracticeSessionCRUDRepository(BaseCRUDRepository):
             .where(PacingPracticeSession.id == session_id)
             .where(PacingPracticeSession.user_id == user_id)
         )
-        result = await self.async_session.execute(statement=stmt)
+        if for_update:
+            stmt = stmt.with_for_update(nowait=True)
+        try:
+            result = await self.async_session.execute(statement=stmt)
+        except DBAPIError as exc:
+            if for_update and getattr(exc.orig, "sqlstate", None) == "55P03":
+                await self.async_session.rollback()
+                raise fastapi.HTTPException(409, "This recording is already being processed. Keep the page open and check again.") from exc
+            raise
         return result.scalar_one_or_none()
 
     async def update_with_analysis(

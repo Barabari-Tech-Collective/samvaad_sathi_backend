@@ -11,7 +11,9 @@ class LinkScorer:
     def __init__(self):
         pass
 
-    def _calculate_diminishing_score(self, count: int, scale_map: Dict[int, float], max_val: float) -> float:
+    def _calculate_diminishing_score(
+        self, count: int, scale_map: Dict[int, float], max_val: float
+    ) -> float:
         """Helper to apply non-linear diminishing returns based on count tiers."""
         if count <= 0:
             return 0.0
@@ -22,7 +24,7 @@ class LinkScorer:
         validator_output: Dict[str, Any],
         mapped_projects: Optional[List[Dict[str, Any]]] = None,
         track: str = "engineering",
-        job_title: str = ""
+        job_title: str = "",
     ) -> Dict[str, Any]:
         links_map = validator_output.get("links", {})
 
@@ -33,7 +35,7 @@ class LinkScorer:
             "deployments": [],
             "repositories": [],
             "packages": [],
-            "certifications": []
+            "certifications": [],
         }
 
         for url, details in links_map.items():
@@ -45,7 +47,7 @@ class LinkScorer:
                 "url": url,
                 "valid": is_valid,
                 "platform": platform,
-                "status_code": details.get("status_code", 0)
+                "status_code": details.get("status_code", 0),
             }
 
             if platform == "linkedin":
@@ -69,9 +71,12 @@ class LinkScorer:
         port_valid = any(l["valid"] for l in categories["portfolio"])
 
         profile_score = 0.0
-        if li_valid: profile_score += 0.8
-        if gh_valid: profile_score += 0.8
-        if port_valid: profile_score += 0.4
+        if li_valid:
+            profile_score += 0.8
+        if gh_valid:
+            profile_score += 0.8
+        if port_valid:
+            profile_score += 0.4
         profile_score = min(profile_score, 2.0)
 
         # 2. Score Pillar 2: Proof-of-Work with Diminishing Returns (Max 2.0 Pts)
@@ -86,9 +91,15 @@ class LinkScorer:
                     mapped_count += 1
 
         # Tiered scaling maps: 1 -> 0.5, 2 -> 0.8, 3+ -> 1.0
-        deploy_points = self._calculate_diminishing_score(valid_deploy_count, {1: 0.5, 2: 0.8}, 1.0)
-        repo_points = self._calculate_diminishing_score(valid_repo_count, {1: 0.3, 2: 0.5}, 0.6)
-        mapped_points = self._calculate_diminishing_score(mapped_count, {1: 0.2, 2: 0.3}, 0.4)
+        deploy_points = self._calculate_diminishing_score(
+            valid_deploy_count, {1: 0.5, 2: 0.8}, 1.0
+        )
+        repo_points = self._calculate_diminishing_score(
+            valid_repo_count, {1: 0.3, 2: 0.5}, 0.6
+        )
+        mapped_points = self._calculate_diminishing_score(
+            mapped_count, {1: 0.2, 2: 0.3}, 0.4
+        )
 
         proof_score = min(round(deploy_points + repo_points + mapped_points, 2), 2.0)
 
@@ -97,8 +108,10 @@ class LinkScorer:
         valid_certs = [l for l in categories["certifications"] if l["valid"]]
 
         extras_score = 0.0
-        if valid_packages: extras_score += 0.5
-        if valid_certs: extras_score += 0.5
+        if valid_packages:
+            extras_score += 0.5
+        if valid_certs:
+            extras_score += 0.5
         extras_score = min(extras_score, 1.0)
 
         total_score = round(profile_score + proof_score + extras_score, 1)
@@ -107,17 +120,54 @@ class LinkScorer:
             "totalScore": total_score,
             "maxScore": 5.0,
             "track": track,
+            "raw_validator_links": links_map,
             "categoryBreakdown": {
-                "linkedin": {"present": len(categories["linkedin"]) > 0, "working": li_valid, "count": len(categories["linkedin"])},
-                "github": {"present": len(categories["github_profile"]) > 0 or valid_repo_count > 0, "working": gh_valid or valid_repo_count > 0, "repositoryCount": valid_repo_count},
-                "portfolio": {"present": len(categories["portfolio"]) > 0, "working": port_valid},
-                "deployments": {"present": len(categories["deployments"]) > 0, "working": valid_deploy_count > 0, "activeCount": valid_deploy_count},
-                "packages": {"present": len(categories["packages"]) > 0, "working": len(valid_packages) > 0, "count": len(valid_packages)},
-                "certifications": {"present": len(categories["certifications"]) > 0, "working": len(valid_certs) > 0, "count": len(valid_certs)}
+                "linkedin": {
+                    "present": len(categories["linkedin"]) > 0,
+                    "working": li_valid,
+                    "count": len(categories["linkedin"]),
+                },
+                "github": {
+                    "present": len(categories["github_profile"]) > 0
+                    or valid_repo_count > 0,
+                    "working": gh_valid or valid_repo_count > 0,
+                    "repositoryCount": valid_repo_count,
+                },
+                "portfolio": {
+                    "present": len(categories["portfolio"]) > 0,
+                    "working": port_valid,
+                },
+                "deployments": {
+                    "present": len(categories["deployments"]) > 0,
+                    "working": valid_deploy_count > 0,
+                    "activeCount": valid_deploy_count,
+                },
+                "packages": {
+                    "present": len(categories["packages"]) > 0,
+                    "working": len(valid_packages) > 0,
+                    "count": len(valid_packages),
+                },
+                "certifications": {
+                    "present": len(categories["certifications"]) > 0,
+                    "working": len(valid_certs) > 0,
+                    "count": len(valid_certs),
+                },
             },
             "linkAnalysis": {
-                "linkedIn": {"present": len(categories["linkedin"]) > 0, "working": li_valid, "score": 0.8 if li_valid else 0.0},
-                "github": {"present": len(categories["github_profile"]) > 0, "working": gh_valid, "score": 0.8 if gh_valid else 0.0},
-                "projects": {"present": port_valid or valid_deploy_count > 0, "working": port_valid or valid_deploy_count > 0, "score": proof_score}
-            }
+                "linkedIn": {
+                    "present": len(categories["linkedin"]) > 0,
+                    "working": li_valid,
+                    "score": 0.8 if li_valid else 0.0,
+                },
+                "github": {
+                    "present": len(categories["github_profile"]) > 0,
+                    "working": gh_valid,
+                    "score": 0.8 if gh_valid else 0.0,
+                },
+                "projects": {
+                    "present": port_valid or valid_deploy_count > 0,
+                    "working": port_valid or valid_deploy_count > 0,
+                    "score": proof_score,
+                },
+            },
         }

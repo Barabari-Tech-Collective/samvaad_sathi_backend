@@ -37,8 +37,8 @@ def test_get_client_uses_deepseek_base_url_when_selected(monkeypatch):
 
     assert client is not None
     assert str(client.base_url) == "https://api.deepseek.com"
-    # Keeps its own deliberately short timeout/retry settings, distinct from
-    # llm.py's shared client - this path has a static-question fallback and
-    # should fail fast into it, not inherit the longer general-purpose timeout.
-    assert client.timeout == 29.0
-    assert client.max_retries == 1
+    # This path owns its bounded schema-repair retry and fallback. The SDK must
+    # not retry invisibly because that would multiply latency and cost without
+    # being represented in the AI job audit record.
+    assert client.timeout == fsq_module.settings.PRACTICE_AI_QUESTION_TIMEOUT_SECONDS
+    assert client.max_retries == 0

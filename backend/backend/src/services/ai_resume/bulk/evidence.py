@@ -47,6 +47,7 @@ def redact_for_semantic_scoring(
 
 def build_category_evidence(
     *,
+    resume_text: str = "",
     parsed_resume_json: dict,
     required_skills: list[str],
     preferred_skills: list[str],
@@ -67,24 +68,32 @@ def build_category_evidence(
     missing = [s for s in required_skills if s.casefold() not in skill_lookup]
 
     evidence: dict[str, list[dict]] = {key: [] for key in _LABELS}
+
+    def with_location(item: dict) -> dict:
+        text = str(item.get("text") or "")
+        if resume_text and text:
+            lines = resume_text.splitlines()
+            needle = text[:80].casefold()
+            for index, line in enumerate(lines):
+                if needle and needle in line.casefold():
+                    item["lineStart"] = index + 1
+                    item["lineEnd"] = index + 1
+                    break
+        return item
     if matched:
-        evidence["skills"].append(
+        evidence["skills"].append(with_location(
             {"source": "resume.skills", "text": f"Matched: {', '.join(matched[:12])}"}
-        )
+        ))
     if missing:
-        evidence["skills"].append(
-            {
+        evidence["skills"].append(with_location({
                 "source": "role.requiredSkills",
                 "text": f"Not evidenced: {', '.join(missing[:12])}",
-            }
-        )
+            }))
     if skill_strings and not requested:
-        evidence["skills"].append(
-            {
+            evidence["skills"].append(with_location({
                 "source": "resume.skills",
                 "text": f"Candidate lists: {', '.join(skill_strings[:12])}",
-            }
-        )
+            }))
 
     for key, source in (
         ("education", "resume.education"),
@@ -113,23 +122,19 @@ def build_category_evidence(
             else:
                 text = _compact(entry)
             if text:
-                evidence[key].append({"source": source, "text": _compact(text)})
+                evidence[key].append(with_location({"source": source, "text": _compact(text)}))
 
     missing_links = (link_report or {}).get("missing_required") or []
     if missing_links:
-        evidence["links"].append(
-            {
+            evidence["links"].append(with_location({
                 "source": "link.validation",
                 "text": f"Missing required evidence: {', '.join(map(str, missing_links))}",
-            }
-        )
+            }))
     else:
-        evidence["links"].append(
-            {
+        evidence["links"].append(with_location({
                 "source": "link.validation",
                 "text": "No role-required professional link is missing.",
-            }
-        )
+            }))
 
     question_for = {
         "skills": "skills_score",
@@ -140,12 +145,10 @@ def build_category_evidence(
     for category, question in question_for.items():
         answer = (jev_report or {}).get(question) or {}
         if answer.get("value") is not None:
-            evidence[category].append(
-                {
+            evidence[category].append(with_location({
                     "source": f"jev.{question}",
                     "text": f"Jev assessment: {answer['value']} (confidence {answer.get('confidence')})",
-                }
-            )
+                }))
     return evidence
 
 

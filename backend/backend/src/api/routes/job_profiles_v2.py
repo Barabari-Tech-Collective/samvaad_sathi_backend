@@ -1,11 +1,27 @@
 import fastapi
 from fastapi import File, UploadFile
-from typing import List, Optional
+from typing import List, Optional, Any
 import logging
 from src.api.dependencies.auth import get_current_user
-from src.api.dependencies.admin import get_current_creator_user
+from src.api.dependencies.session import get_async_session
+from src.api.dependencies.admin import (
+    is_admin_user,
+    get_current_creator_user,
+    get_current_interview_viewer_user,
+    get_user_active_memberships,
+    calculate_user_permissions,
+    CREATOR_ROLES,
+    JUNIOR_ROLES,
+    LEAD_ROLES,
+    normalize_role,
+)
 from src.api.dependencies.repository import get_repository
+from src.models.db.job_profile import JobProfileStatus
 from src.models.schemas.job_profile import (
+    PracticeTemplateCreate,
+    PracticeTemplateUpdate,
+    AssessmentRoleCreate,
+    AssessmentRoleUpdate,
     JobProfileSummaryResponse,
     JobProfileResponse,
     JobProfileCreateV2,
@@ -45,15 +61,85 @@ from src.services.skills_extractor import extract_skills_from_text
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 from src.services.llm import generate_interview_questions_with_llm
 from src.services.syllabus_service import syllabus_service
-from src.api.dependencies.admin import is_admin_user
 from src.worker.queue import enqueue_job, get_job_status
 
-def check_is_admin_dep(current_user=fastapi.Depends(get_current_user)) -> bool:
-    return is_admin_user(current_user)
+
+async def check_is_admin_dep(
+    current_user=fastapi.Depends(get_current_user),
+    session=fastapi.Depends(get_async_session),
+) -> bool:
+    if is_admin_user(current_user):
+        return True
+    if session is not None:
+        memberships = await get_user_active_memberships(current_user.id, session)
+        if memberships:
+            perms = calculate_user_permissions(current_user, memberships)
+            if perms.get("can_access_interviews", False):
+                return True
+    role = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    return role in CREATOR_ROLES or role in JUNIOR_ROLES or role in {"facilitator", "staff"}
+
 
 logger = logging.getLogger(__name__)
 
 router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles-v2"])
+
+
+async def resolve_effective_category(
+    current_user: Any,
+    session: Optional[Any],
+    requested_category: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve category/domain filtering for interview endpoints.
+    - Super Admins, Global Admins, and Team Leads always have GLOBAL access across
+      all domains (returning requested_category directly, so None shows all interviews).
+    - Facilitators (Senior & Junior) with an assigned team domain are strictly scoped
+      to their assigned domain.
+    """
+    if isinstance(current_user, dict):
+        user_id = current_user.get("id")
+        user_role = normalize_role(current_user.get("role", ""))
+        is_admin = current_user.get("is_admin", False)
+        is_lead = user_role in LEAD_ROLES
+    else:
+        user_id = getattr(current_user, "id", None)
+        user_role = normalize_role(
+            getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")
+        )
+        is_admin = is_admin_user(current_user)
+        is_lead = user_role in LEAD_ROLES
+
+    # 1. Super Admins, Admins, and Team Leads always have global access across all domains
+    if is_admin or is_lead:
+        return requested_category
+
+    FACILITATOR_ROLES = JUNIOR_ROLES | {"sr facilitator", "senior facilitator", "facilitator"}
+    user_domain = None
+    is_facilitator = user_role in FACILITATOR_ROLES
+
+    if session is not None and user_id is not None:
+        try:
+            memberships = await get_user_active_memberships(user_id, session)
+            for item in memberships:
+                member = item[0] if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__") else item
+                m_role = normalize_role(getattr(member, "access_role", "") or getattr(member, "role", ""))
+                # If any active membership is a Lead, they inherit global access
+                if m_role in LEAD_ROLES:
+                    return requested_category
+                if m_role in FACILITATOR_ROLES:
+                    is_facilitator = True
+                m_domain = getattr(member, "domain", None)
+                if m_domain and isinstance(m_domain, str) and m_domain.strip():
+                    user_domain = m_domain.strip()
+        except Exception:
+            pass
+
+    # Facilitators with an assigned domain are strictly scoped to their domain
+    if is_facilitator and user_domain:
+        return user_domain
+
+    return requested_category
+
 
 @router.get(
     path="/job-profiles/recent-activity",
@@ -63,15 +149,22 @@ router = fastapi.APIRouter(prefix="/v2", tags=["job-profiles-v2"])
     summary="Get recent role-related activity",
 )
 async def get_recent_activity(
-    current_user=fastapi.Depends(get_current_creator_user),
+    category: Optional[str] = fastapi.Query(None),
+    current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> List[JobProfileActivityResponse]:
     """
     Returns the latest 5 activities related to job profiles.
     Derived from the job_profile table records.
     """
-    activities = await job_profile_repo.get_recent_activity(limit=5)
+    effective_category = await resolve_effective_category(
+        current_user=current_user,
+        session=job_profile_repo.async_session,
+        requested_category=category,
+    )
+    activities = await job_profile_repo.get_recent_activity(limit=5, category=effective_category)
     return [JobProfileActivityResponse(**a) for a in activities]
+
 
 @router.get(
     path="/job-profiles/summary",
@@ -81,7 +174,8 @@ async def get_recent_activity(
     summary="Get summary counts for Job Profiles",
 )
 async def get_job_profiles_summary(
-    current_user=fastapi.Depends(get_current_creator_user),
+    category: Optional[str] = fastapi.Query(None),
+    current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileSummaryResponse:
     """
@@ -91,8 +185,14 @@ async def get_job_profiles_summary(
     - Approved (default 0)
     - Rejected (default 0)
     """
-    summary_data = await job_profile_repo.get_summary()
+    effective_category = await resolve_effective_category(
+        current_user=current_user,
+        session=job_profile_repo.async_session,
+        requested_category=category,
+    )
+    summary_data = await job_profile_repo.get_summary(category=effective_category)
     return JobProfileSummaryResponse(**summary_data)
+
 
 @router.get(
     path="/job-profiles",
@@ -105,10 +205,22 @@ async def list_job_profiles(
     category: Optional[str] = fastapi.Query(None),
     limit: Optional[int] = fastapi.Query(None),
     is_admin: bool = fastapi.Depends(check_is_admin_dep),
+    current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileListResponse:
-    profiles = await job_profile_repo.list_profiles(category=category, limit=limit, is_admin=is_admin)
-    return JobProfileListResponse(items=profiles, total=len(profiles))
+    effective_category = await resolve_effective_category(
+        current_user=current_user,
+        session=job_profile_repo.async_session,
+        requested_category=category,
+    )
+    profiles = await job_profile_repo.list_profiles(category=effective_category, limit=limit, is_admin=is_admin)
+    if is_admin:
+        return JobProfileListResponse(items=profiles, total=len(profiles))
+    # Students only see published templates, without reviewer notes meant for authors.
+    items = [JobProfileResponse.model_validate(profile) for profile in profiles]
+    for item in items:
+        item.adminComment = None
+    return JobProfileListResponse(items=items, total=len(items))
 
 @router.post(
     path="/job-profiles",
@@ -120,8 +232,22 @@ async def list_job_profiles(
 async def create_job_profile(
     payload: JobProfileCreateV2,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileResponse:
+    creator_domain = None
+    if not is_admin_user(current_user):
+        memberships = await get_user_active_memberships(current_user.id, job_profile_repo.async_session)
+        for item in memberships:
+            member = item[0] if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__") else item
+            m_domain = getattr(member, "domain", None)
+            if m_domain:
+                creator_domain = m_domain
+                break
+
+    effective_category = payload.category or creator_domain
+
     profile = await job_profile_repo.create_profile(
         job_name=payload.job_name,
         job_description=payload.job_description,
@@ -129,11 +255,48 @@ async def create_job_profile(
         experience_level=payload.experience_level,
         skills=payload.skills,
         additional_context=payload.additional_context,
-        category=payload.category,
+        category=effective_category,
         employment_type=payload.employment_type,
         interview_mode=payload.interview_mode,
+        questions_per_interview=payload.questions_per_interview,
+        authoring_mode=payload.authoring_mode,
         created_by=current_user.id,
     )
+    return JobProfileResponse.model_validate(profile)
+
+
+@router.post(
+    "/assessment-roles",
+    response_model=JobProfileResponse,
+    status_code=fastapi.status.HTTP_201_CREATED,
+    summary="Create a formal assessment from the dashboard Roles surface",
+)
+async def create_assessment_role(
+    payload: AssessmentRoleCreate,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+) -> JobProfileResponse:
+    return await create_job_profile(payload, current_user, job_profile_repo)
+
+
+@router.put("/assessment-roles/{job_profile_id}", response_model=JobProfileResponse)
+async def update_assessment_role(
+    job_profile_id: int,
+    payload: AssessmentRoleUpdate,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+) -> JobProfileResponse:
+    profile = await job_profile_repo.update_profile(
+        profile_id=job_profile_id,
+        update_data=payload.model_dump(exclude_unset=True),
+        expected_interview_mode="assessment",
+    )
+    if profile is None:
+        raise fastapi.HTTPException(404, "Assessment role not found")
     return JobProfileResponse.model_validate(profile)
 
 
@@ -148,21 +311,22 @@ async def update_job_profile(
     job_profile_id: int,
     payload: JobProfileUpdateV2,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileResponse:
     update_data = payload.model_dump(exclude_unset=True)
-    
+
     updated_profile = await job_profile_repo.update_profile(
-        profile_id=job_profile_id,
-        update_data=update_data
+        profile_id=job_profile_id, update_data=update_data
     )
-    
+
     if not updated_profile:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
-            detail=f"Job profile with ID {job_profile_id} not found"
+            detail=f"Job profile with ID {job_profile_id} not found",
         )
-        
+
     return JobProfileResponse.model_validate(updated_profile)
 
 
@@ -177,19 +341,32 @@ async def update_job_profile_review(
     job_profile_id: int,
     payload: JobProfileAdminReviewRequest,
     current_admin=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileResponse:
+    if not is_admin_user(current_admin):
+        raise fastapi.HTTPException(
+            403,
+            "Administrator review access is required to publish or request changes.",
+        )
     updated_profile = await job_profile_repo.update_review_status(
         profile_id=job_profile_id,
         status=payload.status,
-        admin_comment=payload.adminComment
+        admin_comment=payload.adminComment,
+        **(
+            {"expected_revision": payload.expected_revision}
+            if payload.expected_revision is not None
+            else {}
+        ),
     )
     if not updated_profile:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
-            detail=f"Job profile with ID {job_profile_id} not found"
+            detail=f"Job profile with ID {job_profile_id} not found",
         )
     return JobProfileResponse.model_validate(updated_profile)
+
 
 @router.get(
     path="/job-profiles/{job_profile_id}/review",
@@ -200,7 +377,7 @@ async def update_job_profile_review(
 )
 async def get_job_profile_review(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_creator_user),
+    current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileReviewResponse:
     # 1. Fetch JobProfile record
@@ -208,19 +385,25 @@ async def get_job_profile_review(
     if not profile:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
-            detail=f"Job profile with ID {job_profile_id} not found"
+            detail=f"Job profile with ID {job_profile_id} not found",
         )
 
     # 2. Fetch all linked questions
-    questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+    questions = await job_profile_repo.get_job_profile_questions(
+        job_profile_id=job_profile_id
+    )
 
     # 3. Parse competencies from additional_context
     competencies = []
     if profile.additional_context:
         if "," in profile.additional_context:
-            competencies = [c.strip() for c in profile.additional_context.split(",") if c.strip()]
+            competencies = [
+                c.strip() for c in profile.additional_context.split(",") if c.strip()
+            ]
         elif "\n" in profile.additional_context:
-            competencies = [c.strip() for c in profile.additional_context.split("\n") if c.strip()]
+            competencies = [
+                c.strip() for c in profile.additional_context.split("\n") if c.strip()
+            ]
         else:
             competencies = [profile.additional_context.strip()]
 
@@ -231,62 +414,63 @@ async def get_job_profile_review(
         category=profile.category,
         experience_level=profile.experience_level,
         employment_type=profile.employment_type,
-        description=profile.job_description
+        description=profile.job_description,
     )
 
     # 5. Map JD summary
     jd_summary = JobProfileReviewJdSummary(
-        extracted_skills=profile.skills or [],
-        competencies=competencies
+        extracted_skills=profile.skills or [], competencies=competencies
     )
 
     # 6. Map levels static titles and descriptions
     LEVEL_METADATA = {
         1: {
             "title": "General Fundamentals",
-            "description": "Basic concepts and foundational knowledge questions."
+            "description": "Basic concepts and foundational knowledge questions.",
         },
         2: {
             "title": "Project & Resume Based",
-            "description": "Questions based on resume projects and practical implementation."
+            "description": "Questions based on resume projects and practical implementation.",
         },
         3: {
             "title": "Production & Scenario Based",
-            "description": "Production-level debugging and real-world problem-solving questions."
+            "description": "Production-level debugging and real-world problem-solving questions.",
         },
         4: {
             "title": "Advanced / Pressure Scenarios",
-            "description": "High-pressure and advanced real-world interview situations."
-        }
+            "description": "High-pressure and advanced real-world interview situations.",
+        },
     }
 
     levels_list = []
     for lvl in [1, 2, 3, 4]:
         meta = LEVEL_METADATA[lvl]
         lvl_questions = [q for q in questions if q.level == lvl]
-        
+
         # Get all questions
         preview = [
             JobProfileReviewPreviewQuestion(question_id=q.id, question=q.question_text)
             for q in lvl_questions
         ]
-        
-        levels_list.append(JobProfileReviewLevelInfo(
-            level=lvl,
-            title=meta["title"],
-            description=meta["description"],
-            question_count=len(lvl_questions),
-            preview_questions=preview
-        ))
+
+        levels_list.append(
+            JobProfileReviewLevelInfo(
+                level=lvl,
+                title=meta["title"],
+                description=meta["description"],
+                question_count=len(lvl_questions),
+                preview_questions=preview,
+            )
+        )
 
     # 7. Calculate totals
     total_questions = len(questions)
-    total_levels = sum(1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions))
+    total_levels = sum(
+        1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions)
+    )
 
     question_summary = JobProfileReviewQuestionSummary(
-        total_questions=total_questions,
-        total_levels=total_levels,
-        levels=levels_list
+        total_questions=total_questions, total_levels=total_levels, levels=levels_list
     )
 
     return JobProfileReviewResponse(
@@ -308,32 +492,40 @@ async def get_job_profile_review(
 async def submit_job_profile(
     job_profile_id: int,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileSubmitResponse:
     # 1. Fetch JobProfile record
     profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
     if not profile:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
-            detail="Job profile not found"
+            detail="Job profile not found",
         )
 
     # 2. Fetch all linked questions
-    questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+    questions = await job_profile_repo.get_job_profile_questions(
+        job_profile_id=job_profile_id
+    )
 
     # 3. Validate generated questions exist
     if not questions:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-            detail="Cannot submit role without generated questions"
+            detail="Cannot submit role without generated questions",
         )
 
     # 4. Submit the profile (updates status to 'under_review' and saves current timestamp)
-    updated_profile = await job_profile_repo.submit_profile(job_profile_id=job_profile_id)
+    updated_profile = await job_profile_repo.submit_profile(
+        job_profile_id=job_profile_id
+    )
 
     # 5. Calculate counts
     total_questions = len(questions)
-    total_levels = sum(1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions))
+    total_levels = sum(
+        1 for lvl in [1, 2, 3, 4] if any(q.level == lvl for q in questions)
+    )
 
     return JobProfileSubmitResponse(
         job_profile_id=updated_profile.id,
@@ -342,11 +534,41 @@ async def submit_job_profile(
         submitted_at=updated_profile.submitted_at,
         total_questions=total_questions,
         total_levels=total_levels,
-        message="Role submitted successfully"
+        message="Role submitted successfully",
     )
 
 
+@router.post(
+    "/assessment-roles/{job_profile_id}/submit", response_model=JobProfileSubmitResponse
+)
+async def submit_assessment_role(
+    job_profile_id: int,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+) -> JobProfileSubmitResponse:
+    if await job_profile_repo.get_assessment_for_update(job_profile_id) is None:
+        raise fastapi.HTTPException(404, "Assessment role not found")
+    return await submit_job_profile(job_profile_id, current_user, job_profile_repo)
 
+
+@router.patch(
+    "/assessment-roles/{job_profile_id}/review", response_model=JobProfileResponse
+)
+async def review_assessment_role(
+    job_profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+) -> JobProfileResponse:
+    if await job_profile_repo.get_assessment_for_update(job_profile_id) is None:
+        raise fastapi.HTTPException(404, "Assessment role not found")
+    return await update_job_profile_review(
+        job_profile_id, payload, current_user, job_profile_repo
+    )
 
 
 @router.delete(
@@ -359,16 +581,17 @@ async def submit_job_profile(
 async def delete_job_profile(
     job_profile_id: int,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileDeleteResponse:
     deleted = await job_profile_repo.delete(job_profile_id=job_profile_id)
     if not deleted:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
-            detail=f"Job profile with ID {job_profile_id} not found"
+            detail=f"Job profile with ID {job_profile_id} not found",
         )
     return JobProfileDeleteResponse(deleted=True, job_profile_id=job_profile_id)
-
 
 
 @router.post(
@@ -390,9 +613,9 @@ async def upload_job_description(
     import zipfile
     import xml.etree.ElementTree as ET
     import PyPDF2
-    
+
     extension, size = await validate_file(file)
-    
+
     extracted_text = ""
     try:
         await file.seek(0)
@@ -422,7 +645,7 @@ async def upload_job_description(
                     root = ET.fromstring(xml_content)
                     texts = []
                     for elem in root.iter():
-                        if elem.tag.endswith('}t'):
+                        if elem.tag.endswith("}t"):
                             if elem.text:
                                 texts.append(elem.text)
                     extracted_text = " ".join(texts)
@@ -465,21 +688,21 @@ async def upload_knowledge_questions(
     import xml.etree.ElementTree as ET
     import PyPDF2
     import pdfplumber
-    
+
     # 1. Existing validation
     extension, size = await validate_file(file)
-    
+
     uploaded_at = datetime.datetime.now(datetime.timezone.utc)
-    
+
     # 2. Extract text and parse
     topics_detected = []
     total_questions = 0
     topics_list = []
-    
+
     try:
         await file.seek(0)
         content = await file.read()
-        
+
         extracted_text = ""
         ext = extension.lower()
         if ext == ".txt":
@@ -503,7 +726,7 @@ async def upload_knowledge_questions(
                     root = ET.fromstring(xml_content)
                     texts = []
                     for elem in root.iter():
-                        if elem.tag.endswith('}t'):
+                        if elem.tag.endswith("}t"):
                             if elem.text:
                                 texts.append(elem.text)
                     extracted_text = " ".join(texts)
@@ -512,47 +735,59 @@ async def upload_knowledge_questions(
                 extracted_text = ""
         elif ext == ".doc":
             extracted_text = content.decode("utf-8", errors="ignore")
-            
+
         # Fix PDF extraction where text is immediately followed by a question number or level
         if extracted_text:
-            extracted_text = re.sub(r'([^\s\d])\s*(\d+[\.\)])\s+', r'\1\n\2 ', extracted_text)
-            extracted_text = re.sub(r'([a-z\.])\s*(LEVEL\s*\d+|Domain\s*\d+)', r'\1\n\2', extracted_text, flags=re.IGNORECASE)
-            
+            extracted_text = re.sub(
+                r"([^\s\d])\s*(\d+[\.\)])\s+", r"\1\n\2 ", extracted_text
+            )
+            extracted_text = re.sub(
+                r"([a-z\.])\s*(LEVEL\s*\d+|Domain\s*\d+)",
+                r"\1\n\2",
+                extracted_text,
+                flags=re.IGNORECASE,
+            )
+
         # Parse text if we extracted anything
         if extracted_text.strip():
             # Call heuristic parser to parse the entire text
             from src.services.knowledge_parser import parse_knowledge_base_text
+
             result, error, latency_ms, model = parse_knowledge_base_text(extracted_text)
-            
+
             if error or not result:
                 raise fastapi.HTTPException(
                     status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"AI parsing failed: {error or 'No result returned'}"
+                    detail=f"AI parsing failed: {error or 'No result returned'}",
                 )
-            
+
             # Convert LLM Pydantic response to API response format
             for topic in result.topics:
                 levels_res = []
                 topic_question_count = 0
                 for lvl in topic.levels:
-                    levels_res.append({
-                        "level": lvl.level,
-                        "questionCount": len(lvl.questions),
-                        "questions": lvl.questions
-                    })
+                    levels_res.append(
+                        {
+                            "level": lvl.level,
+                            "questionCount": len(lvl.questions),
+                            "questions": lvl.questions,
+                        }
+                    )
                     topic_question_count += len(lvl.questions)
-                
+
                 if topic_question_count > 0:
                     total_questions += topic_question_count
-                    topics_list.append({
-                        "topicName": topic.topicName,
-                        "candidateType": topic.candidateType,
-                        "questionCount": topic_question_count,
-                        "levels": levels_res
-                    })
+                    topics_list.append(
+                        {
+                            "topicName": topic.topicName,
+                            "candidateType": topic.candidateType,
+                            "questionCount": topic_question_count,
+                            "levels": levels_res,
+                        }
+                    )
                     if topic.topicName not in topics_detected:
                         topics_detected.append(topic.topicName)
-                    
+
     except fastapi.HTTPException:
         raise
     except Exception as e:
@@ -560,7 +795,7 @@ async def upload_knowledge_questions(
         topics_detected = []
         total_questions = 0
         topics_list = []
-        
+
     return JobProfileUploadResponse(
         success=True,
         original_file_name=file.filename or "",
@@ -569,8 +804,9 @@ async def upload_knowledge_questions(
         uploaded_at=uploaded_at,
         topics_detected=topics_detected,
         total_questions=total_questions,
-        topics=topics_list
+        topics=topics_list,
     )
+
 
 @router.post(
     path="/job-profiles/extract-skills",
@@ -590,15 +826,15 @@ async def extract_skills(
     if not payload.job_description.strip():
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="job_description cannot be empty"
+            detail="job_description cannot be empty",
         )
-        
+
     extracted_skills, error = await extract_skills_from_text(payload.job_description)
     if error:
         logger.error(f"Failed to extract skills via LLM: {error}")
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to extract skills. The AI service may be temporarily unavailable. Reason: {error}"
+            detail=f"Failed to extract skills. The AI service may be temporarily unavailable. Reason: {error}",
         )
 
     return JobProfileExtractSkillsResponse(skills=extracted_skills)
@@ -615,7 +851,9 @@ async def generate_questions_v2(
     job_profile_id: int,
     payload: JobProfileGenerateQuestionsRequest,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileGenerateJobEnqueuedResponse:
     # 1. Validate profile exists
     profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
@@ -625,6 +863,7 @@ async def generate_questions_v2(
             detail=f"Job profile with ID {job_profile_id} not found",
         )
 
+    job_profile_repo.require_unpublished(profile)
     # 2. Validate levels and counts
     valid_levels = {1, 2, 3, 4}
     total_requested = 0
@@ -647,27 +886,28 @@ async def generate_questions_v2(
             detail="Total question count must be greater than zero.",
         )
 
-    # 3. Idempotency guard: refuse if questions already exist for this profile.
-    # The frontend auto-trigger fires only when total_questions==0, so this never
-    # blocks the normal first-generation flow. It prevents a double-click or a
-    # stale poll from appending a second batch on top of an already-generated bank.
-    # To regenerate from scratch, delete all existing questions first.
-    existing_questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
-    if existing_questions:
+    if (
+        len({level.level for level in payload.levels}) != len(payload.levels)
+        or total_requested > 200
+    ):
         raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_409_CONFLICT,
-            detail=f"Job profile already has {len(existing_questions)} question(s). Delete existing questions before re-generating.",
+            422, "Choose each level once and at most 200 bank questions per request."
         )
+    token, revision = await job_profile_repo.reserve_generation(job_profile_id)
 
     # 4. Enqueue background job — returns immediately so Cloudflare never times out
     job_id = await enqueue_job(
         "generate_questions_task",
+        _job_id=token,
+        generation_token=token,
+        expected_revision=revision,
         job_profile_id=job_profile_id,
         levels=[{"level": l.level, "count": l.count} for l in payload.levels],
         knowledge_reference_context=payload.knowledge_reference_context,
     )
 
     if job_id is None:
+        await job_profile_repo.finish_generation(job_profile_id, token, "failed")
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Job queue is temporarily unavailable. Please try again in a moment.",
@@ -675,9 +915,11 @@ async def generate_questions_v2(
 
     logger.info(
         "Enqueued generate_questions_task job_id=%s for job_profile_id=%d (%d questions)",
-        job_id, job_profile_id, total_requested,
+        job_id,
+        job_profile_id,
+        total_requested,
     )
-    return JobProfileGenerateJobEnqueuedResponse(job_id=job_id, status="queued")
+    return JobProfileGenerateJobEnqueuedResponse(job_id=token, status="queued")
 
 
 @router.get(
@@ -691,7 +933,9 @@ async def get_generate_questions_status(
     job_profile_id: int,
     job_id: str,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileGenerateJobStatusResponse:
     # Verify the profile exists so callers can't poll arbitrary arq job IDs.
     # Full IDOR prevention (verifying the job was enqueued for this specific profile)
@@ -703,8 +947,26 @@ async def get_generate_questions_status(
             detail=f"Job profile with ID {job_profile_id} not found",
         )
 
+    if profile.generation_token != job_id:
+        raise fastapi.HTTPException(
+            404, "This generation job does not belong to this template."
+        )
+    if profile.generation_state in ("stale", "failed"):
+        return JobProfileGenerateJobStatusResponse(
+            job_id=job_id,
+            status="failed",
+            error="This AI request was cancelled, failed, or became stale after a draft edit.",
+        )
+    if profile.generation_state == "complete":
+        return JobProfileGenerateJobStatusResponse(
+            job_id=job_id,
+            status="complete",
+            questions_count=profile.generation_result_count,
+        )
     status_info = await get_job_status(job_id)
     status = status_info.get("status", "unknown")
+    if status in ("failed", "not_found"):
+        await job_profile_repo.finish_generation(job_profile_id, job_id, "failed")
 
     questions_count: int | None = None
     if status == "complete":
@@ -728,7 +990,7 @@ async def get_generate_questions_status(
 )
 async def get_job_profile_questions_v2(
     job_profile_id: int,
-    current_user=fastapi.Depends(get_current_creator_user),
+    current_user=fastapi.Depends(get_current_interview_viewer_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileQuestionsListResponse:
     # 1. Validate job_profile_id exists
@@ -740,7 +1002,9 @@ async def get_job_profile_questions_v2(
         )
 
     # 2. Fetch all questions linked to job_profile_id
-    db_questions = await job_profile_repo.get_job_profile_questions(job_profile_id=job_profile_id)
+    db_questions = await job_profile_repo.get_job_profile_questions(
+        job_profile_id=job_profile_id
+    )
 
     # 3. Calculate level counts
     level_counts = {
@@ -778,6 +1042,9 @@ async def get_job_profile_questions_v2(
     ]
 
     return JobProfileQuestionsListResponse(
+        profile_status=profile.status,
+        authoring_mode=getattr(profile, "authoring_mode", None),
+        content_revision=getattr(profile, "content_revision", 0),
         job_profile_id=str(job_profile_id),
         total_questions=len(db_questions),
         level_counts=JobProfileQuestionLevelCounts(**level_counts),
@@ -796,7 +1063,9 @@ async def add_job_profile_question_v2(
     job_profile_id: int,
     payload: JobProfileAddQuestionRequest,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileAddQuestionResponse:
     # 1. Validate job_profile_id exists
     profile = await job_profile_repo.get_by_id(job_profile_id=job_profile_id)
@@ -863,7 +1132,9 @@ async def update_job_profile_question_v2(
     question_id: int,
     payload: JobProfileUpdateQuestionRequest,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileUpdateQuestionResponse:
     # 1. Validate question_id exists
     question = await job_profile_repo.get_question_by_id(question_id=question_id)
@@ -913,8 +1184,7 @@ async def update_job_profile_question_v2(
 
     # 4. Save updated question
     updated_question = await job_profile_repo.update_job_profile_question(
-        question=question,
-        update_data=update_data
+        question=question, update_data=update_data
     )
 
     # 5. Return updated response
@@ -943,7 +1213,9 @@ async def update_job_profile_question_v2(
 async def regenerate_job_profile_question_v2(
     question_id: int,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileRegenerateQuestionResponse:
     # 1. Validate question_id exists
     question = await job_profile_repo.get_question_by_id(question_id=question_id)
@@ -961,17 +1233,15 @@ async def regenerate_job_profile_question_v2(
             detail="Job profile for this question not found",
         )
 
+    job_profile_repo.require_unpublished(profile)
+    expected_revision = profile.content_revision
+    # Do not hold a transaction/row lock across external model latency.
     # 3. Extract and map configuration
     track = profile.job_name
     context_text = profile.job_description or ""
     skills_list = profile.skills or []
 
-    level_map = {
-        1: "easy",
-        2: "medium",
-        3: "hard",
-        4: "expert"
-    }
+    level_map = {1: "easy", 2: "medium", 3: "hard", 4: "expert"}
     difficulty = level_map.get(question.level, "easy")
 
     # 4. Prepare syllabus and ratio
@@ -987,21 +1257,24 @@ async def regenerate_job_profile_question_v2(
     ratio = gen_ctx["ratio"]
     influence = gen_ctx["influence"]
 
+    await job_profile_repo.async_session.rollback()
     # 5. Generate new question using existing LLM service
-    questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
-        track=track,
-        context_text=context_text,
-        count=1,
-        difficulty=difficulty,
-        syllabus_topics=topics,
-        ratio=ratio,
-        influence=influence,
+    questions_list, error, latency_ms, llm_model, structured_items = (
+        await generate_interview_questions_with_llm(
+            track=track,
+            context_text=context_text,
+            count=1,
+            difficulty=difficulty,
+            syllabus_topics=topics,
+            ratio=ratio,
+            influence=influence,
+        )
     )
 
     if error or not structured_items:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to regenerate question: {error or 'No question returned from LLM'}"
+            detail=f"Failed to regenerate question: {error or 'No question returned from LLM'}",
         )
 
     new_item = structured_items[0]
@@ -1016,9 +1289,13 @@ async def regenerate_job_profile_question_v2(
         "expected_answer": new_item.get("expected_answer"),
         "example_output": new_item.get("example_output"),
     }
+    question = await job_profile_repo.get_question_by_id(question_id=question_id)
+    if question is None:
+        raise fastapi.HTTPException(
+            409, "The question was removed while generation was running."
+        )
     updated_question = await job_profile_repo.update_job_profile_question(
-        question=question,
-        update_data=update_data
+        question=question, update_data=update_data, expected_revision=expected_revision
     )
 
     # 7. Return updated response
@@ -1047,7 +1324,9 @@ async def regenerate_job_profile_question_v2(
 async def delete_job_profile_question_v2(
     question_id: int,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileDeleteQuestionResponse:
     # 1. Validate question_id exists
     question = await job_profile_repo.get_question_by_id(question_id=question_id)
@@ -1077,7 +1356,9 @@ async def delete_job_profile_question_v2(
 async def delete_all_job_profile_questions(
     job_profile_id: int,
     current_user=fastapi.Depends(get_current_creator_user),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> JobProfileDeleteAllQuestionsResponse:
     """Delete every question attached to a job profile.
 
@@ -1092,7 +1373,9 @@ async def delete_all_job_profile_questions(
             detail=f"Job profile with ID {job_profile_id} not found",
         )
 
-    deleted_count = await job_profile_repo.delete_all_job_profile_questions(job_profile_id=job_profile_id)
+    deleted_count = await job_profile_repo.delete_all_job_profile_questions(
+        job_profile_id=job_profile_id
+    )
     return JobProfileDeleteAllQuestionsResponse(
         deleted=True,
         job_profile_id=job_profile_id,
@@ -1100,6 +1383,330 @@ async def delete_all_job_profile_questions(
     )
 
 
+# A separate, purpose-locked creator surface. Shared generation/read APIs remain reusable.
+async def _practice_template(repo, profile_id, *, editable=False):
+    profile = await repo.get_practice_for_update(profile_id, editable=editable)
+    if profile is None:
+        raise fastapi.HTTPException(404, "Practice template not found")
+    return profile
 
 
+@router.post("/practice-templates", response_model=JobProfileResponse, status_code=201)
+async def create_practice_template(
+    payload: PracticeTemplateCreate,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    return await create_job_profile(payload, current_user, job_profile_repo)
 
+
+@router.put("/practice-templates/{profile_id}", response_model=JobProfileResponse)
+async def update_practice_template(
+    profile_id: int,
+    payload: PracticeTemplateUpdate,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    await _practice_template(job_profile_repo, profile_id, editable=True)
+    profile = await job_profile_repo.update_profile(
+        profile_id,
+        payload.model_dump(exclude_unset=True),
+        expected_interview_mode="practice",
+    )
+    return JobProfileResponse.model_validate(profile)
+
+
+@router.post(
+    "/practice-templates/{profile_id}/questions",
+    response_model=JobProfileAddQuestionResponse,
+    status_code=201,
+)
+async def add_practice_question(
+    profile_id: int,
+    payload: JobProfileAddQuestionRequest,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    await _practice_template(job_profile_repo, profile_id, editable=True)
+    questions = await job_profile_repo.get_job_profile_questions(
+        job_profile_id=profile_id
+    )
+    normalized = " ".join(payload.question.split()).casefold()
+    if any(
+        q.level == payload.level
+        and " ".join(q.question_text.split()).casefold() == normalized
+        for q in questions
+    ):
+        raise fastapi.HTTPException(409, "This question already exists at this level.")
+    return await add_job_profile_question_v2(
+        profile_id, payload, current_user, job_profile_repo
+    )
+
+
+@router.post(
+    "/practice-templates/{profile_id}/submit", response_model=JobProfileSubmitResponse
+)
+async def submit_practice_template(
+    profile_id: int,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    profile = await _practice_template(job_profile_repo, profile_id, editable=True)
+    from src.services.interview_question_plan import unique_questions
+
+    questions = await job_profile_repo.get_job_profile_questions(
+        job_profile_id=profile_id
+    )
+    required = profile.questions_per_interview or 5
+    if not any(
+        len(unique_questions(q for q in questions if q.level == level)) >= required
+        for level in (1, 2, 3, 4)
+    ):
+        raise fastapi.HTTPException(
+            409, f"Add {required} unique questions at one level before review."
+        )
+    return await submit_job_profile(profile_id, current_user, job_profile_repo)
+
+
+@router.patch(
+    "/practice-templates/{profile_id}/review", response_model=JobProfileResponse
+)
+async def review_practice_template(
+    profile_id: int,
+    payload: JobProfileAdminReviewRequest,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    # Reuse the same administrator review gate as the generic/assessment routes.
+    profile = await _practice_template(job_profile_repo, profile_id)
+    if profile.status != JobProfileStatus.UNDER_REVIEW:
+        raise fastapi.HTTPException(
+            409, "Submit this practice template for review first."
+        )
+    if payload.status not in (
+        JobProfileStatus.PUBLISHED,
+        JobProfileStatus.CHANGES_REQUESTED,
+    ):
+        raise fastapi.HTTPException(422, "Choose published or changes_requested.")
+    if (
+        payload.status == JobProfileStatus.CHANGES_REQUESTED
+        and not (payload.adminComment or "").strip()
+    ):
+        raise fastapi.HTTPException(422, "Explain the requested changes.")
+    return await update_job_profile_review(
+        profile_id, payload, current_user, job_profile_repo
+    )
+
+
+@router.get("/practice-templates", response_model=JobProfileListResponse)
+async def list_practice_templates(
+    limit: int = fastapi.Query(100, ge=1, le=200),
+    offset: int = fastapi.Query(0, ge=0, le=1_000_000),
+    q: str | None = fastapi.Query(None, max_length=100, description="Name contains"),
+    status: JobProfileStatus | None = fastapi.Query(
+        None, description="Only templates in this status"
+    ),
+    category: str | None = fastapi.Query(
+        None, max_length=50, description="Only this domain/category"
+    ),
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    # A domain is only applied when asked for, through the same rule as the other list
+    # endpoints: staff scoped to a domain get their own domain whatever they request.
+    effective_category = (
+        await resolve_effective_category(
+            current_user=current_user,
+            session=job_profile_repo.async_session,
+            requested_category=category,
+        )
+        if category and category != "all"
+        else None
+    )
+    # One page of templates, newest first, plus the real total and the count in each status.
+    profiles = await job_profile_repo.list_profiles(
+        category=effective_category,
+        limit=limit,
+        offset=offset,
+        is_admin=True,
+        interview_mode="practice",
+        search=q,
+        status=status,
+    )
+    total = await job_profile_repo.count_profiles(
+        category=effective_category,
+        is_admin=True,
+        interview_mode="practice",
+        search=q,
+        status=status,
+    )
+    status_counts = await job_profile_repo.status_counts(
+        category=effective_category, is_admin=True, interview_mode="practice", search=q
+    )
+    return JobProfileListResponse(
+        items=profiles, total=total, status_counts=status_counts
+    )
+
+
+@router.delete(
+    "/practice-templates/{profile_id}/questions/{question_id}",
+    response_model=JobProfileDeleteQuestionResponse,
+)
+async def delete_practice_question(
+    profile_id: int,
+    question_id: int,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    await _practice_template(job_profile_repo, profile_id, editable=True)
+    question = await job_profile_repo.get_question_by_id(question_id=question_id)
+    if question is None or question.job_profile_id != profile_id:
+        raise fastapi.HTTPException(404, "Practice question not found")
+    return await delete_job_profile_question_v2(
+        question_id, current_user, job_profile_repo
+    )
+
+
+@router.get("/practice-templates/{profile_id}", response_model=JobProfileResponse)
+async def get_practice_template(
+    profile_id: int,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    # So an editor can open a template that is not on the page of the list being viewed.
+    profile = await job_profile_repo.get_by_id(job_profile_id=profile_id)
+    if profile is None or profile.interview_mode != "practice":
+        raise fastapi.HTTPException(404, "Practice template not found")
+    return JobProfileResponse.model_validate(profile)
+
+
+@router.get("/assessment-roles/{profile_id}", response_model=JobProfileResponse)
+async def get_assessment_role(
+    profile_id: int,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    profile = await job_profile_repo.get_by_id(job_profile_id=profile_id)
+    if profile is None or profile.interview_mode != "assessment":
+        raise fastapi.HTTPException(404, "Assessment template not found")
+    return JobProfileResponse.model_validate(profile)
+
+
+@router.get("/assessment-roles", response_model=JobProfileListResponse)
+async def list_assessment_roles(
+    limit: int = fastapi.Query(100, ge=1, le=200),
+    offset: int = fastapi.Query(0, ge=0, le=1_000_000),
+    q: str | None = fastapi.Query(None, max_length=100, description="Name contains"),
+    status: JobProfileStatus | None = fastapi.Query(
+        None, description="Only templates in this status"
+    ),
+    category: str | None = fastapi.Query(
+        None, max_length=50, description="Only this domain/category"
+    ),
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    # A domain is only applied when asked for, through the same rule as the other list
+    # endpoints: staff scoped to a domain get their own domain whatever they request.
+    effective_category = (
+        await resolve_effective_category(
+            current_user=current_user,
+            session=job_profile_repo.async_session,
+            requested_category=category,
+        )
+        if category and category != "all"
+        else None
+    )
+    # One page of templates, newest first, plus the real total and the count in each status.
+    profiles = await job_profile_repo.list_profiles(
+        category=effective_category,
+        limit=limit,
+        offset=offset,
+        is_admin=True,
+        interview_mode="assessment",
+        search=q,
+        status=status,
+    )
+    total = await job_profile_repo.count_profiles(
+        category=effective_category,
+        is_admin=True,
+        interview_mode="assessment",
+        search=q,
+        status=status,
+    )
+    status_counts = await job_profile_repo.status_counts(
+        category=effective_category, is_admin=True, interview_mode="assessment", search=q
+    )
+    return JobProfileListResponse(
+        items=profiles, total=total, status_counts=status_counts
+    )
+
+
+@router.post(
+    "/practice-templates/{profile_id}/clone",
+    response_model=JobProfileResponse,
+    status_code=201,
+)
+async def clone_practice_template(
+    profile_id: int,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    return JobProfileResponse.model_validate(
+        await job_profile_repo.clone_profile(
+            profile_id, user_id=current_user.id, purpose="practice"
+        )
+    )
+
+
+@router.post(
+    "/assessment-roles/{profile_id}/clone",
+    response_model=JobProfileResponse,
+    status_code=201,
+)
+async def clone_assessment_role(
+    profile_id: int,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    return JobProfileResponse.model_validate(
+        await job_profile_repo.clone_profile(
+            profile_id, user_id=current_user.id, purpose="assessment"
+        )
+    )
+
+
+@router.post("/job-profiles/{profile_id}/questions/generate/cancel")
+async def cancel_question_generation(
+    profile_id: int,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    await job_profile_repo.cancel_generation(profile_id)
+    return {"status": "cancelled"}

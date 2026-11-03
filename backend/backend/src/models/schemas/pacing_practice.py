@@ -1,6 +1,7 @@
 """Schemas for speech pacing practice endpoints."""
 
 import datetime
+from uuid import UUID
 import pydantic
 from typing import Optional
 
@@ -9,6 +10,7 @@ from src.models.schemas.base import BaseSchemaModel
 
 class PacingPracticeSessionCreateRequest(BaseSchemaModel):
     """Request body for creating a new pacing practice session."""
+    client_request_id: UUID | None = None
     level: int = pydantic.Field(
         ...,
         ge=1,

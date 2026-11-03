@@ -5,9 +5,12 @@ from typing import Tuple
 
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB default
+_VALIDATION_CHUNK_SIZE = 1024 * 1024
 
 
-async def validate_file(file: UploadFile, max_size: int = MAX_FILE_SIZE_BYTES) -> Tuple[str, int]:
+async def validate_file(
+    file: UploadFile, max_size: int = MAX_FILE_SIZE_BYTES
+) -> Tuple[str, int]:
     """
     Validates file extension and size.
     Reads the file into memory only during this call — no bytes are written to disk.
@@ -22,15 +25,23 @@ async def validate_file(file: UploadFile, max_size: int = MAX_FILE_SIZE_BYTES) -
             detail=f"Unsupported file type: {extension}. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}",
         )
 
-    # Read entirely into memory to determine size — no file is written to disk.
-    content = await file.read()
-    file_size = len(content)
+    # Count in bounded chunks and stop as soon as the limit is exceeded. This
+    # prevents an oversized request (for example a 100MB PDF) from being copied
+    # into application memory merely to discover that it is too large.
+    await file.seek(0)
+    file_size = 0
+    while True:
+        remaining_before_rejection = max_size - file_size + 1
+        chunk = await file.read(min(_VALIDATION_CHUNK_SIZE, remaining_before_rejection))
+        if not chunk:
+            break
+        file_size += len(chunk)
+        if file_size > max_size:
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File exceeds {max_size // (1024 * 1024)}MB limit",
+            )
 
-    if file_size > max_size:
-        raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds {max_size // (1024 * 1024)}MB limit",
-        )
-
-    # Bytes are intentionally discarded — stateless processing only.
+    # Downstream extractors expect to read the validated file from the start.
+    await file.seek(0)
     return extension, file_size

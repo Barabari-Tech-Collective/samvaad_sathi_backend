@@ -33,6 +33,8 @@ def terminate_backend_server_event_handler(backend_app: fastapi.FastAPI) -> typi
     @loguru.logger.catch
     async def stop_backend_server_events() -> None:
         await stop_consumer_task(getattr(backend_app.state, "access_revoked_consumer_task", None))
+        from src.services.central_identity_access import close_identity_client
+        await close_identity_client()
         await dispose_db_connection(backend_app=backend_app)
         await async_redis.dispose()
 

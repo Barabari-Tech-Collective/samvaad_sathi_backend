@@ -13,7 +13,12 @@ from src.repository.database import async_db
 from src.config.manager import settings
 
 config = context.config
-config.set_main_option(name="sqlalchemy.url", value=str(async_db.set_async_db_uri).replace('%', '%%'))
+# Callers that must target a specific database (tests, tooling) pass it explicitly via
+# config.attributes["database_url"]; otherwise the app's own settings decide, as before.
+config.set_main_option(
+    name="sqlalchemy.url",
+    value=str(config.attributes.get("database_url") or async_db.set_async_db_uri).replace('%', '%%'),
+)
 target_metadata = Base.metadata
 
 if config.config_file_name is not None:

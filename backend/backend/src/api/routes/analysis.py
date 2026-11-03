@@ -5,10 +5,9 @@ import pydantic
 import logging
 import time
 import random
-from fastapi.security import HTTPAuthorizationCredentials
 from typing import Any, Dict, List, Optional
 
-from src.api.dependencies.auth import get_current_user, security
+from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.session import get_async_session
 from src.models.schemas.base import BaseSchemaModel
@@ -50,7 +49,6 @@ router = fastapi.APIRouter(prefix="", tags=["analysis"])
 )
 async def complete_analysis(
     request: CompleteAnalysisRequest,
-    credentials: HTTPAuthorizationCredentials = fastapi.Depends(security),
     current_user: User = fastapi.Depends(get_current_user),
     question_repo: QuestionAttemptCRUDRepository = fastapi.Depends(get_repository(repo_type=QuestionAttemptCRUDRepository)),
     db: AsyncSession = fastapi.Depends(get_async_session)
@@ -74,8 +72,8 @@ async def complete_analysis(
         user_id,
         request.analysis_types,
     )
-    # Extract token for service calls
-    auth_token = credentials.credentials
+    # Analyses execute in-process under current_user; no browser bearer is required.
+    auth_token = ""
     
     try:
         aggregation_start = time.perf_counter()

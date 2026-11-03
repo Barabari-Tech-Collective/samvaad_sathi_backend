@@ -23,6 +23,11 @@ from src.models.schemas.teams_v2 import (
 from src.repository.crud.team_v2 import TeamCRUDRepository, TeamDeleteStatus
 from src.models.db.user import User
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
+from src.services.central_auth_service import (
+    CentralAuthNonStaffAccountError,
+    CentralAuthProvisioningError,
+    CentralAuthReconciliationError,
+)
 
 router = fastapi.APIRouter(prefix="/v2/teams", tags=["teams-v2"])
 
@@ -35,7 +40,7 @@ router = fastapi.APIRouter(prefix="/v2/teams", tags=["teams-v2"])
 )
 async def get_all_teams(
     status: str = fastapi.Query("active", description="Status of the team (active/deleted)"),
-    current_user: User = fastapi.Depends(get_current_user),
+    current_user: User = fastapi.Depends(get_current_admin_user),
     team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
 ) -> List[TeamResponse]:
     # Prevent query-parameter status bypass: non-super-admins cannot inspect deleted teams
@@ -174,6 +179,12 @@ async def add_member(
         raise fastapi.HTTPException(status_code=404, detail="Team not found")
     except EntityAlreadyExists:
         raise fastapi.HTTPException(status_code=400, detail="User is already an active member of this team.")
+    except CentralAuthReconciliationError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_409_CONFLICT, detail=str(e))
+    except CentralAuthNonStaffAccountError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_409_CONFLICT, detail=str(e))
+    except CentralAuthProvisioningError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_502_BAD_GATEWAY, detail=str(e))
     except ValueError as e:
         raise fastapi.HTTPException(status_code=400, detail=str(e))
     except IntegrityError as e:
@@ -246,10 +257,21 @@ async def update_member(
             detail="Team Lead or Administrator access required to manage members.",
         )
     try:
-        updated_member = await team_repo.update_team_member(team_id, member_id, member_data)
+        updated_member = await team_repo.update_team_member(
+            team_id=team_id,
+            member_id=member_id,
+            member_data=member_data,
+            caller_user=current_user,
+        )
         if not updated_member:
             raise fastapi.HTTPException(status_code=404, detail="Member not found")
         return TeamMemberResponse(**updated_member)
+    except CentralAuthReconciliationError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_409_CONFLICT, detail=str(e))
+    except CentralAuthNonStaffAccountError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_409_CONFLICT, detail=str(e))
+    except CentralAuthProvisioningError as e:
+        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_502_BAD_GATEWAY, detail=str(e))
     except ValueError as e:
         raise fastapi.HTTPException(status_code=400, detail=str(e))
     except IntegrityError as e:

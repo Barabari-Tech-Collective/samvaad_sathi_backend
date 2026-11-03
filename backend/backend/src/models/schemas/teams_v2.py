@@ -1,9 +1,10 @@
 import datetime
 import enum
 from typing import List, Optional
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from src.models.schemas.base import BaseSchemaModel
+from src.services.staff_roles import canonical_role
 
 
 class TeamRoleEnum(str, enum.Enum):
@@ -42,10 +43,29 @@ class TeamMemberBase(BaseSchemaModel):
     colleges: Optional[List[str]] = Field(None, description="Assigned colleges")
 
 
+
+
 class TeamMemberCreate(TeamMemberBase):
+    @field_validator("access_role")
+    @classmethod
+    def supported_role(cls, value: str) -> str:
+        return canonical_role(value)
+
     name: str = Field(..., description="Name of the user to be added")
     email: str = Field(..., description="Email of the user to be added")
-    password: Optional[str] = Field(None, description="Password if creating a new user")
+    password: Optional[str] = Field(
+        None,
+        min_length=8,
+        max_length=128,
+        description="Password for user credentials (minimum 8 characters)",
+    )
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v: str | None) -> str | None:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
 
 class TeamMemberUpdate(BaseSchemaModel):
@@ -54,6 +74,24 @@ class TeamMemberUpdate(BaseSchemaModel):
     purposes: Optional[List[str]] = Field(None, description="Granular access purposes")
     domain: Optional[str] = Field(None, description="Assigned domain")
     colleges: Optional[List[str]] = Field(None, description="Assigned colleges")
+    password: Optional[str] = Field(
+        None,
+        min_length=8,
+        max_length=128,
+        description="Password to update user credentials (minimum 8 characters)",
+    )
+
+    @field_validator("access_role")
+    @classmethod
+    def supported_role(cls, value: str | None) -> str | None:
+        return canonical_role(value) if value is not None else None
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v: str | None) -> str | None:
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
 
 

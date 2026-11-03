@@ -44,36 +44,72 @@ def _super_admin_allow_listed_emails() -> set[str]:
     return {entry.strip().lower() for entry in raw.split(",") if entry.strip()}
 
 
-def is_super_admin_user(user: User) -> bool:
-    """True if user has full system access, including team creation and deletion."""
-    if getattr(user, "is_super_admin", False) or getattr(user, "_token_is_super_admin", False):
-        return True
-    email = (getattr(user, "email", "") or "").strip().lower()
-    if bool(email) and email in _super_admin_allow_listed_emails():
-        return True
-    token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().upper()
-    return token_role == "SUPER_ADMIN"
-
-
-def is_admin_user(user: User) -> bool:
-    """True if user may read cross-student data. Super Admins inherit this privilege."""
-    if is_super_admin_user(user) or getattr(user, "is_admin", False) or getattr(user, "_token_is_admin", False):
-        return True
-    email = (getattr(user, "email", "") or "").strip().lower()
-    if bool(email) and email in _allow_listed_emails():
-        return True
-    token_role = (getattr(user, "_token_role", "") or getattr(user, "role", "") or "").strip().upper()
-    return token_role in {"ADMIN", "SUPER_ADMIN"}
-
-
-from src.api.dependencies.session import get_async_session
-
 def normalize_role(role: str | None) -> str:
     """Normalize a role string by trimming, lowercasing, and replacing underscores with spaces."""
     if not role:
         return ""
     return str(role).strip().replace("_", " ").lower()
 
+
+def is_super_admin_user(user: User) -> bool:
+    """True if user has full system access, including team creation and deletion.
+
+    Authority hierarchy:
+      1. Explicit SUPER_ADMIN_EMAILS env allowlist (fail-safe / break-glass).
+      2. Persistent database flag: user.is_super_admin == True.
+      3. Negative guard: If the user is explicitly a standard admin (user.is_admin is True
+         or listed in ADMIN_EMAILS), they MUST NOT be elevated to Super Admin via token claims.
+      4. Fallback for non-persisted / SSO mock identities: only allow token claim if not
+         already designated as a standard admin.
+    """
+    email = (getattr(user, "email", "") or "").strip().lower()
+
+    # 1. Explicit super admin allowlist (break-glass / env override)
+    if bool(email) and email in _super_admin_allow_listed_emails():
+        return True
+
+    # 2. Database persistent flag is authoritative for Super Admins
+    if getattr(user, "is_super_admin", False):
+        return True
+
+    # 3. Block token elevation for confirmed standard admins:
+    # If the user is explicitly a regular admin in DB or in ADMIN_EMAILS,
+    # incoming token claims must NEVER elevate them to Super Admin.
+    is_standard_admin = getattr(user, "is_admin", False) or (
+        bool(email) and email in _allow_listed_emails()
+    )
+    if is_standard_admin:
+        return False
+
+    if getattr(user, "_token_source", None) == "local":
+        return False
+
+    # 4. Token-derived attribute or claim (only for identities without DB records / test mocks)
+    if getattr(user, "_token_is_super_admin", False):
+        return True
+
+    token_role = normalize_role(
+        getattr(user, "_token_role", "") or getattr(user, "role", "")
+    )
+    return token_role in {"super admin", "super_admin"}
+
+
+def is_admin_user(user: User) -> bool:
+    """Explicit local grants or verified central authority; never a local role label."""
+    if is_super_admin_user(user) or getattr(user, "is_admin", False):
+        return True
+    email = (getattr(user, "email", "") or "").strip().lower()
+    if email and email in _allow_listed_emails():
+        return True
+    if getattr(user, "_token_source", None) == "local":
+        return False
+    if getattr(user, "_token_is_admin", False):
+        return True
+    role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
+    return role in {"admin", "super admin"}
+
+
+from src.api.dependencies.session import get_async_session
 
 STAFF_ROLES = {
     "admin",
@@ -92,12 +128,21 @@ STAFF_ROLES = {
     "placement com",
     "recruiter",
     "placement staff",
+    "partnership staff",
     "team member",
     "member",
 }
 
 
-CREATOR_ROLES = {"lead", "team lead", "creator", "admin", "super admin", "sr facilitator", "senior facilitator"}
+CREATOR_ROLES = {
+    "lead",
+    "team lead",
+    "creator",
+    "admin",
+    "super admin",
+    "sr facilitator",
+    "senior facilitator",
+}
 JUNIOR_ROLES = {"jr facilitator", "junior facilitator"}
 TEAM_MEMBER_ROLES = {"team member", "member", "staff"}
 UNRESTRICTED_COLLEGE_ROLES = CREATOR_ROLES | TEAM_MEMBER_ROLES
@@ -114,10 +159,28 @@ def extract_memberships_from_result(res) -> list:
     if res is None:
         return []
     try:
+        from sqlalchemy.engine.row import Row
+    except ImportError:
+        Row = ()
+    try:
         if hasattr(res, "all") and callable(res.all):
             a_res = res.all()
             if isinstance(a_res, list):
-                return a_res
+                return [
+                    (
+                        tuple(item)
+                        if (
+                            isinstance(item, Row)
+                            or (
+                                not isinstance(item, (tuple, list))
+                                and hasattr(item, "__getitem__")
+                                and not hasattr(item, "access_role")
+                            )
+                        )
+                        else item
+                    )
+                    for item in a_res
+                ]
     except Exception:
         pass
     try:
@@ -138,17 +201,13 @@ def calculate_user_permissions(
 ) -> dict:
     """Calculate explicit role-based permissions for a user across teams.
 
-    Enforces the following rules:
-    1. Partnership / Placement Team:
-       - Creator: can_create_roles=True, can_access_ats=True, can_edit=True, is_view_only=False, colleges=None
-       - Team Member: can_create_roles=False, can_access_ats=False, can_edit=False, is_view_only=True, colleges=None
-    2. Program Team:
-       - Creator: can_create_roles=True, can_access_ats=False, can_edit=True, is_view_only=False, colleges=None
-       - Senior Facilitator: can_create_roles=True, can_access_ats=False, can_edit=True, is_view_only=False, colleges=None
-       - Junior Facilitator: can_create_roles=False, can_access_ats=False, can_edit=False, is_view_only=True, colleges=member.colleges
-       - Team Member: can_create_roles=False, can_access_ats=False, can_edit=False, is_view_only=True, colleges=None
-    3. Global Admin / Super Admin:
-       - All permissions=True, is_view_only=False, colleges=None
+    Enforces granular page-level and action-level permissions based on team type,
+    access role (Creator, Lead, Facilitator, Team Member), and purpose tags:
+    - Tag 'Create interview': Interview Creation/Roles page, interview analytics, practice interview mode.
+    - Tag 'Check batch progress': Dashboard page (batch metrics), Students page, and Interview page.
+    - Tag 'Check student progress': Students page only (view & edit candidate details); Colleges page remains hidden.
+    - Tag 'Check college progress': Colleges page only (cross-institution analytics).
+    - ATS feature: Dedicated tag/role grant.
     """
     if is_admin_user(user):
         return {
@@ -158,13 +217,30 @@ def calculate_user_permissions(
             "is_view_only": False,
             "colleges": None,
             "is_team_lead": True,
+            "can_access_dashboard": True,
+            "can_access_students": True,
+            "can_access_colleges": True,
+            "can_access_interviews": True,
+            "can_access_practice_interview": True,
         }
 
+    is_placement_staff = False
+    is_placement_lead = False
+    is_program_lead = False
     is_placement_creator = False
-    is_program_creator_or_sr = False
+    is_program_creator = False
+    placement_creator_unrestricted = False
+    program_creator_unrestricted = False
+    is_sr_facilitator = False
     is_junior_facilitator = False
     is_team_member = False
+    is_placement_member = False
+    is_program_member = False
     junior_colleges: list[str] = []
+    sr_colleges: list[str] = []
+
+    all_purposes: set[str] = set()
+    has_explicit_purposes = False
 
     for item in memberships:
         if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__"):
@@ -178,60 +254,242 @@ def calculate_user_permissions(
             member = item
             team = getattr(member, "team", None)
 
-        t_name = (getattr(team, "name", "") or "").strip().lower() if team else ""
+        raw_team_name = getattr(team, "name", "")
+        t_name = raw_team_name.strip().lower() if isinstance(raw_team_name, str) else ""
         m_role = normalize_role(getattr(member, "access_role", ""))
+        m_purposes = getattr(member, "purposes", None)
+
+        member_has_purposes = False
+        if m_purposes and isinstance(m_purposes, list):
+            for p in m_purposes:
+                if p and isinstance(p, str):
+                    cleaned = p.strip().lower().replace("_", " ")
+                    if cleaned:
+                        all_purposes.add(cleaned)
+                        member_has_purposes = True
+                        has_explicit_purposes = True
 
         is_placement = any(kw in t_name for kw in ["placement", "partnership"])
+        if is_placement:
+            is_placement_member = True
+        else:
+            is_program_member = True
 
-        if m_role in CREATOR_ROLES:
+        if m_role in {"recruiter", "placement staff", "placement com", "partnership staff"}:
+            is_placement_staff = True
+        if m_role in {"lead", "team lead", "manager"}:
             if is_placement:
-                is_placement_creator = True
+                is_placement_lead = True
             else:
-                is_program_creator_or_sr = True
+                is_program_lead = True
+        elif m_role in {"sr facilitator", "senior facilitator"}:
+            is_sr_facilitator = True
+            if (
+                member
+                and getattr(member, "colleges", None)
+                and isinstance(member.colleges, list)
+            ):
+                sr_colleges.extend(
+                    [c for c in member.colleges if isinstance(c, str) and c.strip()]
+                )
         elif m_role in JUNIOR_ROLES:
             is_junior_facilitator = True
-            if member and getattr(member, "colleges", None) and isinstance(member.colleges, list):
-                junior_colleges.extend([c for c in member.colleges if isinstance(c, str) and c.strip()])
+            if (
+                member
+                and getattr(member, "colleges", None)
+                and isinstance(member.colleges, list)
+            ):
+                junior_colleges.extend(
+                    [c for c in member.colleges if isinstance(c, str) and c.strip()]
+                )
+        elif m_role in {"creator"}:
+            if is_placement:
+                is_placement_creator = True
+                if not member_has_purposes:
+                    placement_creator_unrestricted = True
+            else:
+                is_program_creator = True
+                if not member_has_purposes:
+                    program_creator_unrestricted = True
         elif m_role in TEAM_MEMBER_ROLES:
             is_team_member = True
 
     # Fallback to token claims / user.role
-    token_role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
-    can_access_ats_token = token_role in _BULK_ATS_ROLES
+    token_role = normalize_role(
+        getattr(user, "_token_role", "") or getattr(user, "role", "")
+    )
+    legacy_display_fallback = not memberships and getattr(user, "_token_source", None) is None
+    can_access_ats_token = legacy_display_fallback and token_role in _BULK_ATS_ROLES
 
-    if not memberships:
-        if token_role in CREATOR_ROLES:
-            is_program_creator_or_sr = True
+    if legacy_display_fallback:
+        if token_role in {"lead", "team lead", "manager"}:
+            is_program_lead = True
+        elif token_role in {"sr facilitator", "senior facilitator"}:
+            is_sr_facilitator = True
         elif token_role in JUNIOR_ROLES:
             is_junior_facilitator = True
+        elif token_role in {"creator"}:
+            is_program_creator = True
+            program_creator_unrestricted = True
         elif token_role in TEAM_MEMBER_ROLES:
             is_team_member = True
 
-    can_access_ats = is_placement_creator or can_access_ats_token
-    can_create_roles = is_placement_creator or is_program_creator_or_sr
-    can_edit = can_create_roles
+    # Check purpose tags with exact token set matching to avoid substring collision
+    ATS_TAG_VARIANTS = {"ats", "bulk ats", "bulk_ats", "ats screening", "ats access"}
+    INTERVIEW_TAG_VARIANTS = {"create interview", "create_interview", "interview", "interviews"}
+    BATCH_TAG_VARIANTS = {"check batch progress", "batch progress", "batch"}
+    STUDENT_TAG_VARIANTS = {"check student progress", "student progress", "student", "students"}
+    COLLEGE_TAG_VARIANTS = {"check college progress", "college progress", "college", "colleges"}
+
+    has_create_interview = bool(all_purposes & INTERVIEW_TAG_VARIANTS) or any(
+        p.startswith("create interview") or p == "interview" for p in all_purposes
+    )
+    has_batch_progress = bool(all_purposes & BATCH_TAG_VARIANTS) or any(
+        "batch progress" in p for p in all_purposes
+    )
+    has_student_progress = bool(all_purposes & STUDENT_TAG_VARIANTS) or any(
+        "student progress" in p for p in all_purposes
+    )
+    has_college_progress = bool(all_purposes & COLLEGE_TAG_VARIANTS) or any(
+        "college progress" in p for p in all_purposes
+    )
+    has_ats_purpose = bool(all_purposes & ATS_TAG_VARIANTS)
+
+    # 1. Edit & View-only capabilities:
+    # Any Lead, Senior Facilitator, or Creator possesses edit capabilities.
+    can_edit = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_placement_creator
+        or is_program_creator
+    )
     is_view_only = not can_edit
 
-    # Scoping colleges:
-    # Junior Facilitators are strictly restricted to their assigned colleges.
-    # Being a generic Team Member elsewhere does not widen a Junior Facilitator's college access.
-    # Creators and Senior Facilitators (and pure Team Members) have unrestricted access (None).
-    if is_placement_creator or is_program_creator_or_sr:
+    # 2. Page access & Role creation:
+    # Role Creation: Leads, Senior Facilitators, and Creators (unrestricted on any team or with interview/batch tags)
+    can_create_roles = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or (is_placement_creator and (placement_creator_unrestricted or has_create_interview or has_batch_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_create_interview or has_batch_progress))
+    )
+
+    # Bulk ATS: Placement Leads, unrestricted Placement Creators, or users with explicit ATS tag/token claim
+    # The program team screens resumes to find who to put forward, and the placement team to
+    # shortlist for openings, so every member of either team may use it.
+    can_access_ats = bool(
+        is_placement_member
+        or is_program_member
+        or is_placement_lead
+        or is_placement_staff
+        or (is_placement_creator and (placement_creator_unrestricted or has_ats_purpose or can_access_ats_token))
+        or has_ats_purpose
+        or can_access_ats_token
+    )
+
+    # Interview Portal: All Leads, Senior/Junior Facilitators, Creators, or Team Members with interview/batch tag
+    can_access_interviews = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_junior_facilitator
+        or (is_placement_creator and (placement_creator_unrestricted or has_create_interview or has_batch_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_create_interview or has_batch_progress))
+        or (is_team_member and (has_create_interview or has_batch_progress))
+    )
+
+    # Practice Interview: Leads, Senior Facilitators, and Creators (unrestricted or with interview/batch tag)
+    can_access_practice_interview = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or (is_placement_creator and (placement_creator_unrestricted or has_create_interview or has_batch_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_create_interview or has_batch_progress))
+    )
+
+    # Dashboard: Leads, Facilitators, or members/creators with batch progress tag (or unrestricted placement creators)
+    can_access_dashboard = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_junior_facilitator
+        or (is_placement_creator and (placement_creator_unrestricted or has_batch_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_batch_progress))
+        or (is_team_member and has_batch_progress)
+    )
+
+    # Students: Leads, Facilitators, or members/creators with batch/student progress tag (or unrestricted placement creators)
+    can_access_students = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_junior_facilitator
+        or (is_placement_creator and (placement_creator_unrestricted or has_batch_progress or has_student_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_batch_progress or has_student_progress))
+        or (is_team_member and (has_batch_progress or has_student_progress))
+    )
+
+    # Colleges: Leads, Facilitators, or members/creators with college progress tag (or unrestricted placement creators)
+    can_access_colleges = bool(
+        is_placement_lead
+        or is_program_lead
+        or is_sr_facilitator
+        or is_junior_facilitator
+        or (is_placement_creator and (placement_creator_unrestricted or has_college_progress))
+        or (is_program_creator and (program_creator_unrestricted or has_college_progress))
+        or (is_team_member and has_college_progress)
+    )
+
+    # 3. College Scoping:
+    # Leads and Creators have unrestricted cross-college access (None).
+    # Senior Facilitators are restricted to assigned colleges if provided; otherwise unrestricted (None).
+    # Junior Facilitators are strictly restricted to assigned colleges.
+    if is_placement_lead or is_program_lead or is_placement_creator or is_program_creator:
         colleges = None
+    elif is_sr_facilitator:
+        colleges = sr_colleges if sr_colleges else None
     elif is_junior_facilitator:
         colleges = junior_colleges if junior_colleges else []
     else:
         colleges = None
 
     is_team_lead = bool(
-        is_placement_creator
-        or (is_program_creator_or_sr and token_role in LEAD_ROLES)
-        or token_role in LEAD_ROLES
+        is_placement_lead
+        or is_program_lead
+        or (legacy_display_fallback and token_role in LEAD_ROLES)
         or any(
-            normalize_role(getattr(item[0] if isinstance(item, (tuple, list)) or hasattr(item, "__getitem__") else item, "access_role", "")) in LEAD_ROLES
+            normalize_role(
+                getattr(
+                    (
+                        item[0]
+                        if isinstance(item, (tuple, list))
+                        or hasattr(item, "__getitem__")
+                        else item
+                    ),
+                    "access_role",
+                    "",
+                )
+            )
+            in LEAD_ROLES
             for item in memberships
         )
     )
+
+    # Per-person feature operations set by an administrator sit on top of the role/tag
+    # capabilities above: NULL keeps role authorization, a dict is authoritative (a feature
+    # that is not listed is revoked, interview authoring may be granted to any member).
+    policy = getattr(user, "feature_permissions", None)
+    if isinstance(policy, dict) and memberships:
+        from src.services.feature_access import permits
+
+        can_create_roles = permits(policy, "interview_authoring", "create")
+        can_edit = permits(policy, "interview_authoring", "update")
+        can_access_ats = can_access_ats and permits(policy, "bulk_ats", "read")
+        can_access_interviews = permits(policy, "interview_authoring", "read")
+        can_access_practice_interview = can_access_practice_interview and can_access_interviews
+        is_view_only = not (can_edit or can_create_roles)
 
     return {
         "can_create_roles": can_create_roles,
@@ -240,6 +498,11 @@ def calculate_user_permissions(
         "is_view_only": is_view_only,
         "colleges": colleges,
         "is_team_lead": is_team_lead,
+        "can_access_dashboard": can_access_dashboard,
+        "can_access_students": can_access_students,
+        "can_access_colleges": can_access_colleges,
+        "can_access_interviews": can_access_interviews,
+        "can_access_practice_interview": can_access_practice_interview,
     }
 
 
@@ -255,6 +518,7 @@ async def get_user_active_memberships(
     from sqlalchemy import select
     from src.models.db.team import Team
     from src.models.db.team_member import TeamMember
+
     try:
         stmt = (
             select(TeamMember, Team)
@@ -274,7 +538,7 @@ async def get_user_active_memberships(
 
 async def get_current_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
-    session = fastapi.Depends(get_async_session),
+    session=fastapi.Depends(get_async_session),
 ) -> User:
     """Require an authenticated user authorised for cross-student data.
     Allows:
@@ -295,7 +559,9 @@ async def get_current_admin_user(
         )
 
     # Fallback only when session is None (e.g. lightweight tests)
-    role_from_token = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    role_from_token = normalize_role(
+        getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")
+    )
     if role_from_token in STAFF_ROLES:
         return current_user
 
@@ -307,7 +573,7 @@ async def get_current_admin_user(
 
 async def get_current_creator_user(
     current_user: User = fastapi.Depends(get_current_user),
-    session = fastapi.Depends(get_async_session),
+    session=fastapi.Depends(get_async_session),
 ) -> User:
     """Require user to have Creator Portal permissions.
     - Super Admins, Global Admins, Leads, Creators, and Sr Facilitators have full access.
@@ -319,13 +585,26 @@ async def get_current_creator_user(
     if session is not None:
         memberships = await get_user_active_memberships(current_user.id, session)
         if memberships:
+            policy = getattr(current_user, "feature_permissions", None)
+            if isinstance(policy, dict):
+                from src.services.feature_access import permits
+                if permits(policy, "interview_authoring", "read"):
+                    return current_user
+                raise fastapi.HTTPException(403, "Interview authoring access is not assigned.")
             perms = calculate_user_permissions(current_user, memberships)
             if perms["can_create_roles"]:
                 return current_user
             roles = {
                 normalize_role(
                     getattr(
-                        item[0] if isinstance(item, (tuple, list)) else item,
+                        (
+                            item[0]
+                            if (
+                                isinstance(item, (tuple, list))
+                                or hasattr(item, "__getitem__")
+                            )
+                            else item
+                        ),
                         "access_role",
                         "",
                     )
@@ -342,34 +621,14 @@ async def get_current_creator_user(
                     status_code=fastapi.status.HTTP_403_FORBIDDEN,
                     detail="Team members have view-only access and do not have permission to access the Creator Portal or modify interview roles.",
                 )
-        else:
-            # Check if this user had team memberships that are no longer active (revoked / deleted)
-            from sqlalchemy import select
-            from src.models.db.team_member import TeamMember
-            try:
-                stmt_any = select(TeamMember.id).where(TeamMember.user_id == current_user.id).limit(1)
-                res_any = await session.execute(stmt_any)
-                has_records = False
-                if hasattr(res_any, "scalars") and callable(res_any.scalars):
-                    s_res = res_any.scalars().all()
-                    if isinstance(s_res, list) and s_res:
-                        has_records = True
-                elif hasattr(res_any, "all") and callable(res_any.all):
-                    a_res = res_any.all()
-                    if isinstance(a_res, list) and a_res:
-                        has_records = True
-                if has_records:
-                    raise fastapi.HTTPException(
-                        status_code=fastapi.status.HTTP_403_FORBIDDEN,
-                        detail="Creator Portal access required. Your team membership is no longer active.",
-                    )
-            except fastapi.HTTPException:
-                raise
-            except Exception:
-                pass
+        raise fastapi.HTTPException(
+            403, "Creator Portal access required. An active product membership with creator access is required."
+        )
 
     # Fallback to token claims (for SSO users without team records)
-    role_from_token = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    role_from_token = normalize_role(
+        getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")
+    )
     if role_from_token in CREATOR_ROLES:
         return current_user
     if role_from_token in JUNIOR_ROLES:
@@ -386,6 +645,45 @@ async def get_current_creator_user(
     raise fastapi.HTTPException(
         status_code=fastapi.status.HTTP_403_FORBIDDEN,
         detail="Creator Portal access required. Only Senior Facilitators, Creators, and Administrators can create or modify interview roles.",
+    )
+
+
+async def get_current_interview_viewer_user(
+    current_user: User = fastapi.Depends(get_current_user),
+    session=fastapi.Depends(get_async_session),
+) -> User:
+    """Require user to have interview portal view permissions.
+    - Super Admins and Global Admins always have view access.
+    - Active members are decided by their memberships, purpose tags and any per-person
+      feature policy (Leads, Creators and Facilitators by default; plain Team Members only
+      with an interview/batch tag).
+    - A role label in the token never overrides a membership decision; it is only consulted
+      for identities that have no membership record at all and no verified token source.
+    """
+    if is_admin_user(current_user):
+        return current_user
+
+    if session is not None:
+        memberships = await get_user_active_memberships(current_user.id, session)
+        if memberships:
+            perms = calculate_user_permissions(current_user, memberships)
+            if perms.get("can_access_interviews", False):
+                return current_user
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to view the interview portal.",
+            )
+
+    if getattr(current_user, "_token_source", None) is None:
+        role_from_token = normalize_role(
+            getattr(current_user, "_token_role", "") or getattr(current_user, "role", "")
+        )
+        if role_from_token in CREATOR_ROLES or role_from_token in JUNIOR_ROLES:
+            return current_user
+
+    raise fastapi.HTTPException(
+        status_code=fastapi.status.HTTP_403_FORBIDDEN,
+        detail="You do not have permission to view the interview portal.",
     )
 
 
@@ -407,7 +705,9 @@ async def get_user_allowed_colleges(
 
     memberships = await get_user_active_memberships(user.id, session)
     if not memberships:
-        token_role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
+        token_role = normalize_role(
+            getattr(user, "_token_role", "") or getattr(user, "role", "")
+        )
         if token_role in UNRESTRICTED_COLLEGE_ROLES:
             return None
         return set()
@@ -439,7 +739,15 @@ async def verify_college_access(
         )
 
 
-_BULK_ATS_ROLES = {"recruiter", "placement staff", "placement_staff", "admin", "super admin", "super_admin"}
+_BULK_ATS_ROLES = {
+    "recruiter",
+    "placement staff",
+    "partnership staff",
+    "placement_staff",
+    "admin",
+    "super admin",
+    "super_admin",
+}
 
 
 def is_bulk_ats_user(user: User) -> bool:
@@ -458,17 +766,19 @@ def is_bulk_ats_user(user: User) -> bool:
 
 async def get_current_bulk_ats_user(
     current_user: User = fastapi.Depends(get_current_user),
-    session = fastapi.Depends(get_async_session),
+    session=fastapi.Depends(get_async_session),
 ) -> User:
     """Require an authenticated recruiter/placement_staff/admin user or
     a Creator/Lead in the Placement or Partnerships team.
 
     - Super Admins, Global Admins, and users with recruiter/placement_staff roles have full access.
     - Creators / Leads in the Placement / Partnerships team have full access to Bulk ATS.
-    - Regular Team Members (in Placement or Program team) are rejected with 403 Forbidden.
+    - Members of the Placement or Program team have access (the access switch can still turn it off).
     - Students are rejected with 403 Forbidden.
     """
-    if is_bulk_ats_user(current_user):
+    if is_admin_user(current_user):
+        return current_user
+    if session is None and is_bulk_ats_user(current_user):
         return current_user
 
     if session is not None:
@@ -482,6 +792,8 @@ async def get_current_bulk_ats_user(
         status_code=fastapi.status.HTTP_403_FORBIDDEN,
         detail="Bulk ATS access is restricted to Placement/Partnership team creators, recruiters, and administrators. Regular team members do not have access.",
     )
+
+
 async def get_current_super_admin_user(
     current_user: User = fastapi.Depends(get_current_user),
 ) -> User:
@@ -521,7 +833,7 @@ async def check_team_permission(
         return False
 
     if require_lead:
-        role = (member.access_role or "").strip().lower()
+        role = normalize_role(member.access_role)
         return role in LEAD_ROLES
 
     return True

@@ -1,6 +1,6 @@
 import base64
 
-from jose import jwt as jose_jwt, JWTError as JoseJWTError
+from jose import jwt as jose_jwt, JWTError as JoseJWTError, ExpiredSignatureError
 
 from src.config.manager import settings
 
@@ -14,6 +14,10 @@ class SsoTokenError(Exception):
     """Raised when a Sampark Saathi auth-service access token fails to verify."""
 
 
+class SsoExpiredToken(SsoTokenError):
+    """Signature-verified JWT whose expiry has elapsed."""
+
+
 # Students are the product's primary users; ADMIN/SUPER_ADMIN operate the
 # console; CREATOR, FACILITATOR, LEAD, and staff roles operate the interview role
 # management, analytics, and team workflows.
@@ -22,7 +26,7 @@ DEFAULT_SSO_ALLOWED_ROLES = (
     "SR FACILITATOR,SR_FACILITATOR,SENIOR FACILITATOR,SENIOR_FACILITATOR,"
     "JR FACILITATOR,JR_FACILITATOR,JUNIOR FACILITATOR,JUNIOR_FACILITATOR,"
     "LEAD,STAFF,PROGRAM_MANAGER,PROGRAM MANAGER,PLACEMENT_COM,PLACEMENT COM,"
-    "RECRUITER,PLACEMENT_STAFF,PLACEMENT STAFF,TEAM_MEMBER,TEAM MEMBER,MEMBER"
+    "RECRUITER,PLACEMENT_STAFF,PLACEMENT STAFF,PARTNERSHIP_STAFF,PARTNERSHIP STAFF,TEAM_MEMBER,TEAM MEMBER,MEMBER"
 )
 
 
@@ -79,6 +83,8 @@ def decode_sso_access_token(token: str) -> dict:
     """
     try:
         claims = jose_jwt.decode(token=token, key=_SECRET_KEY_BYTES, algorithms=["HS256"])
+    except ExpiredSignatureError as token_decode_error:
+        raise SsoExpiredToken("Access token expired") from token_decode_error
     except JoseJWTError as token_decode_error:
         raise SsoTokenError("Unable to decode Sampark Saathi access token") from token_decode_error
 

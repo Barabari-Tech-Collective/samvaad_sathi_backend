@@ -1,3 +1,4 @@
+from src.services.staff_roles import unpack_membership
 import datetime
 import fastapi
 import pydantic
@@ -16,12 +17,15 @@ from src.api.dependencies.admin import (
 from src.api.dependencies.session import get_async_session
 from src.api.dependencies.rate_limit import anonymous_rate_limiter
 from src.config.manager import settings
+from src.models.db.user import User
 from src.models.db.user_resume import UserResume
 from src.models.schemas.user import (
     UserCreate,
     UserLogin,
     UserInResponse,
     UserWithToken,
+    SessionUserProfile,
+    SessionUserResponse,
     UserProfileUpdate,
     UserProfileOut,
 )
@@ -99,6 +103,104 @@ async def register_user(
     )
 
 
+def _extract_primary_membership_and_claims(user: User, memberships: list) -> dict:
+    """Extract primary team membership details, calculate permissions, and build JWT claims.
+
+    Handles multi-team setups deterministically by extracting the primary membership
+    from memberships[0], while aggregating cross-team permissions via calculate_user_permissions.
+    Safely unpacks SQLAlchemy Row objects, tuples, or scalar TeamMember records.
+    """
+    first_item = memberships[0] if memberships else None
+    member = None
+    primary_team = None
+    if first_item is not None:
+        if isinstance(first_item, (tuple, list)) or hasattr(first_item, "__getitem__"):
+            try:
+                member = first_item[0]
+                primary_team = first_item[1] if len(first_item) > 1 else None
+            except Exception:
+                member = first_item
+                primary_team = getattr(member, "team", None)
+        else:
+            member = first_item
+            primary_team = getattr(member, "team", None)
+
+    perms = calculate_user_permissions(user, memberships)
+    access_role = getattr(member, "access_role", None) if member else None
+    colleges = perms["colleges"]
+    domain = getattr(member, "domain", None) if member else None
+    purposes = getattr(member, "purposes", None) if member and isinstance(getattr(member, "purposes", None), list) else None
+    is_admin_flag = is_admin_user(user)
+    is_super_admin_flag = is_super_admin_user(user)
+    can_access_ats = perms["can_access_ats"]
+    can_create_roles = perms["can_create_roles"]
+    can_edit = perms["can_edit"]
+    is_view_only = perms["is_view_only"]
+    is_team_lead = perms["is_team_lead"]
+    effective_role = access_role or getattr(user, "_token_role", None) or getattr(user, "role", None)
+
+    can_access_dashboard = perms.get("can_access_dashboard", False)
+    can_access_students = perms.get("can_access_students", False)
+    can_access_colleges = perms.get("can_access_colleges", False)
+    can_access_interviews = perms.get("can_access_interviews", False)
+    can_access_practice_interview = perms.get("can_access_practice_interview", False)
+    # Staff holding an explicit course assignment work in the course workspace; the dashboards
+    # built on legacy, course-blind analytics are not offered to them.
+    from src.services.course_access import membership_grants
+    course_limited = (not is_admin_flag) and bool(membership_grants(memberships))
+
+    role_claim = (
+        "SUPER_ADMIN" if is_super_admin_flag
+        else ("ADMIN" if is_admin_flag
+        else (str(effective_role).upper() if effective_role else "STUDENT"))
+    )
+
+    extra_claims = {
+        "role": "STAFF" if memberships and not is_admin_flag else role_claim,
+        "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else ""),
+    }
+
+    team_name = getattr(primary_team, "name", None) if primary_team else None
+    if is_super_admin_flag:
+        display_role = "super admin"
+        display_access_role = access_role or "super admin"
+    elif is_admin_flag:
+        display_role = "admin"
+        display_access_role = access_role or "admin"
+    else:
+        display_role = access_role or getattr(user, "role", None) or (str(effective_role).lower() if effective_role else "student")
+        display_access_role = access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None)
+
+    return {
+        "member": member,
+        "primary_team": primary_team,
+        "perms": perms,
+        "access_role": display_access_role,
+        "role": display_role,
+        "colleges": colleges,
+        "domain": domain,
+        "purposes": purposes,
+        "is_admin": is_admin_flag,
+        "is_super_admin": is_super_admin_flag,
+        "can_access_ats": can_access_ats,
+        "can_create_roles": can_create_roles,
+        "can_edit": can_edit,
+        "is_view_only": is_view_only,
+        "is_team_lead": is_team_lead,
+        "can_access_dashboard": can_access_dashboard,
+        "can_access_students": can_access_students,
+        "can_access_colleges": can_access_colleges,
+        "can_access_interviews": can_access_interviews,
+        "can_access_practice_interview": can_access_practice_interview,
+        "course_limited": course_limited,
+        "effective_role": effective_role,
+        "role_claim": role_claim,
+        "extra_claims": extra_claims,
+        "team_name": team_name,
+        "membership_roles": sorted({str(getattr(unpack_membership(item)[0], "access_role", "")) for item in memberships}),
+    }
+
+
 @router.post(
     path="/login",
     name="users:login",
@@ -130,35 +232,11 @@ async def login_user(
     user_is_onboarded = user.is_onboarded if hasattr(user, "is_onboarded") else False
 
     memberships = await get_user_active_memberships(user.id, session)
-    first_item = memberships[0] if memberships else None
-    if isinstance(first_item, (tuple, list)):
-        member = first_item[0]
-        primary_team = first_item[1] if len(first_item) > 1 else None
-    else:
-        member = first_item
-        primary_team = getattr(member, "team", None) if member else None
+    claims_data = _extract_primary_membership_and_claims(user, memberships)
 
-    perms = calculate_user_permissions(user, memberships)
-    access_role = member.access_role if member else None
-    colleges = perms["colleges"]
-    domain = member.domain if member else None
-    purposes = member.purposes if member and isinstance(member.purposes, list) else None
-    is_admin_flag = is_admin_user(user)
-    can_access_ats = perms["can_access_ats"]
-    can_create_roles = perms["can_create_roles"]
-    can_edit = perms["can_edit"]
-    is_view_only = perms["is_view_only"]
-    is_team_lead = perms["is_team_lead"]
-    effective_role = access_role or getattr(user, "_token_role", None) or getattr(user, "role", None)
-
-    role_claim = (
-        "SUPER_ADMIN" if is_super_admin_user(user)
-        else ("ADMIN" if is_admin_flag
-        else (str(effective_role).upper() if effective_role else "STUDENT"))
-    )
     token = jwt_generator.generate_access_token_for_user(
         user=user,
-        extra_claims={"role": role_claim, "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else "")}
+        extra_claims=claims_data["extra_claims"],
     )
     refresh = await session_repo.create_session(user_id=user_id, expiry_minutes=settings.REFRESH_TOKEN_EXPIRY_MINUTES)
 
@@ -171,19 +249,26 @@ async def login_user(
             name=user_name,
             created_at=user_created_at,
             is_onboarded=user_is_onboarded,
-            is_admin=is_admin_flag,
-            is_super_admin=is_super_admin_user(user),
-            access_role=access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None),
-            role=access_role or getattr(user, "role", None) or (str(effective_role).lower() if effective_role else "student"),
-            is_team_lead=is_team_lead,
-            colleges=colleges,
-            domain=domain,
-            purposes=purposes,
-            can_create_roles=can_create_roles,
-            can_access_ats=can_access_ats,
-            can_edit=can_edit,
-            is_view_only=is_view_only,
-            team_name=primary_team.name if primary_team else None,
+            is_admin=claims_data["is_admin"],
+            is_super_admin=claims_data["is_super_admin"],
+            access_role=claims_data["access_role"],
+            role=claims_data["role"],
+            is_team_lead=claims_data["is_team_lead"],
+            colleges=claims_data["colleges"],
+            domain=claims_data["domain"],
+            purposes=claims_data["purposes"],
+            can_create_roles=claims_data["can_create_roles"],
+            can_access_ats=claims_data["can_access_ats"],
+            can_edit=claims_data["can_edit"],
+            is_view_only=claims_data["is_view_only"],
+            can_access_dashboard=claims_data.get("can_access_dashboard", False),
+            can_access_students=claims_data.get("can_access_students", False),
+            can_access_colleges=claims_data.get("can_access_colleges", False),
+            can_access_interviews=claims_data.get("can_access_interviews", False),
+            can_access_practice_interview=claims_data.get("can_access_practice_interview", False),
+            course_limited=claims_data.get("course_limited", False),
+            team_name=claims_data["team_name"],
+            membership_roles=claims_data["membership_roles"],
             can_use_bulk_ats=is_bulk_ats_user(user),
             degree=None,
             university=None,
@@ -258,6 +343,13 @@ async def get_me(
     summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
     session=fastapi.Depends(get_async_session),
 ) -> UserInResponse:
+    profile, _claims = await build_user_profile(current_user, summary_repo, session)
+    return UserInResponse(user_id=current_user.id,
+        authorized_user=UserWithToken(**profile.model_dump(), token=None, refresh_token=None))
+
+
+async def build_user_profile(current_user, summary_repo, session):
+    # Shared profile assembly contains no credential issuance.
     # Get total interview attempts count
     total_attempts = await summary_repo.count_by_user(user_id=current_user.id)
 
@@ -284,64 +376,34 @@ async def get_me(
         if onboarding_resume_filename and ats_resume_filename:
             break
 
-    is_admin_flag = is_admin_user(current_user)
-
     memberships = await get_user_active_memberships(current_user.id, session)
-    first_item = memberships[0] if memberships else None
-    if isinstance(first_item, (tuple, list)):
-        member = first_item[0]
-        primary_team = first_item[1] if len(first_item) > 1 else None
-    else:
-        member = first_item
-        primary_team = getattr(member, "team", None) if member else None
+    claims_data = _extract_primary_membership_and_claims(current_user, memberships)
 
-    perms = calculate_user_permissions(current_user, memberships)
-    access_role = member.access_role if member else None
-    colleges = perms["colleges"]
-    domain = member.domain if member else None
-    purposes = member.purposes if member and isinstance(member.purposes, list) else None
-    can_access_ats = perms["can_access_ats"]
-    can_create_roles = perms["can_create_roles"]
-    can_edit = perms["can_edit"]
-    is_view_only = perms["is_view_only"]
-    is_team_lead = perms["is_team_lead"]
-    effective_role = access_role or getattr(current_user, "_token_role", None) or getattr(current_user, "role", None)
-
-    role_claim = (
-        "SUPER_ADMIN" if is_super_admin_user(current_user)
-        else ("ADMIN" if is_admin_flag
-        else (str(effective_role).upper() if effective_role else "STUDENT"))
-    )
-    token = jwt_generator.generate_access_token_for_user(
-        user=current_user,
-        extra_claims={
-            "role": role_claim,
-            "access_role": access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else ""),
-        },
-    )
-
-    return UserInResponse(
-        user_id=current_user.id,
-        authorized_user=UserWithToken(
-            token=token,
-            refresh_token=None,
+    profile = SessionUserProfile(
             email=current_user.email,
             name=current_user.name,
             created_at=current_user.created_at,
             is_onboarded=getattr(current_user, 'is_onboarded', False),
-            is_admin=is_admin_flag,
-            is_super_admin=is_super_admin_user(current_user),
-            access_role=access_role or (str(effective_role).lower() if effective_role and str(effective_role).lower() != "student" else None),
-            role=access_role or getattr(current_user, "role", None) or (str(effective_role).lower() if effective_role else "student"),
-            is_team_lead=is_team_lead,
-            colleges=colleges,
-            domain=domain,
-            purposes=purposes,
-            can_create_roles=can_create_roles,
-            can_access_ats=can_access_ats,
-            can_edit=can_edit,
-            is_view_only=is_view_only,
-            team_name=primary_team.name if primary_team else None,
+            is_admin=claims_data["is_admin"],
+            is_super_admin=claims_data["is_super_admin"],
+            access_role=claims_data["access_role"],
+            role=claims_data["role"],
+            is_team_lead=claims_data["is_team_lead"],
+            colleges=claims_data["colleges"],
+            domain=claims_data["domain"],
+            purposes=claims_data["purposes"],
+            can_create_roles=claims_data["can_create_roles"],
+            can_access_ats=claims_data["can_access_ats"],
+            can_edit=claims_data["can_edit"],
+            is_view_only=claims_data["is_view_only"],
+            can_access_dashboard=claims_data.get("can_access_dashboard", False),
+            can_access_students=claims_data.get("can_access_students", False),
+            can_access_colleges=claims_data.get("can_access_colleges", False),
+            can_access_interviews=claims_data.get("can_access_interviews", False),
+            can_access_practice_interview=claims_data.get("can_access_practice_interview", False),
+            course_limited=claims_data.get("course_limited", False),
+            team_name=claims_data["team_name"],
+            membership_roles=claims_data["membership_roles"],
             can_use_bulk_ats=is_bulk_ats_user(current_user),
             degree=current_user.degree,
             university=current_user.university,
@@ -355,8 +417,39 @@ async def get_me(
             ats_resume_id=ats_resume_id,
             skills=current_user.skills.get("items", []) if isinstance(getattr(current_user, "skills", None), dict) else [],
             company=current_user.company,
-        ),
     )
+    return profile, claims_data
+
+
+from src.api.dependencies.product_session import get_session_user
+from src.api.routes.product_session import SessionRoute
+
+session_profile_router = fastapi.APIRouter(route_class=SessionRoute)
+
+
+@session_profile_router.get("/auth/profile", response_model=SessionUserResponse)
+async def get_credential_free_profile(
+    current_user=fastapi.Depends(get_current_user),
+    summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
+    session=fastapi.Depends(get_async_session),
+):
+    # Server-session BFFs authenticate with their server-held central bearer.
+    # Profile reads must never mint an unrelated legacy product credential.
+    profile, _ = await build_user_profile(current_user, summary_repo, session)
+    return SessionUserResponse(user_id=current_user.id, authorized_user=profile)
+
+
+@session_profile_router.get("/auth/session/me", response_model=SessionUserResponse)
+async def get_session_me(
+    current_user=fastapi.Depends(get_session_user),
+    summary_repo: SummaryReportCRUDRepository = fastapi.Depends(get_repository(repo_type=SummaryReportCRUDRepository)),
+    session=fastapi.Depends(get_async_session),
+):
+    profile, _ = await build_user_profile(current_user, summary_repo, session)
+    return SessionUserResponse(user_id=current_user.id, authorized_user=profile)
+
+
+router.include_router(session_profile_router)
 
 @router.put(
     path="/users/profile",
@@ -413,3 +506,23 @@ async def update_profile(
     )
 
 
+
+
+@router.post("/auth/upload-grant")
+async def create_upload_grant(
+    request: fastapi.Request,
+    payload: dict,
+    current_user=fastapi.Depends(get_current_user),
+):
+    from src.services.upload_grant import issue
+    from src.securities.authorizations.sso_jwt import decode_sso_access_token, SsoTokenError
+    bearer = request.headers.get("authorization", "")
+    token = bearer[7:] if bearer.startswith("Bearer ") else ""
+    try:
+        claims = decode_sso_access_token(token)
+    except SsoTokenError:
+        raise fastapi.HTTPException(403, "Central authentication required.") from None
+    if claims.get("role") == "STUDENT":
+        raise fastapi.HTTPException(403, "Staff upload access required.")
+    grant = await issue(token, payload.get("path"), payload.get("method"))
+    return fastapi.responses.JSONResponse({"grant": grant, "expires_in": 60}, headers={"Cache-Control":"no-store"})

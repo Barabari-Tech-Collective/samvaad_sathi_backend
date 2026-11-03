@@ -1,9 +1,14 @@
 import json
 import fastapi
+from src.api.dependencies.rate_limit import student_action_limit
+from src.services.interview_course_access import require_interview_course_access
+from src.services.interview_question_plan import planned_count, snapshotted_questions
 import logging
 import re
 from typing import Any
 from fastapi import Form, UploadFile, File
+import sqlalchemy as sa
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.api.dependencies.auth import get_current_user
@@ -37,7 +42,10 @@ from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.repository.crud.job_profile import JobProfileCRUDRepository
-from src.repository.crud.pronunciation_practice import PronunciationPracticeCRUDRepository
+from src.repository.crud.pronunciation_practice import (
+    PronunciationPracticeCRUDRepository,
+)
+from src.models.db.pronunciation_practice import PronunciationPractice
 from src.repository.crud.structure_practice import (
     StructurePracticeCRUDRepository,
     StructurePracticeAnswerCRUDRepository,
@@ -50,9 +58,14 @@ from src.services.interview_eligibility import (
     unavailable_reason,
 )
 from src.services.llm import generate_interview_questions_with_llm
-from src.services.question_snapshot import lock_question_generation, question_items_from_persisted
+from src.services.question_snapshot import (
+    lock_question_generation,
+    question_items_from_persisted,
+)
 from src.services.static_questions import get_static_questions
-from src.services.full_stack_interview_questions import generate_full_stack_questions_with_llm
+from src.services.full_stack_interview_questions import (
+    generate_full_stack_questions_with_llm,
+)
 from src.services.syllabus_service import syllabus_service
 from src.services.question_supplements import (
     QuestionSupplementService,
@@ -62,7 +75,11 @@ from src.services.structure_hints import generate_structure_hints_for_questions
 from src.config.manager import settings
 from src.services.pronunciation_tts import generate_pronunciation_audio
 from src.services.structure_analysis import analyze_structure_answer
-from src.services.audio_processor import validate_audio_file, save_audio_file, cleanup_temp_audio_file
+from src.services.audio_processor import (
+    validate_audio_file,
+    save_audio_file,
+    cleanup_temp_audio_file,
+)
 from src.services.progressive_hints import (
     detect_framework,
     get_framework_sections,
@@ -75,10 +92,20 @@ from src.services.non_tech_blueprint import (
     NON_TECH_FIXED_DIFFICULTY,
     select_non_tech_interview_questions,
 )
-from src.services.whisper import transcribe_audio_with_whisper, validate_transcription_language
+from src.services.whisper import (
+    transcribe_audio_with_whisper,
+    validate_transcription_language,
+)
 from src.services.analytics_events import track_analytics_event
+from src.services.practice_feature_controls import require_practice_feature
 
 logger = logging.getLogger(__name__)
+
+
+class PronunciationProgress(BaseModel):
+    word_index: int = Field(ge=0, le=99)
+
+
 FOLLOW_UP_STRATEGY = "llm_transcription_based"
 FULL_STACK_ROLE = "Full Stack Developer"
 #: Questions served from a facilitator's published bank per curated interview.
@@ -88,6 +115,8 @@ CURATED_QUESTION_COUNT = 5
 # Applies to every track - tech and non-tech alike, per product decision.
 MAX_FOLLOW_UP_ELIGIBLE_QUESTIONS = 2
 
+
+from src.services import assessment_assignments  # noqa: E402
 
 router = fastapi.APIRouter(prefix="/v2", tags=["interviews-v2"])
 
@@ -128,36 +157,44 @@ async def _background_generate_and_upload_tts(questions_to_process: list[dict]):
     import logging
     from src.repository.database import async_db
     from src.repository.crud.job_profile import JobProfileCRUDRepository
-    
+
     logger = logging.getLogger(__name__)
-    
+
     try:
         loop = asyncio.get_event_loop()
         needs_db = any(q.get("job_profile_question_id") for q in questions_to_process)
-        
+
         async def process_questions(session=None):
             repo = JobProfileCRUDRepository(session) if session else None
             for q_data in questions_to_process:
                 text = q_data.get("text", "")
                 if not text:
                     continue
-                    
+
                 h_id = int(q_data.get("h_id", 0))
                 audio_bytes, error, _ = await generate_tts_audio(text=text)
                 if audio_bytes and not error:
-                    public_url = await loop.run_in_executor(None, upload_audio_to_s3, audio_bytes, h_id)
+                    public_url = await loop.run_in_executor(
+                        None, upload_audio_to_s3, audio_bytes, h_id
+                    )
                     if public_url and repo and q_data.get("job_profile_question_id"):
-                        q_obj = await repo.get_question_by_id(q_data["job_profile_question_id"])
+                        q_obj = await repo.get_question_by_id(
+                            q_data["job_profile_question_id"]
+                        )
                         if q_obj:
-                            await repo.update_job_profile_question(q_obj, {"audio_url": public_url})
-                            logger.info(f"Updated job_profile_question {q_obj.id} with audio URL {public_url}")
-                            
+                            await repo.update_job_profile_question(
+                                q_obj, {"audio_url": public_url}
+                            )
+                            logger.info(
+                                f"Updated job_profile_question {q_obj.id} with audio URL {public_url}"
+                            )
+
         if needs_db:
             async with async_db.get_session() as session:
                 await process_questions(session)
         else:
             await process_questions(None)
-            
+
     except Exception as e:
         logger = logging.getLogger(__name__)
         logger.error(f"Failed background TTS generation: {e}")
@@ -178,12 +215,7 @@ def _prepare_audio_for_questions(questions: list[dict]) -> list[dict]:
         return []
 
     import hashlib
-    from decouple import config
-
-    from src.services.s3_service import tts_audio_s3_key
-
-    bucket = config("AWS_S3_BUCKET_NAME", default="barabari-edtech-service-staging")
-    region = config("AWS_REGION", default="ap-south-1")
+    from src.services.s3_service import tts_audio_public_url
 
     questions_to_process = []
 
@@ -193,8 +225,9 @@ def _prepare_audio_for_questions(questions: list[dict]) -> list[dict]:
             continue
 
         h_id = int(hashlib.md5(text.encode()).hexdigest()[:12], 16)
-        s3_file_path = tts_audio_s3_key(h_id)
-        public_url = f"https://{bucket}.s3.{region}.amazonaws.com/{s3_file_path}"
+        public_url = tts_audio_public_url(h_id)
+        if public_url is None:
+            continue
 
         if q_data.get("audio_url") == public_url:
             continue
@@ -222,7 +255,7 @@ def _get_cached_structure_practice_response() -> StructurePracticeQuestionsRespo
             parent_question_id=None,
             follow_up_strategy=None,
             supplement=None,
-            structure_hint="Use C-T-E-T-D: explain the context of scope in JS, define closure theory, show a practical example, discuss trade-offs like memory considerations, and conclude with when to use closures."
+            structure_hint="Use C-T-E-T-D: explain the context of scope in JS, define closure theory, show a practical example, discuss trade-offs like memory considerations, and conclude with when to use closures.",
         ),
         QuestionItemWithHint(
             interview_question_id=0,
@@ -234,7 +267,7 @@ def _get_cached_structure_practice_response() -> StructurePracticeQuestionsRespo
             parent_question_id=None,
             follow_up_strategy=None,
             supplement=None,
-            structure_hint="Apply C-T-E-T-D: set context on variable scoping, explain the theory behind each keyword, provide examples of their differences, discuss trade-offs like hoisting and mutability, and decide when to use each."
+            structure_hint="Apply C-T-E-T-D: set context on variable scoping, explain the theory behind each keyword, provide examples of their differences, discuss trade-offs like hoisting and mutability, and decide when to use each.",
         ),
         QuestionItemWithHint(
             interview_question_id=0,
@@ -246,7 +279,7 @@ def _get_cached_structure_practice_response() -> StructurePracticeQuestionsRespo
             parent_question_id=None,
             follow_up_strategy=None,
             supplement=None,
-            structure_hint="Use STAR: describe the Situation (slow application), specify your Task (optimize performance), detail your Actions (profiling, identifying bottlenecks, implementing fixes), and summarize the Result (measurable improvements)."
+            structure_hint="Use STAR: describe the Situation (slow application), specify your Task (optimize performance), detail your Actions (profiling, identifying bottlenecks, implementing fixes), and summarize the Result (measurable improvements).",
         ),
         QuestionItemWithHint(
             interview_question_id=0,
@@ -258,7 +291,7 @@ def _get_cached_structure_practice_response() -> StructurePracticeQuestionsRespo
             parent_question_id=None,
             follow_up_strategy=None,
             supplement=None,
-            structure_hint="Follow C-T-E-T-D: provide context on async programming in Node.js, explain event loop theory and its phases, give an example of callback execution order, discuss trade-offs of blocking operations, and conclude on best practices."
+            structure_hint="Follow C-T-E-T-D: provide context on async programming in Node.js, explain event loop theory and its phases, give an example of callback execution order, discuss trade-offs of blocking operations, and conclude on best practices.",
         ),
         QuestionItemWithHint(
             interview_question_id=0,
@@ -270,10 +303,10 @@ def _get_cached_structure_practice_response() -> StructurePracticeQuestionsRespo
             parent_question_id=None,
             follow_up_strategy=None,
             supplement=None,
-            structure_hint="Use STAR: describe the Situation (new technology requirement), your Task (learn and apply it), your Actions (learning strategy, resources used, practice), and the Result (successful implementation, lessons learned)."
+            structure_hint="Use STAR: describe the Situation (new technology requirement), your Task (learn and apply it), your Actions (learning strategy, resources used, practice), and the Result (successful implementation, lessons learned).",
         ),
     ]
-    
+
     return StructurePracticeQuestionsResponse(
         interview_id=None,
         track="Software Development",
@@ -298,9 +331,15 @@ def _get_cached_structure_practice_response() -> StructurePracticeQuestionsRespo
 async def create_or_resume_interview_v2(
     payload: InterviewCreate,
     current_user=fastapi.Depends(get_current_user),
-    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> InterviewInResponse:
+    if payload.course_id is not None and payload.course_id not in (getattr(current_user, "enrolled_course_ids", None) or []):
+        raise fastapi.HTTPException(403, "Current enrollment in this course is required.")
     difficulty = (payload.difficulty or "medium").lower()
     # Refuse rather than coerce. This used to silently fall back to medium, so a
     # typo started a different interview than the student asked for - and on a
@@ -311,6 +350,8 @@ async def create_or_resume_interview_v2(
             detail=f"Unknown difficulty '{difficulty}'. Choose one of: {', '.join(DIFFICULTIES)}.",
         )
 
+    if payload.question_count is not None and payload.client_contract != "fixed-round-v1":
+        raise fastapi.HTTPException(409, "Refresh to the current app before starting a fixed-length practice round.")
     active = await interview_repo.get_active_by_user(user_id=current_user.id)
     # Difficulty is part of an interview's identity, not a detail of it. Without
     # it here, a student holding an active easy interview who started a medium
@@ -321,7 +362,12 @@ async def create_or_resume_interview_v2(
         and active.track == payload.track
         and active.job_profile_id == payload.job_profile_id
         and active.difficulty == difficulty
+        and getattr(active, "course_id", None) == payload.course_id
+        and (payload.question_count is None or planned_count(active) == payload.question_count)
     ):
+        await require_interview_course_access(getattr(interview_repo, "async_session", None), active)
+        if planned_count(active) is not None and payload.client_contract != "fixed-round-v1":
+            raise fastapi.HTTPException(409, "Refresh to the current app to resume this fixed-length round.")
         res = InterviewInResponse(
             interview_id=active.id,
             track=active.track,
@@ -330,46 +376,83 @@ async def create_or_resume_interview_v2(
             created_at=active.created_at,
             resumed=True,
             interview_mode=active.interview_mode,
+            planned_question_count=planned_count(active),
         )
 
         # Resumed Interview Response
         logger.info(
             "POST /interviews/create RESUMED RESPONSE | User=%s | Response=\n%s",
             current_user.id,
-            json.dumps(res.model_dump(), indent=2, default=str)
+            json.dumps(res.model_dump(), indent=2, default=str),
         )
 
         return res
 
-    if payload.track == FULL_STACK_ROLE and difficulty == "medium" and getattr(payload, "use_resume", True):
+    await require_practice_feature(interview_repo.async_session, "practice_new_starts")
+
+    if (
+        payload.job_profile_id is None
+        and payload.track == FULL_STACK_ROLE
+        and difficulty == "medium"
+        and getattr(payload, "use_resume", True)
+    ):
         resume_text = getattr(current_user, "resume_text", None)
         if not resume_text or not str(resume_text).strip():
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-                detail="Cannot use resume for interview: No resume is saved to your profile."
+                detail="Cannot use resume for interview: No resume is saved to your profile.",
             )
 
     if payload.job_profile_id is not None:
-        job_profile = await job_profile_repo.get_by_id(job_profile_id=payload.job_profile_id)
+        job_profile = await job_profile_repo.get_by_id(
+            job_profile_id=payload.job_profile_id
+        )
         if job_profile is None:
             raise fastapi.HTTPException(status_code=404, detail="Job profile not found")
 
         # A curated interview is an assessment against questions a facilitator
         # published for this level. If there are none, the honest answer is no -
         # not a set the LLM invented, which is what used to happen downstream.
+        if getattr(job_profile, "questions_per_interview", None) is not None and payload.client_contract != "fixed-round-v1":
+            raise fastapi.HTTPException(409, "Refresh to the current app before starting this fixed-length assessment.")
         refusal = unavailable_reason(job_profile, difficulty)
         if refusal is not None:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_409_CONFLICT, detail=refusal
             )
 
-    interview = await interview_repo.create_interview(user_id=current_user.id, track=payload.track, difficulty=difficulty, job_profile_id=payload.job_profile_id)
+    assignment = None
+    if payload.job_profile_id is not None and job_profile.interview_mode == "assessment":
+        assignment = await assessment_assignments.start_check(
+            interview_repo.async_session, current_user.id, job_profile, payload.course_id
+        )
+        if assignment is not None and assignment.difficulty != difficulty:
+            raise fastapi.HTTPException(
+                409, f"This assessment was assigned at the {assignment.difficulty} level."
+            )
+    interview = await interview_repo.create_interview(
+        user_id=current_user.id,
+        course_id=payload.course_id,
+        track=payload.track,
+        difficulty=difficulty,
+        job_profile_id=payload.job_profile_id,
+        question_count=payload.question_count,
+        fixed_length=payload.client_contract == "fixed-round-v1",
+    )
+    if assignment is not None and assignment.status == "assigned":
+        assignment.status, assignment.interview_id = "started", interview.id
+        assignment.version += 1
+        await interview_repo.async_session.commit()
     await track_analytics_event(
         interview_repo.async_session,
         event_type="interview_started",
         user_id=current_user.id,
         interview_id=interview.id,
-        event_data={"track": interview.track, "difficulty": interview.difficulty, "api": "interviews_v2.create"},
+        event_data={
+            "track": interview.track,
+            "difficulty": interview.difficulty,
+            "api": "interviews_v2.create",
+        },
     )
     await track_analytics_event(
         interview_repo.async_session,
@@ -386,6 +469,7 @@ async def create_or_resume_interview_v2(
         created_at=interview.created_at,
         resumed=False,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
     # =========================================================================
@@ -395,7 +479,7 @@ async def create_or_resume_interview_v2(
         "POST /interviews/create NEW RESPONSE | User=%s | Interview=%s | Response=\n%s",
         current_user.id,
         interview.id,
-        json.dumps(res.model_dump(), indent=2, default=str)
+        json.dumps(res.model_dump(), indent=2, default=str),
     )
 
     return res
@@ -403,6 +487,7 @@ async def create_or_resume_interview_v2(
 
 @router.post(
     path="/interviews/generate-questions",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews-v2:generate-questions",
     response_model=GeneratedQuestionsInResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -412,23 +497,45 @@ async def generate_questions_v2(
     payload: GenerateQuestionsRequest,
     background_tasks: fastapi.BackgroundTasks,
     current_user=fastapi.Depends(get_current_user),
-    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
-    question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewQuestionCRUDRepository)),
-    question_attempt_repo: QuestionAttemptCRUDRepository = fastapi.Depends(get_repository(repo_type=QuestionAttemptCRUDRepository)),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
+    question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewQuestionCRUDRepository)
+    ),
+    question_attempt_repo: QuestionAttemptCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=QuestionAttemptCRUDRepository)
+    ),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> GeneratedQuestionsInResponse:
-    supplement_service = QuestionSupplementService(async_session=question_repo.async_session)
+    await require_practice_feature(question_repo.async_session, "question_generation")
+    supplement_service = QuestionSupplementService(
+        async_session=question_repo.async_session
+    )
     interview = None
     if getattr(payload, "interview_id", None) is not None:
         interview = await interview_repo.get_by_id(interview_id=payload.interview_id)  # type: ignore[arg-type]
         if interview is None or interview.user_id != current_user.id:
-            raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_404_NOT_FOUND,
+                detail="Interview not found",
+            )
         if interview.status != "active":
-            raise fastapi.HTTPException(status_code=fastapi.status.HTTP_400_BAD_REQUEST, detail="Only active interviews can generate questions")
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="Only active interviews can generate questions",
+            )
     else:
         interview = await interview_repo.get_active_by_user(user_id=current_user.id)
         if interview is None:
-            raise fastapi.HTTPException(status_code=fastapi.status.HTTP_400_BAD_REQUEST, detail="No active interview to generate questions for")
+            raise fastapi.HTTPException(
+                status_code=fastapi.status.HTTP_400_BAD_REQUEST,
+                detail="No active interview to generate questions for",
+            )
+
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
 
     if interview.track and interview.track.startswith("Non-Tech:"):
         raise fastapi.HTTPException(
@@ -436,27 +543,53 @@ async def generate_questions_v2(
             detail="This endpoint does not support non-tech interview tracks. Use /v2/interviews/non-tech/generate-questions instead.",
         )
 
-    await lock_question_generation(question_repo.async_session, interview_id=interview.id)
+    await lock_question_generation(
+        question_repo.async_session, interview_id=interview.id
+    )
 
     existing = await question_repo.list_by_interview(interview_id=interview.id)
     persisted = existing
     cached = bool(existing)
 
     if not existing:
-        resume_context = getattr(current_user, "resume_text", None) if payload.use_resume else None
+        resume_context = (
+            getattr(current_user, "resume_text", None) if payload.use_resume else None
+        )
         years = getattr(current_user, "years_experience", None)
         skills_json = getattr(current_user, "skills", None) or {}
-        skills_list = list(skills_json.get("items", []) if isinstance(skills_json, dict) else [])
+        skills_list = list(
+            skills_json.get("items", []) if isinstance(skills_json, dict) else []
+        )
         has_resume = bool(resume_context)
         has_skills = bool(skills_list)
 
-        if interview.track == FULL_STACK_ROLE and interview.difficulty == "medium" and not has_resume:
+        if (
+            not getattr(interview, "job_profile_id", None)
+            and snapshotted_questions(interview) is None
+            and interview.track == FULL_STACK_ROLE
+            and interview.difficulty == "medium"
+            and not has_resume
+        ):
             qs = {
-                "questions": ["Before proceeding with a Medium level Full Stack Developer interview, please add your resume."],
+                "questions": [
+                    "Before proceeding with a Medium level Full Stack Developer interview, please add your resume."
+                ],
                 "llm_error": None,
                 "latency_ms": 0,
                 "llm_model": "static",
-                "items": [{"text": "Before proceeding with a Medium level Full Stack Developer interview, please add your resume.", "topic": "System", "category": "system", "isFollowUp": False, "parentQuestionId": None, "followUpStrategy": None, "supplement": None, "difficulty": interview.difficulty, "interviewQuestionId": 0}]
+                "items": [
+                    {
+                        "text": "Before proceeding with a Medium level Full Stack Developer interview, please add your resume.",
+                        "topic": "System",
+                        "category": "system",
+                        "isFollowUp": False,
+                        "parentQuestionId": None,
+                        "followUpStrategy": None,
+                        "supplement": None,
+                        "difficulty": interview.difficulty,
+                        "interviewQuestionId": 0,
+                    }
+                ],
             }
             res = GeneratedQuestionsInResponse(
                 interview_id=interview.id,
@@ -483,35 +616,47 @@ async def generate_questions_v2(
                 llm_latency_ms=qs.get("latency_ms"),
                 llm_error=qs.get("llm_error"),
                 interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
             )
 
             # Static Resume Warning Response
             logger.info(
                 "POST /interviews/generate-questions RESUME WARNING | Interview=%s | Response=\n%s",
                 interview.id,
-                json.dumps(res.model_dump(), indent=2, default=str)
+                json.dumps(res.model_dump(), indent=2, default=str),
             )
 
             return res
 
-        question_count = 7 if interview.track == FULL_STACK_ROLE else 5  # Base questions, leaves room for dynamic follow-ups
+        question_count = planned_count(interview) or (
+            7 if interview.track == FULL_STACK_ROLE else 5
+        )  # Base questions, leaves room for dynamic follow-ups
 
         questions = None
         llm_error = None
         latency_ms = 0
         llm_model = "static"
         items = None
-        
-        is_curated = bool(getattr(interview, "job_profile_id", None))
-        if is_curated:
-            admin_questions = await job_profile_repo.get_job_profile_questions(interview.job_profile_id)
+
+        frozen = snapshotted_questions(interview)
+        is_curated = bool(getattr(interview, "job_profile_id", None)) or frozen is not None
+        if frozen is not None:
+            questions = [q["text"] for q in frozen]
+            llm_model = "facilitator_published_snapshot_v1"
+            items = [{**q, "audioUrl": q.get("audio_url")} for q in frozen]
+        elif is_curated:
+            admin_questions = await job_profile_repo.get_job_profile_questions(
+                interview.job_profile_id
+            )
             # Different slice each retake, so a student resitting the same level
             # does not get the same opening five.
-            past_interview_count = await interview_repo.count_user_interviews_by_profile_and_difficulty(
-                user_id=current_user.id,
-                job_profile_id=interview.job_profile_id,
-                difficulty=interview.difficulty,
-                current_interview_id=interview.id
+            past_interview_count = (
+                await interview_repo.count_user_interviews_by_profile_and_difficulty(
+                    user_id=current_user.id,
+                    job_profile_id=interview.job_profile_id,
+                    difficulty=interview.difficulty,
+                    current_interview_id=interview.id,
+                )
             )
             selected = select_published_questions(
                 admin_questions,
@@ -559,12 +704,16 @@ async def generate_questions_v2(
         # Generation is for free practice only. An interview carrying a job
         # profile never reaches it - see the refusal above.
         if not questions:
-            questions, llm_error, latency_ms, llm_model, items = await generate_full_stack_questions_with_llm(
-                domain=interview.track,
-                years_experience=years,
-                difficulty=interview.difficulty,
-                count=question_count,
-                seed=f"{current_user.id}:{interview.id}"
+            questions, llm_error, latency_ms, llm_model, items = (
+                await generate_full_stack_questions_with_llm(
+                    domain=interview.track,
+                    years_experience=years,
+                    difficulty=interview.difficulty,
+                    count=question_count,
+                    seed=f"{current_user.id}:{interview.id}",
+                    interview_id=interview.id,
+                    idempotency_key=f"practice-question-generation:{interview.id}:v1",
+                )
             )
 
         if not questions:
@@ -584,19 +733,22 @@ async def generate_questions_v2(
                         "text": item.get("text", ""),
                         "topic": item.get("topic"),
                         "category": item.get("category"),
-                        "follow_up_strategy": item.get("followUpStrategy") or FOLLOW_UP_STRATEGY,
+                        "follow_up_strategy": item.get("followUpStrategy")
+                        or FOLLOW_UP_STRATEGY,
                         "audio_url": item.get("audioUrl"),
                         "job_profile_question_id": item.get("job_profile_question_id"),
                     }
                 )
         else:
             for question in questions:
-                questions_data.append({
-                    "text": question,
-                    "topic": None,
-                    "category": None,
-                    "follow_up_strategy": FOLLOW_UP_STRATEGY
-                })
+                questions_data.append(
+                    {
+                        "text": question,
+                        "topic": None,
+                        "category": None,
+                        "follow_up_strategy": FOLLOW_UP_STRATEGY,
+                    }
+                )
 
         _apply_follow_up_eligibility(questions_data)
 
@@ -609,7 +761,9 @@ async def generate_questions_v2(
         # guard for the day someone adds a fourth writer and forgets to lock:
         # discarding this request's generated text is always right, because the
         # rows already in the database are what every later read will return.
-        existing_again = await question_repo.list_by_interview(interview_id=interview.id)
+        existing_again = await question_repo.list_by_interview(
+            interview_id=interview.id
+        )
         if existing_again:
             logger.warning(
                 "Concurrent generation detected despite advisory lock | Interview=%s | "
@@ -636,7 +790,10 @@ async def generate_questions_v2(
             ensure_generate=True,
             track=interview.track,
         )
-        _validate_supplements_response(items=supplements_map, source="generate-questions")
+        supplements_map = _filter_valid_supplements(
+            items=supplements_map,
+            source="generate-questions",
+        )
         qs = {
             "questions": [q.text for q in persisted],
             "llm_error": llm_error,
@@ -659,7 +816,10 @@ async def generate_questions_v2(
             ensure_generate=True,
             track=interview.track,
         )
-        _validate_supplements_response(items=supplements_map, source="generate-questions-cached")
+        supplements_map = _filter_valid_supplements(
+            items=supplements_map,
+            source="generate-questions-cached",
+        )
         qs = {
             "questions": [q.text for q in existing],
             "llm_error": None,
@@ -673,8 +833,12 @@ async def generate_questions_v2(
     raw_items = qs.get("items")
     items_list = raw_items if isinstance(raw_items, list) else []
     raw_latency = qs.get("latency_ms")
-    latency_val = int(raw_latency) if isinstance(raw_latency, (int, float, str)) and raw_latency is not None else None
-    
+    latency_val = (
+        int(raw_latency)
+        if isinstance(raw_latency, (int, float, str)) and raw_latency is not None
+        else None
+    )
+
     response_payload = GeneratedQuestionsInResponse(
         interview_id=interview.id,
         track=interview.track,
@@ -694,13 +858,15 @@ async def generate_questions_v2(
                 supplement=item.get("supplement"),  # type: ignore
                 audio_url=item.get("audioUrl"),  # type: ignore
             )
-            for item in items_list if isinstance(item, dict)
+            for item in items_list
+            if isinstance(item, dict)
         ],
         cached=cached,
         llm_model=str(qs.get("llm_model")) if qs.get("llm_model") else None,
         llm_latency_ms=latency_val,
         llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
     # =========================================================================
@@ -710,7 +876,7 @@ async def generate_questions_v2(
         "POST /interviews/generate-questions FULL RESPONSE PAYLOAD | Interview=%s | Cached=%s | Response=\n%s",
         interview.id,
         cached,
-        json.dumps(response_payload.model_dump(), indent=2, default=str)
+        json.dumps(response_payload.model_dump(), indent=2, default=str),
     )
 
     return response_payload
@@ -718,6 +884,7 @@ async def generate_questions_v2(
 
 @router.post(
     path="/interviews/non-tech/generate-questions",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews-v2:generate-non-tech-questions",
     response_model=GeneratedQuestionsInResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -727,29 +894,52 @@ async def generate_non_tech_questions_v2(
     payload: GenerateNonTechQuestionsRequest,
     background_tasks: fastapi.BackgroundTasks,
     current_user=fastapi.Depends(get_current_user),
-    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
-    question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewQuestionCRUDRepository)),
-    question_attempt_repo: QuestionAttemptCRUDRepository = fastapi.Depends(get_repository(repo_type=QuestionAttemptCRUDRepository)),
-    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
+    question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewQuestionCRUDRepository)
+    ),
+    question_attempt_repo: QuestionAttemptCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=QuestionAttemptCRUDRepository)
+    ),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
 ) -> GeneratedQuestionsInResponse:
-    supplement_service = QuestionSupplementService(async_session=question_repo.async_session)
+    await require_practice_feature(question_repo.async_session, "question_generation")
+    supplement_service = QuestionSupplementService(
+        async_session=question_repo.async_session
+    )
     try:
-        job_profile = await job_profile_repo.get_by_id(job_profile_id=payload.job_profile_id)
+        job_profile = await job_profile_repo.get_by_id(
+            job_profile_id=payload.job_profile_id
+        )
     except SQLAlchemyError as exc:
         msg = str(exc).lower()
-        if "job_profile" in msg and ("does not exist" in msg or "undefinedtable" in msg):
+        if "job_profile" in msg and (
+            "does not exist" in msg or "undefinedtable" in msg
+        ):
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Non-tech interview feature unavailable until migration 'job_profile_001' is applied",
             )
         raise
     if job_profile is None:
-        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Job profile not found")
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail="Job profile not found",
+        )
+
+    if getattr(job_profile, "questions_per_interview", None) is not None and payload.client_contract != "fixed-round-v1":
+        raise fastapi.HTTPException(409, "Refresh to the current app before starting this fixed-length interview.")
 
     # Recorded for analytics only. This flow shows the student no level picker,
     # so whatever arrives here is a client default rather than a choice, and
     # honouring it would be honouring a phantom.
-    requested_difficulty = (payload.difficulty or "").lower().strip() if payload.difficulty else None
+    requested_difficulty = (
+        (payload.difficulty or "").lower().strip() if payload.difficulty else None
+    )
 
     # Serve the level the facilitator actually published at. This used to pin
     # the difficulty to NON_TECH_FIXED_DIFFICULTY and hardcode the question
@@ -758,18 +948,21 @@ async def generate_non_tech_questions_v2(
     # students silently got the generic blueprint. None means nothing was
     # published for this role, where the blueprint is the honest answer rather
     # than a substitute for curated content.
-    served_difficulty = difficulty_to_serve(job_profile, preferred=NON_TECH_FIXED_DIFFICULTY)
+    served_difficulty = difficulty_to_serve(
+        job_profile, preferred=NON_TECH_FIXED_DIFFICULTY
+    )
     difficulty = served_difficulty or NON_TECH_FIXED_DIFFICULTY
 
     normalized_job_name = _normalize_non_tech_job_name(job_profile.job_name)
     track = f"Non-Tech: {normalized_job_name}"
     interview = await interview_repo.get_active_by_user(user_id=current_user.id)
-    if interview is None or interview.track != track:
+    if interview is None or interview.track != track or interview.job_profile_id != job_profile.id or interview.difficulty != difficulty:
         interview = await interview_repo.create_interview(
             user_id=current_user.id,
             track=track,
             difficulty=difficulty,
             job_profile_id=job_profile.id,
+            fixed_length=payload.client_contract == "fixed-round-v1",
         )
         await track_analytics_event(
             interview_repo.async_session,
@@ -787,25 +980,33 @@ async def generate_non_tech_questions_v2(
             },
         )
 
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
+
     # After the interview-creation commit above, never before it: a commit ends
     # the transaction the lock is scoped to and would release it mid-generation.
-    await lock_question_generation(question_repo.async_session, interview_id=interview.id)
+    await lock_question_generation(
+        question_repo.async_session, interview_id=interview.id
+    )
 
     existing = await question_repo.list_by_interview(interview_id=interview.id)
     persisted = existing
     cached = bool(existing)
 
     if not existing:
-        past_interview_count = await interview_repo.count_user_interviews_by_profile_and_difficulty(
-            user_id=current_user.id,
-            job_profile_id=job_profile.id,
-            difficulty=difficulty,
-            current_interview_id=interview.id
+        past_interview_count = (
+            await interview_repo.count_user_interviews_by_profile_and_difficulty(
+                user_id=current_user.id,
+                job_profile_id=job_profile.id,
+                difficulty=difficulty,
+                current_interview_id=interview.id,
+            )
         )
 
-        questions_data = None
-        if getattr(interview, "job_profile_id", None):
-            admin_questions = await job_profile_repo.get_job_profile_questions(interview.job_profile_id)
+        questions_data = snapshotted_questions(interview)
+        if questions_data is None and getattr(interview, "job_profile_id", None):
+            admin_questions = await job_profile_repo.get_job_profile_questions(
+                interview.job_profile_id
+            )
             # The interview's own difficulty, which difficulty_to_serve set to a
             # level this facilitator published at - so their questions are found
             # wherever they filed them, not only at medium.
@@ -839,10 +1040,14 @@ async def generate_non_tech_questions_v2(
                 past_interview_count=past_interview_count,
             )
 
-        if payload.use_resume and isinstance(getattr(current_user, "resume_text", None), str):
+        if snapshotted_questions(interview) is None and payload.use_resume and isinstance(
+            getattr(current_user, "resume_text", None), str
+        ):
             resume_context = (getattr(current_user, "resume_text", None) or "").strip()
             if resume_context:
-                questions_data[0]["text"] = f"Based on your background, {questions_data[0]['text']}"
+                questions_data[0][
+                    "text"
+                ] = f"Based on your background, {questions_data[0]['text']}"
 
         _apply_follow_up_eligibility(questions_data)  # type: ignore
 
@@ -863,7 +1068,10 @@ async def generate_non_tech_questions_v2(
             ensure_generate=True,
             track=interview.track,
         )
-        _validate_supplements_response(items=supplements_map, source="generate-non-tech-questions")
+        supplements_map = _filter_valid_supplements(
+            items=supplements_map,
+            source="generate-non-tech-questions",
+        )
         qs = {
             "questions": [q.text for q in persisted],
             "llm_error": None,
@@ -885,7 +1093,10 @@ async def generate_non_tech_questions_v2(
             ensure_generate=True,
             track=interview.track,
         )
-        _validate_supplements_response(items=supplements_map, source="generate-non-tech-questions-cached")
+        supplements_map = _filter_valid_supplements(
+            items=supplements_map,
+            source="generate-non-tech-questions-cached",
+        )
         qs = {
             "questions": [q.text for q in existing],
             "llm_error": None,
@@ -899,8 +1110,12 @@ async def generate_non_tech_questions_v2(
     raw_items = qs.get("items")
     items_list = raw_items if isinstance(raw_items, list) else []
     raw_latency = qs.get("latency_ms")
-    latency_val = int(raw_latency) if isinstance(raw_latency, (int, float, str)) and raw_latency is not None else None
-    
+    latency_val = (
+        int(raw_latency)
+        if isinstance(raw_latency, (int, float, str)) and raw_latency is not None
+        else None
+    )
+
     return GeneratedQuestionsInResponse(
         interview_id=interview.id,
         track=interview.track,
@@ -919,18 +1134,21 @@ async def generate_non_tech_questions_v2(
                 follow_up_strategy=item.get("followUpStrategy"),  # type: ignore
                 supplement=item.get("supplement"),  # type: ignore
             )
-            for item in items_list if isinstance(item, dict)
+            for item in items_list
+            if isinstance(item, dict)
         ],
         cached=cached,
         llm_model=str(qs.get("llm_model")) if qs.get("llm_model") else None,
         llm_latency_ms=latency_val,
         llm_error=str(qs.get("llm_error")) if qs.get("llm_error") else None,
         interview_mode=interview.interview_mode,
+        planned_question_count=planned_count(interview),
     )
 
 
 @router.post(
     path="/interviews/structure-practice",
+    dependencies=[fastapi.Depends(student_action_limit("generate_questions", limit=60))],
     name="interviews-v2:structure-practice",
     response_model=StructurePracticeQuestionsResponse,
     status_code=fastapi.status.HTTP_200_OK,
@@ -939,8 +1157,12 @@ async def generate_non_tech_questions_v2(
 async def get_structure_practice_questions(
     interview_id: int | None = fastapi.Body(None, embed=True),
     current_user=fastapi.Depends(get_current_user),
-    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
-    question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewQuestionCRUDRepository)),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
+    question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewQuestionCRUDRepository)
+    ),
 ) -> StructurePracticeQuestionsResponse:
     """
     Fetch existing interview questions with AI-generated structure hints.
@@ -950,32 +1172,33 @@ async def get_structure_practice_questions(
     # Return cached response if no interview_id provided
     if interview_id is None:
         return _get_cached_structure_practice_response()
-    
+
     # Validate interview ownership
     interview = await interview_repo.get_by_id(interview_id=interview_id)
     if interview is None or interview.user_id != current_user.id:
         raise fastapi.HTTPException(
-            status_code=fastapi.status.HTTP_404_NOT_FOUND,
-            detail="Interview not found"
+            status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
         )
-    
+
     # Get existing questions from database
     questions = await question_repo.list_by_interview(interview_id=interview.id)
     if not questions:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-            detail="No questions found for this interview. Generate questions first."
+            detail="No questions found for this interview. Generate questions first.",
         )
-    
+
     # Get supplements
-    supplement_service = QuestionSupplementService(async_session=question_repo.async_session)
+    supplement_service = QuestionSupplementService(
+        async_session=question_repo.async_session
+    )
     supplements_map = await _get_supplement_map(
         interview_id=interview.id,
         supplement_service=supplement_service,
         ensure_generate=False,  # Don't generate, just fetch existing
         track=interview.track,
     )
-    
+
     # Prepare questions data for hint generation
     questions_data = [
         {
@@ -985,18 +1208,23 @@ async def get_structure_practice_questions(
         }
         for q in questions
     ]
-    
+
     # Generate structure hints using LLM
-    hints_map, llm_error, latency_ms, llm_model = await generate_structure_hints_for_questions(
-        questions=questions_data,
-        track=interview.track,
-        difficulty=interview.difficulty,
+    hints_map, llm_error, latency_ms, llm_model = (
+        await generate_structure_hints_for_questions(
+            questions=questions_data,
+            track=interview.track,
+            difficulty=interview.difficulty,
+        )
     )
-    
+
     # Build response items with hints
     items_with_hints = []
     for q in questions:
-        hint = hints_map.get(q.text, "Break down your answer logically with clear examples and explain your reasoning.")
+        hint = hints_map.get(
+            q.text,
+            "Break down your answer logically with clear examples and explain your reasoning.",
+        )
         items_with_hints.append(
             QuestionItemWithHint(
                 interview_question_id=q.id,
@@ -1011,7 +1239,7 @@ async def get_structure_practice_questions(
                 structure_hint=hint,
             )
         )
-    
+
     return StructurePracticeQuestionsResponse(
         interview_id=interview.id,
         track=interview.track,
@@ -1040,15 +1268,22 @@ async def generate_supplements_v2(
         description="If true, overwrite existing supplements with new LLM output",
     ),
     current_user=fastapi.Depends(get_current_user),
-    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
 ) -> QuestionSupplementsResponse:
     interview = await interview_repo.get_by_id(interview_id=interview_id)
     if interview is None or interview.user_id != current_user.id:
-        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
+        )
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
     if not _supplements_enabled_for_track(interview.track):
         return QuestionSupplementsResponse(interview_id=interview.id, supplements=[])
 
-    supplement_service = QuestionSupplementService(async_session=interview_repo.async_session)
+    supplement_service = QuestionSupplementService(
+        async_session=interview_repo.async_session
+    )
     supplements = await supplement_service.generate_for_interview(
         interview_id=interview.id,
         regenerate=regenerate,
@@ -1069,15 +1304,22 @@ async def generate_supplements_v2(
 async def get_supplements_v2(
     interview_id: int,
     current_user=fastapi.Depends(get_current_user),
-    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
 ) -> QuestionSupplementsResponse:
     interview = await interview_repo.get_by_id(interview_id=interview_id)
     if interview is None or interview.user_id != current_user.id:
-        raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found")
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Interview not found"
+        )
+    await require_interview_course_access(getattr(interview_repo, "async_session", None), interview)
     if not _supplements_enabled_for_track(interview.track):
         return QuestionSupplementsResponse(interview_id=interview.id, supplements=[])
 
-    supplement_service = QuestionSupplementService(async_session=interview_repo.async_session)
+    supplement_service = QuestionSupplementService(
+        async_session=interview_repo.async_session
+    )
     supplements = await supplement_service.get_for_interview(interview_id=interview.id)
     return QuestionSupplementsResponse(
         interview_id=interview.id,
@@ -1101,45 +1343,96 @@ async def _get_supplement_map(
                 regenerate=False,
             )
         else:
-            supplements = await supplement_service.get_for_interview(interview_id=interview_id)
+            supplements = await supplement_service.get_for_interview(
+                interview_id=interview_id
+            )
     except SQLAlchemyError as exc:
-        logger.warning("Supplements unavailable for interview %s: %s", interview_id, exc)
+        logger.warning(
+            "Supplements unavailable for interview %s: %s", interview_id, exc
+        )
         return {}
-    return {supp.interview_question_id: serialize_question_supplement(supp) for supp in supplements}
+    return {
+        supp.interview_question_id: serialize_question_supplement(supp)
+        for supp in supplements
+    }
 
 
-def _validate_supplements_response(*, items: dict[int, QuestionSupplementOut], source: str) -> None:
-    """Validate supplements returned from LLM before sending to clients."""
+def _filter_valid_supplements(
+    *,
+    items: dict[int, QuestionSupplementOut],
+    source: str,
+) -> dict[int, QuestionSupplementOut]:
+    """Return renderable supplements without blocking the interview.
+
+    Supplements are optional presentation aids. An LLM can occasionally return
+    malformed diagram content, and older malformed rows can remain cached in the
+    database. Neither case should turn otherwise valid interview questions into
+    a 500 response.
+    """
     if not items:
-        return
+        return {}
     allowed_types = {"code", "diagram"}
-    mermaid_starters = ("flowchart", "graph", "sequenceDiagram", "stateDiagram", "classDiagram")
+    mermaid_starters = (
+        "flowchart",
+        "graph",
+        "sequenceDiagram",
+        "stateDiagram",
+        "classDiagram",
+        "erDiagram",
+        "journey",
+        "gantt",
+        "pie",
+        "mindmap",
+        "timeline",
+        "quadrantChart",
+        "requirementDiagram",
+        "gitGraph",
+        "C4Context",
+        "architecture-beta",
+        "block-beta",
+        "kanban",
+        "packet-beta",
+        "radar-beta",
+        "sankey-beta",
+        "treemap-beta",
+        "xychart",
+    )
+    valid: dict[int, QuestionSupplementOut] = {}
 
     for qid, supp in items.items():
         stype = (supp.supplement_type or "").lower()
         fmt = (supp.format or "").lower() if supp.format else ""
         content = supp.content or ""
         if stype not in allowed_types:
-            logger.warning("Invalid supplement type (%s) for question %s from %s", stype, qid, source)
-            raise fastapi.HTTPException(
-                status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Invalid supplement type generated",
+            logger.warning(
+                "Dropping invalid supplement type (%s) for question %s from %s",
+                stype,
+                qid,
+                source,
             )
+            continue
         if stype == "diagram":
             if fmt != "mermaid":
-                logger.warning("Diagram supplement missing mermaid format for question %s from %s", qid, source)
-                raise fastapi.HTTPException(
-                    status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Invalid diagram supplement format",
+                logger.warning(
+                    "Dropping diagram supplement with format (%s) for question %s from %s",
+                    fmt,
+                    qid,
+                    source,
                 )
+                continue
             stripped = content.strip()
             if not stripped.startswith("```mermaid"):
                 if not any(stripped.startswith(prefix) for prefix in mermaid_starters):
-                    logger.warning("Mermaid supplement failed syntax precheck for question %s from %s", qid, source)
-                    raise fastapi.HTTPException(
-                        status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail="Mermaid supplement failed syntax precheck",
+                    logger.warning(
+                        "Dropping Mermaid supplement that failed syntax precheck "
+                        "for question %s from %s",
+                        qid,
+                        source,
                     )
+                    continue
+        valid[qid] = supp
+
+    return valid
 
 
 async def _backfill_follow_up_parents(
@@ -1150,13 +1443,21 @@ async def _backfill_follow_up_parents(
 ) -> None:
     """Ensure follow-up questions always have a parent_question_id."""
     for q in questions:
-        if getattr(q, "is_follow_up", False) and not getattr(q, "parent_question_id", None):
-            attempt = await question_attempt_repo.get_first_by_question_id(question_id=q.id)
+        if getattr(q, "is_follow_up", False) and not getattr(
+            q, "parent_question_id", None
+        ):
+            attempt = await question_attempt_repo.get_first_by_question_id(
+                question_id=q.id
+            )
             parent_id = None
             if attempt and isinstance(attempt.analysis_json, dict):
-                parent_id = attempt.analysis_json.get("follow_up", {}).get("parent_question_id")
+                parent_id = attempt.analysis_json.get("follow_up", {}).get(
+                    "parent_question_id"
+                )
             if parent_id:
-                await question_repo.set_parent_question(question_id=q.id, parent_question_id=int(parent_id))
+                await question_repo.set_parent_question(
+                    question_id=q.id, parent_question_id=int(parent_id)
+                )
                 q.parent_question_id = int(parent_id)
 
 
@@ -1167,6 +1468,7 @@ async def _backfill_follow_up_parents(
 
 @router.post(
     path="/pronunciation/create",
+    dependencies=[fastapi.Depends(student_action_limit("practice_session", limit=120))],
     name="pronunciation:create",
     response_model=PronunciationPracticeResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -1181,7 +1483,7 @@ async def create_pronunciation_practice(
 ) -> PronunciationPracticeResponse:
     """
     Create a new pronunciation practice session.
-    
+
     - Selects 10 random words from the specified difficulty level
     - Returns practice session ID and word list with phonetic guides
     """
@@ -1194,20 +1496,22 @@ async def create_pronunciation_practice(
             pronunciation_repo.async_session,
             event_type="practice_started",
             user_id=current_user.id,
-            event_data={"practice_type": "pronunciation", "difficulty": payload.difficulty},
+            event_data={
+                "practice_type": "pronunciation",
+                "difficulty": payload.difficulty,
+            },
         )
-        
+
         # Convert words array to response format with indices
         from src.models.schemas.pronunciation import PronunciationWord
+
         words = [
             PronunciationWord(
-                index=idx,
-                word=word_obj["word"],
-                phonetic=word_obj["phonetic"]
+                index=idx, word=word_obj["word"], phonetic=word_obj["phonetic"]
             )
             for idx, word_obj in enumerate(practice.words)
         ]
-        
+
         return PronunciationPracticeResponse(
             practice_id=practice.id,
             difficulty=practice.difficulty,
@@ -1216,7 +1520,7 @@ async def create_pronunciation_practice(
             status=practice.status,
             created_at=practice.created_at,
         )
-    
+
     except ValueError as e:
         logger.error(f"Invalid difficulty level: {e}")
         raise fastapi.HTTPException(
@@ -1229,6 +1533,84 @@ async def create_pronunciation_practice(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create pronunciation practice session",
         )
+
+
+@router.post(
+    path="/pronunciation/{practice_id}/advance",
+    name="pronunciation:advance",
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Record one ordered pronunciation-word interaction",
+)
+async def advance_pronunciation_practice(
+    practice_id: int,
+    payload: PronunciationProgress,
+    current_user=fastapi.Depends(get_current_user),
+    pronunciation_repo: PronunciationPracticeCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=PronunciationPracticeCRUDRepository)
+    ),
+) -> dict[str, int | str]:
+    record = (
+        await pronunciation_repo.async_session.execute(
+            sa.select(PronunciationPractice)
+            .where(
+                PronunciationPractice.id == practice_id,
+                PronunciationPractice.user_id == current_user.id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        raise fastapi.HTTPException(404, "Pronunciation practice session not found.")
+    total_words = len(record.words) if isinstance(record.words, list) else 0
+    if record.status != "active" or total_words == 0:
+        raise fastapi.HTTPException(409, "This pronunciation session cannot advance.")
+    if payload.word_index == record.completed_word_count - 1:
+        return {
+            "practice_id": record.id,
+            "completed_words": record.completed_word_count,
+            "status": "active",
+        }
+    if payload.word_index != record.completed_word_count or record.completed_word_count >= total_words:
+        raise fastapi.HTTPException(409, "Refresh this pronunciation session before continuing.")
+    record.completed_word_count += 1
+    await pronunciation_repo.async_session.commit()
+    return {"practice_id": record.id, "completed_words": record.completed_word_count, "status": "active"}
+
+
+@router.post(
+    path="/pronunciation/{practice_id}/complete",
+    name="pronunciation:complete",
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Mark a completed pronunciation session after the learner reaches its final word",
+)
+async def complete_pronunciation_practice(
+    practice_id: int,
+    current_user=fastapi.Depends(get_current_user),
+    pronunciation_repo: PronunciationPracticeCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=PronunciationPracticeCRUDRepository)
+    ),
+) -> dict[str, int | str]:
+    record = (
+        await pronunciation_repo.async_session.execute(
+            sa.select(PronunciationPractice)
+            .where(
+                PronunciationPractice.id == practice_id,
+                PronunciationPractice.user_id == current_user.id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        raise fastapi.HTTPException(404, "Pronunciation practice session not found.")
+    total_words = len(record.words) if isinstance(record.words, list) else 0
+    if record.status not in {"active", "completed"} or total_words == 0:
+        raise fastapi.HTTPException(409, "This pronunciation session cannot be completed.")
+    if record.status == "active" and record.completed_word_count != total_words:
+        raise fastapi.HTTPException(409, "Complete every pronunciation word before finishing this session.")
+    if record.status == "active":
+        record.status = "completed"
+        await pronunciation_repo.async_session.commit()
+    return {"practice_id": record.id, "status": "completed"}
 
 
 @router.get(
@@ -1245,7 +1627,9 @@ async def create_pronunciation_practice(
 async def get_pronunciation_audio(
     practice_id: int,
     question_number: int,
-    slow: bool = fastapi.Query(False, description="Generate slow-paced audio for practice"),
+    slow: bool = fastapi.Query(
+        False, description="Generate slow-paced audio for practice"
+    ),
     current_user=fastapi.Depends(get_current_user),
     pronunciation_repo: PronunciationPracticeCRUDRepository = fastapi.Depends(
         get_repository(repo_type=PronunciationPracticeCRUDRepository)
@@ -1253,11 +1637,11 @@ async def get_pronunciation_audio(
 ) -> fastapi.Response:
     """
     Get pronunciation audio for a specific word in a practice session.
-    
+
     - **practice_id**: The pronunciation practice session ID
     - **question_number**: Index of the word (0-9)
     - **slow**: Whether to generate slow-paced audio (default: false)
-    
+
     Returns optimized audio file in Opus format.
     """
     # Validate question number
@@ -1266,54 +1650,54 @@ async def get_pronunciation_audio(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
             detail="question_number must be between 0 and 9",
         )
-    
+
     # Get practice session
     practice = await pronunciation_repo.get_by_id_and_user(
         practice_id=practice_id,
         user_id=current_user.id,
     )
-    
+
     if not practice:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
             detail="Pronunciation practice session not found",
         )
-    
+
     # Get the word at the specified index
     if question_number >= len(practice.words):
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
             detail=f"question_number {question_number} out of range for this practice session",
         )
-    
+
     word_obj = practice.words[question_number]
     word = word_obj.get("word", "")
-    
+
     if not word:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Invalid word data in practice session",
         )
-    
+
     # Generate audio using TTS service
     audio_bytes, error, latency_ms = await generate_pronunciation_audio(
         word=word,
         slow=slow,
     )
-    
+
     if error:
         logger.error(f"TTS error for word '{word}': {error}")
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to generate pronunciation audio",
         )
-    
+
     if not audio_bytes and not settings.MOCK_TTS:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="No audio generated",
         )
-    
+
     # Return audio file with appropriate headers
     return fastapi.Response(
         content=audio_bytes,
@@ -1330,6 +1714,7 @@ async def get_pronunciation_audio(
 
 @router.post(
     path="/structure-practice/session",
+    dependencies=[fastapi.Depends(student_action_limit("practice_session", limit=120))],
     name="structure-practice:create-session",
     response_model=StructurePracticeSessionResponse,
     status_code=fastapi.status.HTTP_201_CREATED,
@@ -1338,9 +1723,15 @@ async def get_pronunciation_audio(
 async def create_structure_practice_session(
     request: StructurePracticeSessionCreate,
     current_user=fastapi.Depends(get_current_user),
-    interview_repo: InterviewCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewCRUDRepository)),
-    question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(get_repository(repo_type=InterviewQuestionCRUDRepository)),
-    structure_practice_repo: StructurePracticeCRUDRepository = fastapi.Depends(get_repository(repo_type=StructurePracticeCRUDRepository)),
+    interview_repo: InterviewCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewCRUDRepository)
+    ),
+    question_repo: InterviewQuestionCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=InterviewQuestionCRUDRepository)
+    ),
+    structure_practice_repo: StructurePracticeCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=StructurePracticeCRUDRepository)
+    ),
 ) -> StructurePracticeSessionResponse:
     """
     Create a new structure practice session.
@@ -1353,17 +1744,17 @@ async def create_structure_practice_session(
         if interview is None or interview.user_id != current_user.id:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_404_NOT_FOUND,
-                detail="Interview not found"
+                detail="Interview not found",
             )
-        
+
         # Get existing questions
         questions = await question_repo.list_by_interview(interview_id=interview.id)
         if not questions:
             raise fastapi.HTTPException(
                 status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-                detail="No questions found for this interview. Generate questions first."
+                detail="No questions found for this interview. Generate questions first.",
             )
-        
+
         # Prepare questions data
         questions_data = [
             {
@@ -1373,31 +1764,35 @@ async def create_structure_practice_session(
             }
             for q in questions
         ]
-        
+
         # Generate structure hints
         hints_map, _, _, _ = await generate_structure_hints_for_questions(
             questions=questions_data,
             track=interview.track,
             difficulty=interview.difficulty,
         )
-        
+
         # Build questions list with framework info
         questions_list = []
         for idx, q in enumerate(questions):
             framework = detect_framework(hints_map.get(q.text, ""))
             sections = get_framework_sections(framework)
             initial_hint = get_initial_hint(framework)
-            questions_list.append({
-                "question_id": q.id,
-                "text": q.text,
-                "structure_hint": hints_map.get(q.text, "Structure your answer clearly with examples."),
-                "framework": framework,
-                "index": idx,
-                "sections": sections,
-                "current_section": initial_hint["section_name"],
-                "current_hint": initial_hint["hint"],
-            })
-        
+            questions_list.append(
+                {
+                    "question_id": q.id,
+                    "text": q.text,
+                    "structure_hint": hints_map.get(
+                        q.text, "Structure your answer clearly with examples."
+                    ),
+                    "framework": framework,
+                    "index": idx,
+                    "sections": sections,
+                    "current_section": initial_hint["section_name"],
+                    "current_hint": initial_hint["hint"],
+                }
+            )
+
         track = interview.track
     else:
         # Create a new interview with questions for structure practice.
@@ -1413,14 +1808,12 @@ async def create_structure_practice_session(
         difficulty = (request.difficulty or "easy").lower()
         if difficulty not in ("easy", "medium", "hard", "expert"):
             difficulty = "easy"
-        
+
         # Create interview
         new_interview = await interview_repo.create_interview(
-            user_id=current_user.id,
-            track=track,
-            difficulty=difficulty
+            user_id=current_user.id, track=track, difficulty=difficulty
         )
-        
+
         # Generate questions based on difficulty
         try:
             role = syllabus_service._role_manager.derive_role(track)
@@ -1431,7 +1824,9 @@ async def create_structure_practice_session(
                 status_code=fastapi.status.HTTP_400_BAD_REQUEST,
                 detail=str(exc),
             )
-        topic_bank = syllabus_service.get_topics_for_role(role=role, difficulty=difficulty)
+        topic_bank = syllabus_service.get_topics_for_role(
+            role=role, difficulty=difficulty
+        )
         topics = {
             "tech": topic_bank.tech,
             "tech_allied": topic_bank.tech_allied,
@@ -1449,13 +1844,16 @@ async def create_structure_practice_session(
             "tech_allied": question_ratio.tech_allied,
             "behavioral": question_ratio.behavioral,
         }
-        
+
         question_count = 5
-        
+
         # For easy difficulty, use static questions
         if difficulty == "easy":
             from src.services.static_questions import get_static_questions
-            static_items = get_static_questions(role=role, count=question_count, ratio=ratio)
+
+            static_items = get_static_questions(
+                role=role, count=question_count, ratio=ratio
+            )
             questions_data = [
                 {
                     "text": item["text"],
@@ -1466,22 +1864,24 @@ async def create_structure_practice_session(
             ]
         else:
             # For medium/hard/expert, generate with LLM
-            questions, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(
-                track=track,
-                context_text=None,
-                count=question_count,
-                difficulty=difficulty,
-                syllabus_topics=topics,
-                ratio=ratio,
-                influence={},
+            questions, error, latency_ms, llm_model, structured_items = (
+                await generate_interview_questions_with_llm(
+                    track=track,
+                    context_text=None,
+                    count=question_count,
+                    difficulty=difficulty,
+                    syllabus_topics=topics,
+                    ratio=ratio,
+                    influence={},
+                )
             )
-            
+
             if error or not structured_items:
                 raise fastapi.HTTPException(
                     status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to generate questions: {error or 'No questions generated'}"
+                    detail=f"Failed to generate questions: {error or 'No questions generated'}",
                 )
-            
+
             questions_data = [
                 {
                     "text": item["text"],
@@ -1490,41 +1890,45 @@ async def create_structure_practice_session(
                 }
                 for item in structured_items
             ]
-        
+
         # Save questions to database using create_batch
         db_questions = await question_repo.create_batch(
             interview_id=new_interview.id,
             questions_data=questions_data,
             resume_used=False,
         )
-        
+
         # Generate structure hints
         hints_map, _, _, _ = await generate_structure_hints_for_questions(
             questions=questions_data,
             track=track,
             difficulty=difficulty,
         )
-        
+
         # Build questions list with framework info
         questions_list = []
         for idx, q in enumerate(db_questions):
             framework = detect_framework(hints_map.get(q.text, ""))
             sections = get_framework_sections(framework)
             initial_hint = get_initial_hint(framework)
-            questions_list.append({
-                "question_id": q.id,
-                "text": q.text,
-                "structure_hint": hints_map.get(q.text, "Structure your answer clearly with examples."),
-                "framework": framework,
-                "index": idx,
-                "sections": sections,
-                "current_section": initial_hint["section_name"],
-                "current_hint": initial_hint["hint"],
-            })
-        
+            questions_list.append(
+                {
+                    "question_id": q.id,
+                    "text": q.text,
+                    "structure_hint": hints_map.get(
+                        q.text, "Structure your answer clearly with examples."
+                    ),
+                    "framework": framework,
+                    "index": idx,
+                    "sections": sections,
+                    "current_section": initial_hint["section_name"],
+                    "current_hint": initial_hint["hint"],
+                }
+            )
+
         # Link the interview to the practice session
         request.interview_id = new_interview.id
-    
+
     # Create practice session
     practice = await structure_practice_repo.create_practice_session(
         user_id=current_user.id,
@@ -1539,7 +1943,7 @@ async def create_structure_practice_session(
         interview_id=practice.interview_id,
         event_data={"practice_type": "structure", "track": track},
     )
-    
+
     return StructurePracticeSessionResponse(
         practice_id=practice.id,
         interview_id=practice.interview_id,
@@ -1561,49 +1965,61 @@ async def submit_structure_practice_section(
     practice_id: int,
     question_index: int,
     section_name: str,
-    file: UploadFile = File(..., description="Audio file with answer for this section. Supported: .mp3, .wav, .m4a, .flac (max 25MB)"),
+    file: UploadFile = File(
+        ...,
+        description="Audio file with answer for this section. Supported: .mp3, .wav, .m4a, .flac (max 25MB)",
+    ),
     language: str = Form(default="en", description="Language code for transcription"),
-    time_spent_seconds: int = Form(default=None, description="Time spent on this section"),
+    time_spent_seconds: int = Form(
+        default=None, description="Time spent on this section"
+    ),
     current_user=fastapi.Depends(get_current_user),
-    structure_practice_repo: StructurePracticeCRUDRepository = fastapi.Depends(get_repository(repo_type=StructurePracticeCRUDRepository)),
-    answer_repo: StructurePracticeAnswerCRUDRepository = fastapi.Depends(get_repository(repo_type=StructurePracticeAnswerCRUDRepository)),
+    structure_practice_repo: StructurePracticeCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=StructurePracticeCRUDRepository)
+    ),
+    answer_repo: StructurePracticeAnswerCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=StructurePracticeAnswerCRUDRepository)
+    ),
 ) -> StructurePracticeAnswerSubmitResponse:
     """
     Submit an audio answer for a specific section of a question in a structure practice session.
     Audio is transcribed using Whisper API. Returns hint for the next section.
     """
-    from src.services.progressive_hints import get_next_section_hint, get_completion_message
-    
+    from src.services.progressive_hints import (
+        get_next_section_hint,
+        get_completion_message,
+    )
+
     # Validate practice session ownership
     practice = await structure_practice_repo.get_by_id_and_user(
         practice_id=practice_id,
         user_id=current_user.id,
     )
-    
+
     if not practice:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
             detail="Structure practice session not found",
         )
-    
+
     # Validate question index
     if question_index < 0 or question_index >= len(practice.questions):
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
             detail=f"question_index {question_index} out of range for this practice session",
         )
-    
+
     # Get question and validate section
     question = practice.questions[question_index]
     framework = question.get("framework", "C-T-E-T-D")
     sections = question.get("sections", [])
-    
+
     if section_name not in sections:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid section_name '{section_name}' for framework {framework}. Valid sections: {sections}",
         )
-    
+
     # Validate and process audio file
     try:
         audio_bytes, file_metadata = await validate_audio_file(file)
@@ -1612,33 +2028,35 @@ async def submit_structure_practice_section(
     except Exception as e:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Audio file validation failed: {str(e)}"
+            detail=f"Audio file validation failed: {str(e)}",
         )
-    
+
     # Validate language
     validated_language = validate_transcription_language(language)
-    
+
     # Transcribe with Whisper API
-    transcription, whisper_error, whisper_latency_ms, whisper_model = await transcribe_audio_with_whisper(
-        audio_bytes=audio_bytes,
-        filename=file_metadata["filename"],
-        language=validated_language
+    transcription, whisper_error, whisper_latency_ms, whisper_model = (
+        await transcribe_audio_with_whisper(
+            audio_bytes=audio_bytes,
+            filename=file_metadata["filename"],
+            language=validated_language,
+        )
     )
-    
+
     if whisper_error or not transcription:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Transcription failed: {whisper_error or 'Unknown error'}"
+            detail=f"Transcription failed: {whisper_error or 'Unknown error'}",
         )
-    
+
     # Extract transcription text
     transcription_text = transcription.get("text", "")
     if not transcription_text or len(transcription_text.strip().split()) < 3:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
-            detail="Your answer was too short to evaluate. Please provide a more complete response."
+            detail="Your answer was too short to evaluate. Please provide a more complete response.",
         )
-    
+
     # Save audio file (optional, for record keeping)
     temp_file_path = ""
     try:
@@ -1646,14 +2064,14 @@ async def submit_structure_practice_section(
             audio_bytes=audio_bytes,
             filename=file_metadata["filename"],
             user_id=current_user.id,
-            question_attempt_id=0  # Structure practice doesn't use question attempts
+            question_attempt_id=0,  # Structure practice doesn't use question attempts
         )
     except Exception as e:
         logger.warning(f"Failed to save audio file: {e}")
     finally:
         if temp_file_path:
             await cleanup_temp_audio_file(temp_file_path)
-    
+
     # Create answer for this section
     answer = await answer_repo.create_answer(
         practice_id=practice_id,
@@ -1662,21 +2080,21 @@ async def submit_structure_practice_section(
         answer_text=transcription_text,
         time_spent_seconds=time_spent_seconds,
     )
-    
+
     # Get all submitted sections for this question
     all_answers = await answer_repo.list_by_practice_and_question(
         practice_id=practice_id,
         question_index=question_index,
     )
-    
+
     # Count completed sections
     completed_sections = {a.section_name for a in all_answers}
     sections_complete = len(completed_sections)
     total_sections = len(sections)
-    
+
     # Get next section hint
     next_info = get_next_section_hint(framework, section_name, transcription_text)
-    
+
     if next_info is None:
         # All sections complete
         return StructurePracticeAnswerSubmitResponse(
@@ -1718,8 +2136,12 @@ async def analyze_structure_practice_answer(
     practice_id: int,
     question_index: int,
     current_user=fastapi.Depends(get_current_user),
-    structure_practice_repo: StructurePracticeCRUDRepository = fastapi.Depends(get_repository(repo_type=StructurePracticeCRUDRepository)),
-    answer_repo: StructurePracticeAnswerCRUDRepository = fastapi.Depends(get_repository(repo_type=StructurePracticeAnswerCRUDRepository)),
+    structure_practice_repo: StructurePracticeCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=StructurePracticeCRUDRepository)
+    ),
+    answer_repo: StructurePracticeAnswerCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=StructurePracticeAnswerCRUDRepository)
+    ),
 ) -> StructurePracticeAnalysisResponse:
     """
     Analyze a submitted answer and return detailed framework breakdown.
@@ -1730,39 +2152,39 @@ async def analyze_structure_practice_answer(
         practice_id=practice_id,
         user_id=current_user.id,
     )
-    
+
     if not practice:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
             detail="Structure practice session not found",
         )
-    
+
     # Validate question index
     if question_index < 0 or question_index >= len(practice.questions):
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_400_BAD_REQUEST,
             detail=f"question_index {question_index} out of range",
         )
-    
+
     # Get all section answers for this question
     section_answers = await answer_repo.list_by_practice_and_question(
         practice_id=practice_id,
         question_index=question_index,
     )
-    
+
     if not section_answers:
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_404_NOT_FOUND,
             detail="No sections submitted yet. Submit at least one section first.",
         )
-    
+
     # Get question details
     question_data = practice.questions[question_index]
     question_text = question_data.get("text", "")
     structure_hint = question_data.get("structure_hint", "")
     framework = question_data.get("framework", "STAR")
     expected_sections = question_data.get("sections", [])
-    
+
     # Combine all section answers into structured format
     # Build a map of section_name -> answer data
     sections_data = {
@@ -1773,14 +2195,16 @@ async def analyze_structure_practice_answer(
         }
         for ans in section_answers
     }
-    
+
     # Combine all answer texts in section order
-    combined_answer = "\n\n".join([
-        f"[{section}]\n{sections_data[section]['answer_text']}"
-        for section in expected_sections
-        if section in sections_data
-    ])
-    
+    combined_answer = "\n\n".join(
+        [
+            f"[{section}]\n{sections_data[section]['answer_text']}"
+            for section in expected_sections
+            if section in sections_data
+        ]
+    )
+
     # Analyze the answer using LLM
     analysis_result, error, latency_ms, llm_model = await analyze_structure_answer(
         question_text=question_text,
@@ -1790,27 +2214,31 @@ async def analyze_structure_practice_answer(
         submitted_sections=sections_data,
         expected_sections=expected_sections,
     )
-    
+
     if error or not analysis_result:
         logger.error(f"Structure analysis error: {error}")
         raise fastapi.HTTPException(
             status_code=fastapi.status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to analyze answer: {error or 'Unknown error'}",
         )
-    
+
     # Build framework progress using actual section data
     sections = [
         FrameworkSection(
             name=section.name,
-            status="complete" if section.present and section.quality == "good" else (
-                "partial" if section.present else "missing"
+            status=(
+                "complete"
+                if section.present and section.quality == "good"
+                else ("partial" if section.present else "missing")
             ),
             answer_recorded=section.present,
-            time_spent_seconds=sections_data.get(section.name, {}).get("time_spent_seconds", section.time_estimate_seconds),
+            time_spent_seconds=sections_data.get(section.name, {}).get(
+                "time_spent_seconds", section.time_estimate_seconds
+            ),
         )
         for section in analysis_result.sections
     ]
-    
+
     framework_progress = FrameworkProgress(
         framework_name=analysis_result.framework_detected,
         sections=sections,
@@ -1819,7 +2247,7 @@ async def analyze_structure_practice_answer(
         total_sections=len(expected_sections),
         progress_message=analysis_result.progress_message,
     )
-    
+
     # Build time per section using actual recorded times
     time_per_section = [
         TimePerSection(
@@ -1828,15 +2256,16 @@ async def analyze_structure_practice_answer(
         )
         for section in analysis_result.sections
     ]
-    
+
     # Store analysis result in database
     import datetime
+
     analysis_data = {
         "framework_progress": framework_progress.model_dump(),
         "time_per_section": [t.model_dump() for t in time_per_section],
         "key_insight": analysis_result.key_insight,
     }
-    
+
     # Store analysis on the most recent section answer
     latest_answer = section_answers[-1]  # Last submitted section
     await answer_repo.update_analysis(
@@ -1856,7 +2285,7 @@ async def analyze_structure_practice_answer(
             "completion_percentage": analysis_result.completion_percentage,
         },
     )
-    
+
     return StructurePracticeAnalysisResponse(
         answer_id=latest_answer.id,
         practice_id=practice_id,

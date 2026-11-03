@@ -5,6 +5,7 @@ import fastapi
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
+from src.services.result_release import HELD_DETAIL, withheld
 from src.api.dependencies.auth import get_current_user
 from src.api.dependencies.repository import get_repository
 from src.api.dependencies.session import get_async_session
@@ -83,6 +84,8 @@ async def generate_final_report(
         save_error=save_error,
         message="Final report generated" if saved else "Final report generated but failed to save",
     )
+    if withheld(interview):
+        raise fastapi.HTTPException(status_code=409, detail=HELD_DETAIL)
     return response
 
 
@@ -133,4 +136,6 @@ async def get_final_report(
         save_error=None,
         message="Final report fetched",
     )
+    if withheld(interview):
+        raise fastapi.HTTPException(status_code=409, detail=HELD_DETAIL)
     return response

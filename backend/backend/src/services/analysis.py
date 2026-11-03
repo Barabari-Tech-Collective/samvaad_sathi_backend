@@ -21,6 +21,7 @@ from src.models.schemas.analysis import (
     PaceAnalysisResponse,
     PauseAnalysisResponse
 )
+from src.services.whisper import transcription_is_usable
 
 logger = logging.getLogger(__name__)
 DEFAULT_ANALYSIS_TYPES = ("domain", "communication", "pace", "pause")
@@ -28,7 +29,7 @@ DEFAULT_ANALYSIS_TYPES = ("domain", "communication", "pace", "pause")
 
 def _has_transcribed_answer(question_attempt: QuestionAttempt) -> bool:
     transcription = question_attempt.transcription
-    if not transcription:
+    if not transcription or not transcription_is_usable(transcription):
         return False
     if isinstance(transcription, dict):
         text = transcription.get("text") or transcription.get("transcript")
@@ -110,12 +111,12 @@ class AnalysisAggregationService:
           bool(question_attempt.transcription),
           bool(question_attempt.analysis_json),
         )
-        if not question_attempt.transcription:
+        if not _has_transcribed_answer(question_attempt):
             logger.error(
-              "COMPLETE_ANALYSIS transcription missing | Attempt=%s",
+              "COMPLETE_ANALYSIS reliable transcription missing | Attempt=%s",
               question_attempt_id,
             )
-            raise ValueError("Question attempt does not have transcription data")
+            raise ValueError("Question attempt does not have reliable speech evidence")
         if answer_version is not None and question_attempt.answer_version != answer_version:
             raise ValueError("The answer changed before feedback processing started")
         logger.info(
@@ -241,7 +242,7 @@ class AnalysisAggregationService:
         stmt = (
             sqlalchemy.select(QuestionAttempt)
             .join(QuestionAttempt.interview)
-            .options(selectinload(QuestionAttempt.question))
+            .options(selectinload(QuestionAttempt.question), selectinload(QuestionAttempt.interview))
             .where(
                 QuestionAttempt.id == question_attempt_id,
                 QuestionAttempt.interview.has(user_id=user_id)
@@ -382,8 +383,10 @@ class AnalysisAggregationService:
               bool(transcription_text),
               len(transcription_text or ""),
             )
-            if not transcription_text:
-                raise ValueError(f"No transcription available for {analysis_type} analysis")
+            if not transcription_is_usable(question_attempt.transcription):
+                raise ValueError(
+                    f"No reliable speech evidence available for {analysis_type} analysis"
+                )
             
             if analysis_type == "domain":
                 # Build user profile for LLM analysis
@@ -401,13 +404,26 @@ class AnalysisAggregationService:
                     getattr(question_attempt.question, "expected_answer", None)
                     if question_attempt.question else None
                 )
-                # Call real LLM domain analysis
-                analysis, llm_error, latency_ms, llm_model = await analyze_domain_with_llm(
-                    user_profile=profile,
-                    question_text=getattr(question_attempt, "question_text", None),
-                    transcription=transcription_text,
-                    expected_answer=expected_answer,
-                )
+                # Jev can judge typed rubric dimensions, not generate free-form
+                # questions or speech. Only server-loaded practice context opts in.
+                from src.config.manager import settings
+                from src.services.jev_practice import feedback as jev_feedback
+                from src.services.llm import _is_near_empty_answer
+                analysis = None
+                if not _is_near_empty_answer(transcription_text):
+                    analysis = await jev_feedback(interview=getattr(question_attempt, "interview", None),
+                        attempt_id=question_attempt_id, question=getattr(question_attempt, "question_text", None),
+                        rubric=expected_answer, transcript=transcription_text)
+                if analysis:
+                    llm_error, latency_ms, llm_model = None, None, f"jev:{settings.JEV_MODEL}"
+                else:
+                    # Keep the existing provider for every unapproved/failed case.
+                    analysis, llm_error, latency_ms, llm_model = await analyze_domain_with_llm(
+                        user_profile=profile,
+                        question_text=getattr(question_attempt, "question_text", None),
+                        transcription=transcription_text,
+                        expected_answer=expected_answer,
+                    )
 
                 logger.info(
                   "DOMAIN LLM COMPLETE | Attempt=%s | Model=%s | Latency=%sms | Error=%s | ResponseType=%s | Keys=%s",

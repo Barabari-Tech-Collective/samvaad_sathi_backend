@@ -1,14 +1,5 @@
-"""A tab switch or fullscreen exit ends an Assessment interview - never a Practice one.
-
-Mode is read from the interview's own stored snapshot, never trusted from the
-request. That matters because the client sends this endpoint exactly the
-signal a motivated student would want to fake: "I did not leave the tab."
-Reading interview.interview_mode server-side - the same snapshot that already
-can't be retroactively changed by editing a job profile (see
-test_interview_mode_snapshot.py) - means a client claiming a practice
-interview is really an assessment, or the reverse, has no effect either way.
-
-Set SCHEMA_TEST_DATABASE_URL to a throwaway database to enable.
+"""Browser signals are non-punitive assessment observations; practice is excluded.
+Uses an explicitly disposable PostgreSQL database.
 """
 
 import os
@@ -50,7 +41,9 @@ async def database():
         await connection.run_sync(Base.metadata.create_all)
 
     original_factory = async_db.async_session_factory
-    async_db.async_session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async_db.async_session_factory = async_sessionmaker(
+        bind=engine, expire_on_commit=False
+    )
     try:
         yield engine
     finally:
@@ -71,16 +64,27 @@ def app(database):
     return application
 
 
-async def _create_interview(database, *, interview_mode: str, user_id: int = 1, status: str = "active") -> int:
+async def _create_interview(
+    database, *, interview_mode: str, user_id: int = 1, status: str = "active"
+) -> int:
     from src.repository.crud.interview import InterviewCRUDRepository
     from src.repository.database import async_db
     from src.models.db.user import User
 
     sessionmaker = async_sessionmaker(bind=database, expire_on_commit=False)
     async with sessionmaker() as session:
-        result = await session.execute(sqlalchemy.select(User).where(User.id == user_id))
+        result = await session.execute(
+            sqlalchemy.select(User).where(User.id == user_id)
+        )
         if result.scalar_one_or_none() is None:
-            session.add(User(id=user_id, email=f"proctor{user_id}@example.test", password_hash="x", name="Proctor Probe"))
+            session.add(
+                User(
+                    id=user_id,
+                    email=f"proctor{user_id}@example.test",
+                    password_hash="x",
+                    name="Proctor Probe",
+                )
+            )
             await session.commit()
 
     # Closed explicitly: an unclosed session leaves a transaction open that
@@ -89,7 +93,9 @@ async def _create_interview(database, *, interview_mode: str, user_id: int = 1, 
     repo = InterviewCRUDRepository(async_session=repo_session)
     # create_interview always derives "practice" with no job profile; set the
     # mode directly afterward since these tests need either value on demand.
-    interview = await repo.create_interview(user_id=user_id, track="Backend", difficulty="easy")
+    interview = await repo.create_interview(
+        user_id=user_id, track="Backend", difficulty="easy"
+    )
     await repo_session.close()
     async with sessionmaker() as session:
         from src.models.db.interview import Interview
@@ -102,29 +108,65 @@ async def _create_interview(database, *, interview_mode: str, user_id: int = 1, 
 
 
 async def _post_violation(app, interview_id: int, reason: str = "tab_switch"):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://probe") as client:
-        return await client.post(VIOLATION_PATH, json={"interviewId": interview_id, "reason": reason})
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://probe"
+    ) as client:
+        return await client.post(
+            VIOLATION_PATH, json={"interviewId": interview_id, "reason": reason}
+        )
 
 
-async def test_tab_switch_ends_an_assessment_interview(app, database):
+async def test_tab_switch_records_without_ending_assessment(app, database):
     interview_id = await _create_interview(database, interview_mode="assessment")
 
     response = await _post_violation(app, interview_id, reason="tab_switch")
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["status"] == "terminated"
-    assert body["proctoringTerminated"] is True
-    assert body["proctoringViolationReason"] == "tab_switch"
+    assert body["status"] == "active"
+    assert body["proctoringTerminated"] is False
+    assert body["proctoringViolationReason"] is None
+    assert body["eventCount"] == 1
 
 
-async def test_fullscreen_exit_ends_an_assessment_interview(app, database):
+async def test_fullscreen_exit_records_without_ending_assessment(app, database):
     interview_id = await _create_interview(database, interview_mode="assessment")
 
     response = await _post_violation(app, interview_id, reason="fullscreen_exit")
 
     assert response.status_code == 200, response.text
-    assert response.json()["proctoringViolationReason"] == "fullscreen_exit"
+    assert response.json()["proctoringViolationReason"] is None
+    assert response.json()["eventCount"] == 1
+
+
+async def test_signal_id_cannot_be_reused_for_different_evidence(app, database):
+    interview_id = await _create_interview(database, interview_mode="assessment")
+    payload = {
+        "interviewId": interview_id,
+        "reason": "tab_switch",
+        "eventId": "signal-retry-0001",
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        first = await client.post(VIOLATION_PATH, json=payload)
+        replay = await client.post(VIOLATION_PATH, json=payload)
+        conflict = await client.post(
+            VIOLATION_PATH, json={**payload, "reason": "fullscreen_exit"}
+        )
+    assert first.status_code == replay.status_code == 200
+    assert replay.json()["eventCount"] == 1
+    assert conflict.status_code == 409
+    from src.models.db.interview import Interview
+
+    factory = async_sessionmaker(database, expire_on_commit=False)
+    async with factory() as session:
+        interview = await session.get(Interview, interview_id)
+        event = interview.integrity_events[0]
+        assert event["verdict"] is None
+        assert event["automaticPenalty"] is False
+        assert event["evidenceClass"] == "unverified_client_observation"
+        assert interview.status == "active"
 
 
 async def test_a_practice_interview_is_never_terminated(app, database):
@@ -148,7 +190,9 @@ async def test_a_practice_interview_is_never_terminated(app, database):
 
 
 async def test_only_the_owning_student_can_report_a_violation(app, database):
-    interview_id = await _create_interview(database, interview_mode="assessment", user_id=OTHER_USER_ID)
+    interview_id = await _create_interview(
+        database, interview_mode="assessment", user_id=OTHER_USER_ID
+    )
 
     response = await _post_violation(app, interview_id)
 
@@ -165,39 +209,47 @@ async def test_repeating_the_report_is_idempotent(app, database):
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert second.json()["proctoringViolationReason"] == "tab_switch", (
-        "A repeated report overwrote the original violation reason"
+    assert second.json()["status"] == "active"
+    assert second.json()["proctoringTerminated"] is False
+    assert second.json()["eventCount"] == 2
+
+
+async def test_a_normally_completed_interview_cannot_be_retroactively_terminated(
+    app, database
+):
+    interview_id = await _create_interview(
+        database, interview_mode="assessment", status="completed"
     )
-
-
-async def test_a_normally_completed_interview_cannot_be_retroactively_terminated(app, database):
-    interview_id = await _create_interview(database, interview_mode="assessment", status="completed")
 
     response = await _post_violation(app, interview_id)
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "completed"
-    assert body["proctoringTerminated"] is False, (
-        "A finished interview was marked as proctoring-terminated after the fact"
-    )
+    assert (
+        body["proctoringTerminated"] is False
+    ), "A finished interview was marked as proctoring-terminated after the fact"
 
 
 async def test_an_interview_that_never_started_cannot_be_terminated(app, database):
     """status defaults to active on create, so emulate an interview that was
     never activated - e.g. created in some other terminal state."""
-    interview_id = await _create_interview(database, interview_mode="assessment", status="draft")
+    interview_id = await _create_interview(
+        database, interview_mode="assessment", status="draft"
+    )
 
     response = await _post_violation(app, interview_id)
 
-    assert response.status_code == 400
+    assert response.status_code == 409
 
 
 async def test_an_unknown_reason_is_rejected(app, database):
     """The remark reads from a fixed set, not free text the client supplies."""
     interview_id = await _create_interview(database, interview_mode="assessment")
 
-    response = await _post_violation(app, interview_id, reason="student_was_cheating_i_swear")
+    response = await _post_violation(
+        app, interview_id, reason="student_was_cheating_i_swear"
+    )
 
     assert response.status_code == 422
 
@@ -218,16 +270,26 @@ async def test_a_terminated_interview_cannot_start_a_new_question(app, database)
     sessionmaker = async_sessionmaker(bind=database, expire_on_commit=False)
     async with sessionmaker() as session:
         question = InterviewQuestion(
-            interview_id=interview_id, text="Describe your experience with REST APIs.",
-            order=1, status="pending",
+            interview_id=interview_id,
+            text="Describe your experience with REST APIs.",
+            order=1,
+            status="pending",
         )
         session.add(question)
         await session.commit()
         question_id = question.id
 
-    await _post_violation(app, interview_id, reason="tab_switch")
+    # Historical terminal states stay terminal; new browser signals do not create one.
+    from src.models.db.interview import Interview
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://probe") as client:
+    async with sessionmaker() as session:
+        row = await session.get(Interview, interview_id)
+        row.status = "terminated"
+        await session.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://probe"
+    ) as client:
         response = await client.post(
             ATTEMPT_PATH, json={"interviewId": interview_id, "questionId": question_id}
         )

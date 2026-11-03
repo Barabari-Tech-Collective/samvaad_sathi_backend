@@ -134,6 +134,33 @@ async def test_failed_answer_is_terminal_and_explains_why():
 
 
 @pytest.mark.anyio
+async def test_unusable_speech_requires_a_new_recording_instead_of_provider_retry():
+    row = attempt(
+        transcription_status=TranscriptionStatus.FAILED.value,
+        transcription={
+            "text": "um",
+            "evidence": {
+                "status": "unavailable",
+                "reason": "insufficient_speech",
+                "word_count": 1,
+                "confidence": None,
+            },
+        },
+        transcription_error="We could not hear enough clear speech.",
+    )
+    repo = Repo(row)
+    response = await get_transcription_status(42, current_user=USER, question_repo=repo)
+
+    assert response.evidence_status == "unavailable"
+    assert response.evidence_reason == "insufficient_speech"
+    assert response.retryable is False
+
+    with pytest.raises(fastapi.HTTPException) as raised:
+        await audio.retry_transcription(42, current_user=USER, question_repo=repo)
+    assert raised.value.status_code == fastapi.status.HTTP_409_CONFLICT
+
+
+@pytest.mark.anyio
 async def test_an_attempt_without_audio_is_not_reported_as_saved():
     row = attempt(audio_url=None)
     response = await get_transcription_status(
@@ -168,7 +195,14 @@ async def test_a_row_predating_the_column_is_treated_as_pending():
 async def test_retry_requeues_a_failed_saved_answer(monkeypatch):
     row = attempt(transcription_status=TranscriptionStatus.FAILED.value)
     repo = Repo(row)
-    repo.mark_transcription_pending = AsyncMock(return_value=row)
+    repo.reserve_transcription_retry = AsyncMock(return_value=row)
+
+    async def reserve(**kwargs):
+        row.transcription_status = "pending"
+        row.transcription_updated_at = datetime.datetime.now(datetime.timezone.utc)
+        return row
+
+    repo.reserve_transcription_retry.side_effect = reserve
     queued = AsyncMock(return_value="job-42")
     monkeypatch.setattr(audio, "enqueue_job", queued)
 
@@ -194,7 +228,7 @@ async def test_retry_does_not_duplicate_a_fresh_processing_job(monkeypatch):
         transcription_updated_at=datetime.datetime.now(datetime.timezone.utc),
     )
     repo = Repo(row)
-    repo.mark_transcription_pending = AsyncMock(return_value=row)
+    repo.reserve_transcription_retry = AsyncMock(return_value=None)
     queued = AsyncMock(return_value="job-42")
     monkeypatch.setattr(audio, "enqueue_job", queued)
 
@@ -203,5 +237,5 @@ async def test_retry_does_not_duplicate_a_fresh_processing_job(monkeypatch):
     )
 
     assert response.status == "processing"
-    repo.mark_transcription_pending.assert_not_called()
+    repo.reserve_transcription_retry.assert_awaited_once()
     queued.assert_not_called()

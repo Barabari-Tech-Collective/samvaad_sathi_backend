@@ -37,7 +37,16 @@ from src.services.ai_resume.bulk.evidence import (
     redact_for_semantic_scoring,
 )
 from src.services.ai_resume.bulk.jd_quality import analyze_job_description
+from src.services.ai_resume.bulk.domain_profile import (
+    explicit_link_requirements,
+    infer_domain_profile,
+)
+from src.services.ai_resume.bulk.link_requirements import check_link_requirements
+from src.services.ai_resume.bulk.scoring_weights import resolve_weights
 from src.services.ai_resume.bulk.malware_scan import scan_document
+from src.services.ai_resume.scoring.project_scorer import ProjectScorer
+from src.services.ai_resume.url_validator import extract_professional_urls
+from src.utilities.link_validator import SmartLinkValidator
 from src.worker import tasks as worker_tasks
 from src.worker.tasks import (
     _detect_resume_type,
@@ -78,6 +87,70 @@ def test_parse_resume_urls_ignores_blank_lines_and_marks_source():
 
 def test_staff_dashboard_origin_is_allowed_for_direct_bulk_uploads():
     assert "https://admin.barabaricollective.org" in settings.ALLOWED_ORIGINS
+
+
+def test_score_bands_separate_weak_candidates_from_average_candidates():
+    assert pipeline.score_band_for(59.99) == "Weak"
+    assert pipeline.score_band_for(60.0) == "Average"
+
+
+def test_candidate_summary_exposes_bounded_private_note_preview():
+    candidate = SimpleNamespace(
+        id=1,
+        candidate_name="Example",
+        email_or_candidate_id="example@test.invalid",
+        final_score=82,
+        score_band="Good",
+        status="completed",
+        needs_review=False,
+        warnings=[],
+        confidence_score=90,
+        score_lower_bound=None,
+        score_upper_bound=None,
+        reviewer_decision="shortlist",
+        interview_outcome="interviewed",
+        reviewer_notes="  " + "A" * 500,
+        assigned_reviewer_id=None,
+        deterministic_report=None,
+    )
+    summary = bulk_ats_routes._candidate_summary(candidate)
+    assert summary["hasReviewerNotes"] is True
+    assert summary["reviewerNotesPreview"] == "A" * 240
+    assert summary["reviewerDecision"] == "shortlist"
+    assert summary["interviewOutcome"] == "interviewed"
+
+
+@pytest.mark.asyncio
+async def test_partial_recruiter_update_preserves_notes_and_outcome():
+    candidate = SimpleNamespace(
+        reviewer_notes="Keep this note",
+        reviewer_decision=None,
+        decision_reason=None,
+        interview_outcome="advanced",
+        outcome_recorded_at=datetime.datetime.now(datetime.timezone.utc),
+        reviewed_by=None,
+        assigned_reviewer_id=None,
+    )
+    session = AsyncMock()
+    repo = BulkATSCRUDRepository(session)
+    repo.get_candidate = AsyncMock(return_value=candidate)
+
+    await repo.update_review(
+        42,
+        reviewer_notes=None,
+        reviewer_decision="shortlist",
+        decision_reason="Bulk recruiter decision",
+        interview_outcome=None,
+        reviewed_by=7,
+        update_reviewer_notes=False,
+        update_interview_outcome=False,
+    )
+
+    assert candidate.reviewer_notes == "Keep this note"
+    assert candidate.interview_outcome == "advanced"
+    assert candidate.reviewer_decision == "shortlist"
+    assert candidate.decision_reason == "Bulk recruiter decision"
+    assert candidate.reviewed_by == 7
 
 
 def test_batch_requires_jd_or_required_skills_as_role_rubric():
@@ -400,6 +473,44 @@ def test_bulk_ats_endpoints_are_exposed_in_openapi():
 
 
 @pytest.mark.asyncio
+async def test_list_candidates_supports_assigned_reviewer_filter(monkeypatch):
+    candidate = SimpleNamespace(id=12)
+    repo = SimpleNamespace(
+        list_candidates=AsyncMock(return_value=[candidate]),
+        count_candidates=AsyncMock(return_value=1),
+    )
+    monkeypatch.setattr(bulk_ats_routes, "BulkATSCRUDRepository", lambda _session: repo)
+    monkeypatch.setattr(
+        bulk_ats_routes,
+        "_get_authorized_batch",
+        AsyncMock(return_value=SimpleNamespace(id=4)),
+    )
+    monkeypatch.setattr(
+        bulk_ats_routes, "_candidate_summary", lambda item: {"id": item.id}
+    )
+
+    response = await bulk_ats_routes.list_candidates(
+        batch_id=4,
+        current_user=SimpleNamespace(id=7),
+        session=SimpleNamespace(),
+        assigned_reviewer_id=23,
+    )
+
+    assert response == {"total": 1, "candidates": [{"id": 12}]}
+    repo.list_candidates.assert_awaited_once_with(
+        batch_id=4,
+        status=None,
+        sort="score",
+        limit=50,
+        offset=0,
+        assigned_reviewer_id=23,
+    )
+    repo.count_candidates.assert_awaited_once_with(
+        batch_id=4, status=None, assigned_reviewer_id=23
+    )
+
+
+@pytest.mark.asyncio
 async def test_rerun_returns_503_when_background_job_cannot_be_queued(monkeypatch):
     candidate = SimpleNamespace(id=28, batch_id=4)
     repo = SimpleNamespace(
@@ -478,9 +589,18 @@ async def test_stub_jev_provider_forces_manual_review():
 @pytest.mark.asyncio
 async def test_real_jev_provider_calls_system_one_and_maps_answers(monkeypatch):
     response = SimpleNamespace(
-        scores={"skills_score": SimpleNamespace(score=3.0, confidence=0.8)},
-        choices={"education_quality": SimpleNamespace(choice="Strong", confidence=0.9)},
-        nouls={"needs_manual_review": SimpleNamespace(noul=0.2)},
+        scores={
+            key: SimpleNamespace(score=3.0, confidence=0.8)
+            for key in jev_client.SCORE_LEVELS
+        },
+        choices={
+            "education_quality": SimpleNamespace(choice="Strong", confidence=0.9),
+            "project_tier": SimpleNamespace(choice="Good", confidence=0.8),
+        },
+        nouls={
+            "needs_manual_review": SimpleNamespace(noul=0.2),
+            "experience_mode_mismatch": SimpleNamespace(noul=0.1),
+        },
     )
     system_one = AsyncMock(return_value=response)
 
@@ -700,16 +820,22 @@ async def test_candidate_pipeline_builds_metric_scorecard_and_brief(monkeypatch)
         raw_bytes=b"%PDF-1.7\nsynthetic",
         filename="candidate.pdf",
         role_name="Backend Engineer",
-        role_description="Build Python APIs",
+        role_description=(
+            "Build and operate Python APIs, investigate production issues, and "
+            "communicate technical trade-offs to product stakeholders."
+        ),
         evaluation_intent="Evaluate ownership of a short fintech migration project",
-        required_skills=["Python"],
-        preferred_skills=["FastAPI"],
+        required_skills=[],
+        preferred_skills=[],
         experience_mode="experienced",
         weight_overrides=None,
         jev_provider=provider,
     )
 
     scorecard = result.deterministic_report["bulkAtsScorecard"]
+    # Demonstrated evidence leads the skill score: 20% deterministic coverage
+    # (80) plus 80% Jev evidence judgment (100).
+    assert scorecard["categoryScores"]["skills"] == 96.0
     assert set(scorecard["categoryScores"]) == {
         "skills",
         "education",
@@ -724,6 +850,9 @@ async def test_candidate_pipeline_builds_metric_scorecard_and_brief(monkeypatch)
         "Scored "
     )
     assert scorecard["evaluationIntentApplied"] is True
+    assert scorecard["roleContext"] == "job_description"
+    assert scorecard["scoreApplicability"]["skills"] is True
+    assert "missing_skills_rubric" not in result.warnings
     assert provider.evaluate.await_args.kwargs["evaluation_intent"].startswith(
         "Evaluate ownership"
     )
@@ -757,7 +886,371 @@ def test_candidate_brief_surfaces_strongest_and_weakest_metrics():
     assert brief["recommendation"] == "Manual review required"
 
 
+def test_domain_profile_and_link_policy_do_not_make_github_a_data_requirement():
+    profile = infer_domain_profile(
+        role_name="Data Analyst",
+        role_description="Build dashboards and explain business insights",
+        required_skills=["SQL", "Tableau"],
+    )
+    requirements = explicit_link_requirements(
+        role_description="Build dashboards and explain business insights",
+        evaluation_intent="Assess analytical thinking for a retail project",
+        required_skills=["SQL", "Tableau"],
+    )
+    report = check_link_requirements(
+        verified_links={"links": {}},
+        required_categories=requirements,
+        domain_profile=profile,
+    )
+
+    assert profile.id == "data_analytics"
+    assert requirements == ()
+    assert report["scoreApplicable"] is False
+    assert report["linkScore"] is None
+    assert report["missing_required"] == []
+    weights = resolve_weights(
+        "experienced",
+        None,
+        applicable_categories={"skills", "education", "experience", "projects"},
+    )
+    assert weights["links"] == 0
+    assert round(sum(weights.values()), 6) == 100
+
+
+def test_explicit_required_evidence_is_scored_and_all_links_are_returned():
+    profile = infer_domain_profile(role_name="Product Manager")
+    requirements = explicit_link_requirements(
+        role_description="A product case study link is required.",
+        evaluation_intent="",
+        required_skills=[],
+    )
+    report = check_link_requirements(
+        verified_links={
+            "links": {
+                "https://example.test/case-study": {
+                    "valid": True,
+                    "status_code": 200,
+                    "category": "portfolio",
+                    "platform": "custom_domain",
+                    "anchorText": "Launch case study",
+                },
+                "https://linkedin.com/in/candidate": {
+                    "valid": True,
+                    "status_code": 200,
+                    "category": "social",
+                    "platform": "linkedin",
+                },
+            }
+        },
+        required_categories=requirements,
+        domain_profile=profile,
+    )
+
+    assert requirements == ("project_evidence",)
+    assert report["scoreApplicable"] is True
+    assert report["linkScore"] == 100
+    assert report["passed"] == ["project_evidence_working"]
+    assert {item["url"] for item in report["links"]} == {
+        "https://example.test/case-study",
+        "https://linkedin.com/in/candidate",
+    }
+
+
+def test_non_technical_and_data_work_sample_urls_are_extracted():
+    urls = extract_professional_urls(
+        "Dashboard: public.tableau.com/views/retention Portfolio: "
+        "https://research.example.org/case-study Design: behance.net/candidate"
+    )
+
+    assert set(urls) == {
+        "https://public.tableau.com/views/retention",
+        "https://research.example.org/case-study",
+        "https://behance.net/candidate",
+    }
+
+
+def test_candidate_link_normalization_rejects_contact_and_malformed_urls():
+    validator = SmartLinkValidator()
+
+    assert validator._normalize_candidate_url("mailto:candidate@example.test") == ""
+    assert (
+        validator._normalize_candidate_url("https://mailto:candidate@example.test")
+        == ""
+    )
+    assert validator._normalize_candidate_url("candidate@example.test") == ""
+    assert (
+        validator._normalize_candidate_url("HTTPS://Example.Test/work/#section")
+        == "https://example.test/work"
+    )
+
+
+@pytest.mark.asyncio
+async def test_candidate_link_validation_hides_system_and_contact_links():
+    validator = SmartLinkValidator()
+    result = await validator.validate_all_links_async(
+        [
+            "mailto:candidate@example.test",
+            "https://mailto:candidate@example.test",
+            "https://www.google.com/search?q=candidate",
+        ]
+    )
+
+    assert result["total_links_found"] == 0
+    assert result["links"] == {}
+
+
+def test_domain_aware_project_score_rewards_ownership_and_outcomes_without_github():
+    result = ProjectScorer().score_projects(
+        [
+            {
+                "title": "Community retention programme",
+                "description": "Designed and led interviews with learners.",
+                "highlights": [
+                    "Created a new support journey",
+                    "Coordinated delivery across three teams",
+                    "Improved retention by 18%",
+                ],
+            }
+        ],
+        role_keywords=["programme", "learner", "stakeholder"],
+        domain_profile={
+            "id": "education_social_impact",
+            "label": "Education and social impact",
+        },
+    )
+
+    project = result["projectEvaluation"][0]
+    assert result["scoringModel"] == "domain_aware_v1"
+    assert project["score"] >= 25
+    assert not any(
+        "GitHub" in gap or "repository" in gap for gap in project["detectedGaps"]
+    )
+    assert set(project["breakdown"]) == {
+        "clarity",
+        "ownership",
+        "roleRelevance",
+        "outcomes",
+        "supportingEvidence",
+    }
+    assert "18%" in project["factorEvidence"]["outcomes"]
+    assert "programme" in project["factorEvidence"]["roleRelevance"]
+    assert "designed" in project["factorEvidence"]["ownership"]
+
+
+@pytest.mark.asyncio
+async def test_deepseek_project_review_stays_bound_to_saved_project(monkeypatch):
+    monkeypatch.setattr(settings, "BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED", True)
+    monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "test-key")
+    generated = deepseek_feedback.FeedbackPayload(
+        summary="Review the claimed result.",
+        projectReviews=[
+            {"projectName": "Community retention programme", "review": "The résumé claims an 18% retention improvement; ask how it was measured."},
+            {"projectName": "Other project", "review": "Unrelated generated content."},
+        ],
+    )
+    monkeypatch.setattr(
+        deepseek_feedback,
+        "_generate_validated_json",
+        AsyncMock(return_value=(generated, {"attempts": 1})),
+    )
+    brief, meta = await deepseek_feedback.enrich_candidate_brief(
+        role_name="Programme Manager",
+        scorecard={"categoryScores": {"projects": 72}},
+        evidence={},
+        warnings=[],
+        deterministic_brief={},
+        projects=[{"projectName": "Community retention programme", "score": 27, "breakdown": {"outcomes": 7}}],
+    )
+    assert meta["source"] == "deepseek"
+    assert brief["projectReviews"] == [
+        {"projectName": "Community retention programme", "review": "The résumé claims an 18% retention improvement; ask how it was measured."}
+    ]
+
+
+def test_candidate_detail_exposes_saved_project_claims_without_changing_score():
+    candidate = SimpleNamespace(
+        id=17,
+        candidate_name="Example Candidate",
+        email_or_candidate_id="example@example.test",
+        final_score=84,
+        score_band="strong",
+        status="completed",
+        needs_review=False,
+        warnings=[],
+        confidence_score=0.8,
+        score_lower_bound=None,
+        score_upper_bound=None,
+        reviewer_decision=None,
+        interview_outcome="interviewed",
+        assigned_reviewer_id=None,
+        parsed_resume_json={
+            "skills": [],
+            "projects": [
+                {
+                    "title": "CivicSphere",
+                    "description": "Built a service request tracker for local councils.",
+                    "highlights": ["Led the design", "Reduced request time by 20%"],
+                }
+            ],
+        },
+        original_filename="example.pdf",
+        resume_url=None,
+        batch=SimpleNamespace(role_name="Product manager"),
+        error_message=None,
+        deterministic_report={
+            "deterministicMetrics": {
+                "projectModule": {"projectEvaluation": [{"score": 28, "maxScore": 35}]}
+            }
+        },
+        jev_report=None,
+        link_report=None,
+        reviewer_notes=None,
+        decision_reason=None,
+        outcome_recorded_at=None,
+        created_at=datetime.datetime.now(datetime.timezone.utc),
+        updated_at=datetime.datetime.now(datetime.timezone.utc),
+    )
+
+    detail = bulk_ats_routes._candidate_detail(candidate)
+
+    assert detail["interviewOutcome"] == "interviewed"
+    assert detail["reviewerDecision"] is None
+    assert detail["parsedProjects"][0]["description"] == (
+        "Built a service request tracker for local councils."
+    )
+    assert detail["parsedProjects"][0]["highlights"][1] == (
+        "Reduced request time by 20%"
+    )
+    assert detail["deterministicReport"]["deterministicMetrics"]["projectModule"][
+        "projectEvaluation"
+    ][0]["score"] == 28
+
+
+def test_experience_fallback_does_not_treat_internships_as_professional_mismatch():
+    assert not pipeline._has_sustained_professional_experience(
+        {
+            "experience": [
+                {"title": "Data Analyst Intern"},
+                {"title": "Campus Volunteer"},
+            ]
+        }
+    )
+    assert pipeline._has_sustained_professional_experience(
+        {"experience": [{"title": "Data Analyst"}]}
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresher_batch_marks_jev_experience_mismatch_as_provisional(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "extract_resume_text",
+        AsyncMock(
+            return_value={
+                "text": "Product Manager at Example, Jan 2022 - Present",
+                "documentMap": [],
+                "embeddedLinks": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "generate_structured_resume_data",
+        AsyncMock(
+            return_value={
+                "header": {"fullName": "Candidate"},
+                "skills": ["Roadmapping"],
+                "education": [],
+                "projects": [],
+                "experience": [
+                    {
+                        "title": "Product Manager",
+                        "company": "Example",
+                        "duration": "Jan 2022 - Present",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(pipeline, "extract_professional_urls", lambda _text: [])
+
+    class FakeLinkValidator:
+        async def validate_all_links_async(self, _targets):
+            return {"links": {}}
+
+    monkeypatch.setattr(pipeline, "SmartLinkValidator", FakeLinkValidator)
+    monkeypatch.setattr(
+        pipeline._link_scorer,
+        "score_links",
+        lambda **_kwargs: {"categoryBreakdown": {}},
+    )
+    monkeypatch.setattr(
+        pipeline._ats_engine,
+        "run_assessment",
+        lambda **_kwargs: {
+            "scoreBreakdown": {
+                "skillsMatch": 80,
+                "educationScore": 60,
+                "experienceMatch": 90,
+                "projectMatch": 70,
+                "linkIntegrity": 0,
+            },
+            "hygieneCheck": {"hasEmail": True, "hasPhone": True},
+            "deterministicMetrics": {
+                "experienceModule": {
+                    "totalMonths": 48,
+                    "formattedDuration": "4 yrs",
+                },
+                "projectModule": {"projectEvaluation": []},
+            },
+        },
+    )
+    answers = {
+        "skills_score": jev_client.JevAnswer("skills_score", "score", 3.0, 0.9),
+        "needs_manual_review": jev_client.JevAnswer(
+            "needs_manual_review", "noul", False, 0.1
+        ),
+        "experience_mode_mismatch": jev_client.JevAnswer(
+            "experience_mode_mismatch", "noul", True, 0.95
+        ),
+    }
+    provider = SimpleNamespace(evaluate=AsyncMock(return_value=answers))
+
+    result = await pipeline.run_candidate_pipeline(
+        raw_bytes=b"%PDF-1.7\nsynthetic",
+        filename="candidate.pdf",
+        role_name="Product Intern",
+        role_description="Support product discovery",
+        required_skills=["Roadmapping"],
+        preferred_skills=[],
+        experience_mode="fresher",
+        weight_overrides=None,
+        jev_provider=provider,
+    )
+
+    assert result.status == "needs_review"
+    assert result.final_score is not None
+    gate = result.deterministic_report["bulkAtsReviewGate"]
+    assert gate["detectedField"] == "Product management"
+    assert gate["source"] == "jev"
+    assert result.deterministic_report["bulkAtsScorecard"]["provisional"] is True
+    assert result.deterministic_report["bulkAtsScorecard"]["weightedContributions"]
+    assert "experienced_candidate_in_fresher_batch" in result.warnings
+
+
 def test_optional_job_description_reports_role_context_quality():
+    warnings, context = pipeline._assess_role_context(
+        role_description=(
+            "Analyze business data with Excel and SQL, build dashboards, and "
+            "communicate recommendations to operational stakeholders."
+        ),
+        evaluation_intent="",
+        required_skills=[],
+        preferred_skills=[],
+    )
+    assert context == "job_description"
+    assert warnings == []
+
     warnings, context = pipeline._assess_role_context(
         role_description="",
         evaluation_intent="",
@@ -888,6 +1381,16 @@ def test_feedback_states_tolerate_historical_reports():
     assert _feedback_states(
         {"shareableFeedback": {"student": {"status": "ready"}}}
     ) == {"student": "ready", "team": None}
+
+
+def test_feedback_states_turn_stale_jobs_into_terminal_failures():
+    stale = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+    ).isoformat()
+
+    assert _feedback_states(
+        {"shareableFeedback": {"student": {"status": "generating", "startedAt": stale}}}
+    ) == {"student": "failed", "team": None}
 
 
 def test_feedback_request_recovers_after_stale_or_malformed_timestamp():

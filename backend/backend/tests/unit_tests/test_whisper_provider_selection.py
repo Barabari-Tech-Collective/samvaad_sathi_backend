@@ -73,3 +73,35 @@ def test_get_client_uses_default_openai_base_url(monkeypatch):
 
     assert client is not None
     assert "groq" not in str(client.base_url)
+
+
+@pytest.mark.parametrize(
+    ("transcription", "reason"),
+    [
+        (None, "missing_transcript"),
+        ({"text": ""}, "no_speech_detected"),
+        ({"text": "hello"}, "insufficient_speech"),
+        ({"text": "clear enough answer", "duration": 0}, "invalid_duration"),
+        ({"text": "clear enough answer", "confidence": 0.2}, "low_confidence"),
+    ],
+)
+def test_unusable_transcription_evidence_is_rejected(transcription, reason):
+    evidence = whisper_module.assess_transcription_evidence(transcription)
+
+    assert evidence["status"] == "unavailable"
+    assert evidence["reason"] == reason
+    assert whisper_module.transcription_is_usable(transcription) is False
+
+
+def test_usable_transcription_evidence_is_accepted():
+    transcription = {"text": "This is a sufficiently clear answer", "duration": 4.2}
+
+    evidence = whisper_module.assess_transcription_evidence(transcription)
+
+    assert evidence == {
+        "status": "usable",
+        "reason": None,
+        "word_count": 6,
+        "confidence": None,
+    }
+    assert whisper_module.transcription_is_usable(transcription) is True

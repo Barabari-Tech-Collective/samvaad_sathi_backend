@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 2,
+  "status": "preparation_destination_identity_pending",
+  "source": {
+    "accountId": "351405418851",
+    "profile": "samvaad-login",
+    "region": "ap-south-1",
+    "identityVerification": "historical_2026-10-19_reverify",
+    "databaseProvider": "Aiven PostgreSQL (historical; verify live)",
+    "authDeployment": "live topology and shared consumers require inventory"
+  },
+  "destination": {
+    "accountId": "",
+    "profile": "",
+    "region": "ap-south-1",
+    "databaseProvider": "",
+    "authDeployment": ""
+  },
+  "scope": {
+    "awsResources": true,
+    "applicationDatabase": true,
+    "authenticationDatabaseAndService": true,
+    "keepPublicDomains": true,
+    "separateHostedStaging": false
+  },
+  "release": {
+    "strategy": "verified deployed release; exclude unfinished Build 39",
+    "backendCommit": "",
+    "studentCommit": "",
+    "dashboardCommit": "",
+    "centralAuthCommit": ""
+  },
+  "domains": [],
+  "resourceMappings": [],
+  "database": {"sourceReference": "", "destinationReference": "", "verifiedRestoreEvidence": "", "finalBackupEvidence": ""},
+  "authentication": {"sharedConsumers": [], "identityParityEvidence": "", "sessionRevocationPolicy": "", "callbackEvidence": ""},
+  "storage": {"bucketMappings": [], "versionRetentionPolicy": "", "reconciliationEvidence": ""},
+  "operations": {"owners": [], "writeFenceEvidence": "", "queueReconciliationEvidence": "", "cutoverWindow": "", "rollbackEvidence": "", "observationWindow": ""},
+  "secretReferencesOnly": {"database": "", "authSigningKey": "", "oauthClients": "", "providers": ""}
+}

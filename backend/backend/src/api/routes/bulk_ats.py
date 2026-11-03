@@ -10,6 +10,7 @@ reviewer (needs_review).
 import hashlib
 import logging
 import datetime
+import re
 import secrets
 from typing import Literal, Optional
 from urllib.parse import quote, urlparse
@@ -30,7 +31,10 @@ from src.api.dependencies.session import get_async_session
 from src.config.manager import settings
 from src.models.db.bulk_ats import BulkATSCandidate
 from src.models.db.user import User
-from src.repository.crud.bulk_ats import BulkATSCRUDRepository
+from src.repository.crud.bulk_ats import (
+    BulkATSCRUDRepository,
+    _feedback_request_is_active,
+)
 from src.repository.crud.user import UserCRUDRepository
 from src.services.ai_resume.parser_service import ALLOWED_FILE_TYPES
 from src.services.ai_resume.bulk.jd_quality import analyze_job_description
@@ -49,6 +53,7 @@ from src.services.s3_service import (
     delete_bulk_ats_resumes_from_s3,
 )
 from src.worker.queue import enqueue_job
+from src.utilities.exceptions.database import EntityDoesNotExist
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +75,18 @@ class GenerateFeedbackBody(pydantic.BaseModel):
 
 class GenerateBatchFeedbackBody(GenerateFeedbackBody):
     candidate_ids: list[int] | None = pydantic.Field(default=None, max_length=100)
+
+
+class MergeCandidateBody(pydantic.BaseModel):
+    canonical_candidate_id: int
+
+
+class UpdateRubricBody(pydantic.BaseModel):
+    role_description: str = pydantic.Field(default="", max_length=12000)
+    evaluation_intent: str = pydantic.Field(default="", max_length=2000)
+    required_skills: list[str] = pydantic.Field(default_factory=list, max_length=100)
+    preferred_skills: list[str] = pydantic.Field(default_factory=list, max_length=100)
+    experience_mode: Literal["fresher", "experienced"] = "experienced"
 
 
 def _drive_oauth_redirect(*, status: str, detail: str | None = None):
@@ -167,14 +184,23 @@ def _feedback_states(report: dict | None) -> dict:
     shareable = (report or {}).get("shareableFeedback") or {}
     if not isinstance(shareable, dict):
         shareable = {}
-    return {
-        audience: (
-            (shareable.get(audience) or {}).get("status")
-            if isinstance(shareable.get(audience), dict)
-            else None
-        )
-        for audience in ("student", "team")
-    }
+    states: dict[str, str | None] = {}
+    for audience in ("student", "team"):
+        state = shareable.get(audience)
+        if not isinstance(state, dict):
+            states[audience] = None
+            continue
+        status = state.get("status")
+        if status in {"queued", "generating"} and not _feedback_request_is_active(
+            state
+        ):
+            # Do not make clients poll forever when a worker stopped without
+            # writing a terminal state. A new request can safely reserve this
+            # stale artifact because begin_feedback_request uses the same rule.
+            states[audience] = "failed"
+        else:
+            states[audience] = status
+    return states
 
 
 def _format_feedback_copy(
@@ -227,6 +253,9 @@ def _candidate_summary(c: BulkATSCandidate) -> dict:
         "scoreUpperBound": c.score_upper_bound,
         "reviewerDecision": c.reviewer_decision,
         "interviewOutcome": c.interview_outcome,
+        "reviewerNotesPreview": (c.reviewer_notes or "").strip()[:240],
+        "hasReviewerNotes": bool((c.reviewer_notes or "").strip()),
+        "assignedReviewerId": c.assigned_reviewer_id,
         "feedbackStatus": _feedback_states(c.deterministic_report),
     }
 
@@ -241,6 +270,25 @@ def _candidate_detail(c: BulkATSCandidate) -> dict:
         for skill in raw_skills
         if isinstance(skill, str) and skill.strip()
     ]
+    # Keep the scored project report immutable. The résumé text below lets the
+    # client show the actual project claims beside the saved scoring factors,
+    # including for candidates screened before this response field existed.
+    parsed_projects = []
+    if isinstance(parsed_resume, dict):
+        raw_projects = parsed_resume.get("projects")
+        for project in (raw_projects if isinstance(raw_projects, list) else [])[:20]:
+            if not isinstance(project, dict):
+                continue
+            raw_highlights = project.get("highlights") or []
+            parsed_projects.append(
+                {
+                    "title": str(project.get("title") or project.get("projectName") or "")[:200],
+                    "description": str(project.get("description") or "")[:1500],
+                    "highlights": [str(item)[:500] for item in raw_highlights[:5]]
+                    if isinstance(raw_highlights, list)
+                    else [],
+                }
+            )
     return {
         **_candidate_summary(c),
         "originalFilename": c.original_filename,
@@ -248,12 +296,14 @@ def _candidate_detail(c: BulkATSCandidate) -> dict:
         "roleName": c.batch.role_name if c.batch is not None else None,
         "errorMessage": c.error_message,
         "extractedSkills": extracted_skills,
+        "parsedProjects": parsed_projects,
         "deterministicReport": c.deterministic_report,
         "jevReport": c.jev_report,
         "linkReport": c.link_report,
         "reviewerNotes": c.reviewer_notes,
         "decisionReason": c.decision_reason,
         "outcomeRecordedAt": c.outcome_recorded_at,
+        "assignedReviewerId": c.assigned_reviewer_id,
         "createdAt": c.created_at,
         "updatedAt": c.updated_at,
     }
@@ -389,6 +439,8 @@ async def _queue_candidate_feedback(
 @router.post("/batches", status_code=201)
 async def create_batch(
     name: str = Form(..., max_length=160),
+    creator_name: str = Form("", max_length=160),
+    creator_email: str = Form("", max_length=320),
     role_name: str = Form(..., max_length=160),
     role_description: str = Form("", max_length=12000),
     evaluation_intent: str = Form("", max_length=2000),
@@ -406,6 +458,17 @@ async def create_batch(
         )
     if not name.strip() or not role_name.strip():
         raise HTTPException(status_code=400, detail="name and role_name are required")
+    normalized_creator_email = creator_email.strip().lower()
+    if normalized_creator_email and not re.fullmatch(
+        r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_creator_email
+    ):
+        raise HTTPException(
+            status_code=400, detail="creator_email must be a valid email"
+        )
+    normalized_creator_name = (
+        creator_name.strip() or current_user.name.strip() or current_user.email
+    )
+    normalized_creator_email = normalized_creator_email or current_user.email.lower()
     parsed_required_skills = _parse_skills(required_skills)
     parsed_preferred_skills = _parse_skills(preferred_skills)
     normalized_role_description = role_description.strip()
@@ -460,6 +523,17 @@ async def create_batch(
         jd_analysis=jd_analysis,
         retention_until=retention_until,
         created_by=current_user.id,
+        creator_name=normalized_creator_name,
+        creator_email=normalized_creator_email,
+        rubric_snapshot={
+            "roleName": role_name.strip(),
+            "roleDescription": normalized_role_description or None,
+            "evaluationIntent": normalized_intent or None,
+            "requiredSkills": parsed_required_skills,
+            "preferredSkills": parsed_preferred_skills,
+            "experienceMode": experience_mode,
+            "jdAnalysis": jd_analysis,
+        },
     )
     await repo.record_audit(
         action="batch_created",
@@ -478,6 +552,8 @@ async def create_batch(
         "status": batch.status,
         "createdAt": batch.created_at,
         "jdAnalysis": batch.jd_analysis,
+        "rubricVersion": batch.rubric_version,
+        "rubricSnapshot": batch.rubric_snapshot,
         "retentionUntil": batch.retention_until,
     }
 
@@ -488,6 +564,7 @@ async def list_batches(
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
     limit: int = 50,
     offset: int = 0,
+    assigned_reviewer_id: int | None = None,
 ):
     repo = BulkATSCRUDRepository(session)
     batches = await repo.list_batches(
@@ -495,13 +572,24 @@ async def list_batches(
         limit=min(limit, 200),
         offset=offset,
     )
+    # Self-heal stale processing states left by an interrupted worker after all
+    # candidate rows had already reached a terminal state.
+    for batch in batches:
+        if batch.status == "processing":
+            await repo.refresh_batch_status(batch.id)
     return [
         {
             "id": b.id,
             "name": b.name,
             "roleName": b.role_name,
             "status": b.status,
+            "opportunityId": b.opportunity_id,
             "createdAt": b.created_at,
+            "createdBy": {
+                "id": b.created_by,
+                "name": b.creator_name or (b.creator.name if b.creator else None),
+                "email": b.creator_email or (b.creator.email if b.creator else None),
+            },
         }
         for b in batches
     ]
@@ -517,6 +605,7 @@ async def get_batch(
     batch = await _get_authorized_batch(
         repo, batch_id=batch_id, current_user=current_user
     )
+    await repo.refresh_batch_status(batch_id)
 
     total = await repo.count_candidates(batch_id=batch_id)
     completed = await repo.count_candidates(batch_id=batch_id, status="completed")
@@ -533,9 +622,18 @@ async def get_batch(
         "preferredSkills": batch.preferred_skills or [],
         "experienceMode": batch.experience_mode,
         "jdAnalysis": batch.jd_analysis,
+        "rubricVersion": batch.rubric_version,
+        "rubricSnapshot": batch.rubric_snapshot,
         "retentionUntil": batch.retention_until,
         "status": batch.status,
         "createdAt": batch.created_at,
+        "createdBy": {
+            "id": batch.created_by,
+            "name": batch.creator_name
+            or (batch.creator.name if batch.creator else None),
+            "email": batch.creator_email
+            or (batch.creator.email if batch.creator else None),
+        },
         "counts": {
             "total": total,
             "completed": completed,
@@ -626,7 +724,9 @@ async def upload_resumes(
                 )
                 continue
 
-            raw_bytes = await upload.read()
+            raw_bytes = await upload.read(
+                settings.BULK_ATS_MAX_FILE_SIZE_MB * 1024 * 1024 + 1
+            )
             if not raw_bytes:
                 skipped.append({"filename": upload.filename, "reason": "empty file"})
                 continue
@@ -885,6 +985,7 @@ async def list_candidates(
     sort: Literal["score", "confidence", "review_priority", "created"] = "score",
     limit: int = 50,
     offset: int = 0,
+    assigned_reviewer_id: int | None = None,
 ):
     repo = BulkATSCRUDRepository(session)
     batch = await _get_authorized_batch(
@@ -897,8 +998,13 @@ async def list_candidates(
         sort=sort,
         limit=min(limit, 200),
         offset=offset,
+        assigned_reviewer_id=assigned_reviewer_id,
     )
-    total = await repo.count_candidates(batch_id=batch_id, status=status)
+    total = await repo.count_candidates(
+        batch_id=batch_id,
+        status=status,
+        assigned_reviewer_id=assigned_reviewer_id,
+    )
     return {"total": total, "candidates": [_candidate_summary(c) for c in candidates]}
 
 
@@ -912,7 +1018,128 @@ async def get_candidate(
     candidate = await _get_authorized_candidate(
         repo, candidate_id=candidate_id, current_user=current_user
     )
-    return _candidate_detail(candidate)
+    batch_candidates = await repo.list_candidates(
+        batch_id=candidate.batch_id, limit=1000, sort="score"
+    )
+    scored = [item for item in batch_candidates if item.final_score is not None]
+    scores = sorted(item.final_score for item in scored if item.final_score is not None)
+    rank = next(
+        (index + 1 for index, item in enumerate(scored) if item.id == candidate.id),
+        None,
+    )
+    score = candidate.final_score
+    percentile = None
+    median = None
+    if scores and score is not None:
+        midpoint = len(scores) // 2
+        median = (
+            scores[midpoint]
+            if len(scores) % 2
+            else (scores[midpoint - 1] + scores[midpoint]) / 2
+        )
+        percentile = round(
+            sum(value <= score for value in scores) / len(scores) * 100, 1
+        )
+    detail = _candidate_detail(candidate)
+    detail["rankExplanation"] = {
+        "rank": rank,
+        "totalScored": len(scores),
+        "percentile": percentile,
+        "batchMedian": median,
+        "strongestEvidence": (
+            (candidate.deterministic_report or {})
+            .get("deterministicMetrics", {})
+            .get("projectModule", {})
+            .get("projectEvaluation", [])[:1]
+        ),
+        "missingEvidence": candidate.warnings or [],
+    }
+    return detail
+
+
+@router.post("/candidates/{candidate_id}/merge")
+async def merge_candidate(
+    candidate_id: int,
+    payload: MergeCandidateBody,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    repo = BulkATSCRUDRepository(session)
+    duplicate = await _get_authorized_candidate(
+        repo, candidate_id=candidate_id, current_user=current_user
+    )
+    canonical = await _get_authorized_candidate(
+        repo, candidate_id=payload.canonical_candidate_id, current_user=current_user
+    )
+    if duplicate.batch_id != canonical.batch_id:
+        raise HTTPException(
+            status_code=400, detail="Candidates must belong to the same batch"
+        )
+    merged, archived = await repo.merge_candidates(
+        duplicate_id=duplicate.id, canonical_id=canonical.id
+    )
+    if merged is None or archived is None:
+        raise HTTPException(status_code=400, detail="Candidates could not be merged")
+    await repo.record_audit(
+        action="candidate_merged",
+        actor_id=current_user.id,
+        batch_id=merged.batch_id,
+        candidate_id=merged.id,
+        metadata={"mergedCandidateId": archived.id, "canonicalCandidateId": merged.id},
+    )
+    return {"canonicalCandidateId": merged.id, "mergedCandidateId": archived.id}
+
+
+@router.post("/batches/{batch_id}/rubric-versions")
+async def create_rubric_version(
+    batch_id: int,
+    payload: UpdateRubricBody,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    repo = BulkATSCRUDRepository(session)
+    batch = await _get_authorized_batch(
+        repo, batch_id=batch_id, current_user=current_user
+    )
+    required = [skill.strip() for skill in payload.required_skills if skill.strip()]
+    preferred = [skill.strip() for skill in payload.preferred_skills if skill.strip()]
+    description = payload.role_description.strip()
+    _require_role_rubric(
+        job_profile_id=batch.job_profile_id,
+        role_description=description,
+        required_skills=required,
+    )
+    next_version = (batch.rubric_version or 1) + 1
+    analysis = analyze_job_description(
+        description, required_skills=required, preferred_skills=preferred
+    )
+    batch.rubric_version = next_version
+    batch.role_description = description or None
+    batch.evaluation_intent = payload.evaluation_intent.strip() or None
+    batch.required_skills = required or None
+    batch.preferred_skills = preferred or None
+    batch.experience_mode = payload.experience_mode
+    batch.jd_analysis = analysis
+    batch.rubric_snapshot = {
+        **payload.model_dump(),
+        "version": next_version,
+        "jdAnalysis": analysis,
+    }
+    await session.commit()
+    candidates = await repo.list_candidates(batch_id=batch_id, limit=1000)
+    queued = 0
+    for candidate in candidates:
+        if await enqueue_job(
+            "process_bulk_ats_candidate_task", candidate_id=candidate.id
+        ):
+            queued += 1
+    await repo.record_audit(
+        action="rubric_version_created",
+        actor_id=current_user.id,
+        batch_id=batch_id,
+        metadata={"version": next_version, "queued": queued},
+    )
+    return {"batchId": batch_id, "rubricVersion": next_version, "queued": queued}
 
 
 @router.post("/candidates/{candidate_id}/feedback", status_code=202)
@@ -1112,10 +1339,11 @@ async def rerun_candidate(
 @router.patch("/candidates/{candidate_id}/review")
 async def review_candidate(
     candidate_id: int,
-    reviewer_notes: str = Form(""),
-    reviewer_decision: str = Form(""),
-    decision_reason: str = Form(""),
-    interview_outcome: str = Form(""),
+    reviewer_notes: str | None = Form(None),
+    reviewer_decision: str | None = Form(None),
+    decision_reason: str | None = Form(None),
+    interview_outcome: str | None = Form(None),
+    assigned_reviewer_id: int | None = Form(None),
     current_user: User = Depends(get_current_bulk_ats_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -1123,11 +1351,20 @@ async def review_candidate(
     existing = await _get_authorized_candidate(
         repo, candidate_id=candidate_id, current_user=current_user
     )
-    decision = reviewer_decision.strip() or None
-    outcome = interview_outcome.strip() or None
-    if decision not in {None, "shortlist", "hold", "not_shortlisted"}:
+    decision = (
+        reviewer_decision.strip() or None if reviewer_decision is not None else None
+    )
+    outcome = (
+        interview_outcome.strip() or None if interview_outcome is not None else None
+    )
+    if reviewer_decision is not None and decision not in {
+        None,
+        "shortlist",
+        "hold",
+        "not_shortlisted",
+    }:
         raise HTTPException(status_code=400, detail="Invalid reviewer_decision")
-    if outcome not in {
+    if interview_outcome is not None and outcome not in {
         None,
         "not_interviewed",
         "interviewed",
@@ -1137,13 +1374,34 @@ async def review_candidate(
         "withdrew",
     }:
         raise HTTPException(status_code=400, detail="Invalid interview_outcome")
+    if assigned_reviewer_id is not None:
+        try:
+            reviewer = await UserCRUDRepository(session).get_user_by_id(
+                user_id=assigned_reviewer_id
+            )
+        except EntityDoesNotExist:
+            reviewer = None
+        if reviewer is None or reviewer.role not in {"recruiter", "placement_staff"}:
+            raise HTTPException(
+                status_code=400,
+                detail="assigned_reviewer_id must belong to Bulk ATS staff",
+            )
     candidate = await repo.update_review(
         candidate_id,
-        reviewer_notes=reviewer_notes[:10000],
-        reviewer_decision=decision,
-        decision_reason=decision_reason.strip()[:5000] or None,
-        interview_outcome=outcome,
+        reviewer_notes=(reviewer_notes[:10000] if reviewer_notes is not None else None),
+        reviewer_decision=(decision if reviewer_decision is not None else None),
+        decision_reason=(
+            decision_reason.strip()[:5000] or None
+            if decision_reason is not None
+            else None
+        ),
+        interview_outcome=(outcome if interview_outcome is not None else None),
         reviewed_by=current_user.id,
+        assigned_reviewer_id=assigned_reviewer_id,
+        update_reviewer_notes=reviewer_notes is not None,
+        update_reviewer_decision=reviewer_decision is not None,
+        update_decision_reason=decision_reason is not None,
+        update_interview_outcome=interview_outcome is not None,
     )
     if candidate is None:  # Defensive: it could only disappear between the two calls.
         raise HTTPException(status_code=404, detail="Candidate not found")
@@ -1152,7 +1410,17 @@ async def review_candidate(
         actor_id=current_user.id,
         batch_id=existing.batch_id,
         candidate_id=candidate.id,
-        metadata={"decision": decision, "interviewOutcome": outcome},
+        metadata={
+            "decision": (
+                decision
+                if reviewer_decision is not None
+                else existing.reviewer_decision
+            ),
+            "interviewOutcome": (
+                outcome if interview_outcome is not None else existing.interview_outcome
+            ),
+            "assignedReviewerId": assigned_reviewer_id,
+        },
     )
     return _candidate_detail(candidate)
 
@@ -1177,6 +1445,119 @@ async def list_audit_events(
         }
         for event in events
     ]
+
+
+@router.get("/reviewers")
+async def list_reviewers(
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Return assignable placement/recruiting staff for candidate queues."""
+    del current_user
+    staff = await UserCRUDRepository(session).list_bulk_ats_staff()
+    return [
+        {"id": user.id, "email": user.email, "name": user.name, "role": user.role}
+        for user in staff
+    ]
+
+
+@router.get("/batches/{batch_id}/calibration")
+async def get_batch_calibration(
+    batch_id: int,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Return auditable outcome/score aggregates for recruiter calibration."""
+    repo = BulkATSCRUDRepository(session)
+    await _get_authorized_batch(repo, batch_id=batch_id, current_user=current_user)
+    candidates = await repo.list_candidates(batch_id=batch_id, limit=1000, sort="score")
+    scored = [c for c in candidates if c.final_score is not None]
+    outcomes: dict[str, int] = {}
+    decisions: dict[str, int] = {}
+    for candidate in candidates:
+        outcome = candidate.interview_outcome or "not_recorded"
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        decision = candidate.reviewer_decision or "not_decided"
+        decisions[decision] = decisions.get(decision, 0) + 1
+    average = (
+        (sum(c.final_score or 0 for c in scored) / len(scored)) if scored else None
+    )
+    hired = [
+        c.final_score
+        for c in candidates
+        if c.interview_outcome == "hired" and c.final_score is not None
+    ]
+    rejected = [
+        c.final_score
+        for c in candidates
+        if c.interview_outcome == "rejected" and c.final_score is not None
+    ]
+    return {
+        "batchId": batch_id,
+        "candidateCount": len(candidates),
+        "scoredCount": len(scored),
+        "averageScore": average,
+        "outcomes": outcomes,
+        "decisions": decisions,
+        "hiredAverageScore": (sum(hired) / len(hired)) if hired else None,
+        "rejectedAverageScore": (sum(rejected) / len(rejected)) if rejected else None,
+        "calibrationNote": "Use these aggregates to inspect recruiter overrides and outcome patterns; they do not retrain scoring automatically.",
+    }
+
+
+@router.post("/candidates/{candidate_id}/interview-kit")
+async def generate_interview_kit(
+    candidate_id: int,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Create a deterministic, evidence-aware interview guide for human review."""
+    repo = BulkATSCRUDRepository(session)
+    candidate = await _get_authorized_candidate(
+        repo, candidate_id=candidate_id, current_user=current_user
+    )
+    report = candidate.deterministic_report or {}
+    scorecard = report.get("bulkAtsScorecard") if isinstance(report, dict) else {}
+    scorecard = scorecard if isinstance(scorecard, dict) else {}
+    category_scores = scorecard.get("categoryScores") or {}
+    metrics = {
+        "skills": "Ask the candidate to demonstrate the most important required capability with a concrete example.",
+        "experience": "Ask how the candidate's most relevant responsibility maps to this role and what outcome they owned.",
+        "projects": "Ask the candidate to walk through the strongest project, their contribution, trade-offs, and measurable result.",
+        "education": "Confirm how the candidate's education or training supports the role's responsibilities.",
+        "links": "Review one submitted work link and ask the candidate to explain authorship, decisions, and current status.",
+    }
+    questions = []
+    for category, prompt in metrics.items():
+        value = category_scores.get(category)
+        if value is None or value < 70:
+            questions.append(
+                {
+                    "category": category,
+                    "question": prompt,
+                    "reason": "Score or evidence gap needs human validation.",
+                }
+            )
+    if not questions:
+        questions.append(
+            {
+                "category": "verification",
+                "question": "Which accomplishment best demonstrates readiness for this role, and what evidence can you share?",
+                "reason": "Confirm the strongest evidence before advancing.",
+            }
+        )
+    await repo.record_audit(
+        action="interview_kit_generated",
+        actor_id=current_user.id,
+        batch_id=candidate.batch_id,
+        candidate_id=candidate.id,
+        metadata={"questionCount": len(questions)},
+    )
+    return {
+        "candidateId": candidate.id,
+        "questions": questions,
+        "generatedAt": datetime.datetime.now(datetime.timezone.utc),
+    }
 
 
 @router.get("/google-drive/status")
@@ -1309,7 +1690,9 @@ async def get_bulk_ats_self(current_user: User = Depends(get_current_bulk_ats_us
 
     return {
         "email": current_user.email,
+        "name": current_user.name,
         "isAdmin": is_admin_user(current_user),
+        "supportsRecruiterTools": True,
         "jevConfigured": bool(settings.JEV_API_KEY),
         "deepseekConfigured": bool(settings.DEEPSEEK_API_KEY),
         "ocrEnabled": settings.BULK_ATS_OCR_ENABLED,

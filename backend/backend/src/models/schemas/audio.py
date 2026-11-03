@@ -75,22 +75,6 @@ class AudioTranscriptionResponse(BaseSchemaModel):
     )
 
 
-class TextAnswerRequest(BaseSchemaModel):
-    question_attempt_id: int
-    text: str = pydantic.Field(min_length=1, max_length=5000)
-    language: str = pydantic.Field(default="en", min_length=2, max_length=12)
-    session_lease_token: str | None = pydantic.Field(
-        default=None, min_length=20, max_length=256
-    )
-
-
-class TextAnswerResponse(BaseSchemaModel):
-    question_attempt_id: int
-    saved: bool = True
-    answer_version: int = pydantic.Field(ge=1)
-    transcription_status: str = "transcribed"
-
-
 class TranscriptionStatusResponse(BaseSchemaModel):
     """What a client polls while its answer is transcribed in the background.
 
@@ -125,6 +109,16 @@ class TranscriptionStatusResponse(BaseSchemaModel):
     )
     error: str | None = pydantic.Field(
         default=None, description="Shown to the student when status is failed"
+    )
+    evidence_status: str | None = pydantic.Field(
+        default=None, description="usable or unavailable when evidence has been classified"
+    )
+    evidence_reason: str | None = pydantic.Field(
+        default=None, description="Safe reason code when speech evidence is unavailable"
+    )
+    retryable: bool = pydantic.Field(
+        default=True,
+        description="Whether reprocessing the same saved audio can reasonably recover feedback",
     )
     follow_up_question: FollowUpQuestion | None = pydantic.Field(
         default=None,

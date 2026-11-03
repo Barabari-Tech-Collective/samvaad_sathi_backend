@@ -13,18 +13,47 @@ class ProjectLinkMapper:
     4. Title Similarity / Keyword Intersections (15 pts)
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.stop_words = {
-            "project", "app", "application", "tool", "system", "website",
-            "dashboard", "management", "built", "using", "with", "and", "the"
+            "project",
+            "app",
+            "application",
+            "tool",
+            "system",
+            "website",
+            "dashboard",
+            "management",
+            "built",
+            "using",
+            "with",
+            "and",
+            "the",
         }
 
     def _extract_tech_tokens(self, text: str) -> set:
         """Extracts common technology keywords for stack overlap matching."""
         tech_catalog = {
-            "react", "node", "nodejs", "express", "mongodb", "postgres", "postgresql",
-            "mysql", "python", "django", "flask", "fastapi", "java", "spring",
-            "typescript", "javascript", "docker", "aws", "redis", "nextjs", "vue"
+            "react",
+            "node",
+            "nodejs",
+            "express",
+            "mongodb",
+            "postgres",
+            "postgresql",
+            "mysql",
+            "python",
+            "django",
+            "flask",
+            "fastapi",
+            "java",
+            "spring",
+            "typescript",
+            "javascript",
+            "docker",
+            "aws",
+            "redis",
+            "nextjs",
+            "vue",
         }
         text_lower = text.lower()
         return {t for t in tech_catalog if t in text_lower}
@@ -32,7 +61,8 @@ class ProjectLinkMapper:
     def _calculate_title_similarity(self, title: str, url: str) -> float:
         """Calculates token overlap between project title and repository path."""
         title_tokens = {
-            t.lower() for t in re.findall(r'\w+', title)
+            t.lower()
+            for t in re.findall(r"\w+", title)
             if len(t) > 2 and t.lower() not in self.stop_words
         }
         if not title_tokens:
@@ -46,7 +76,7 @@ class ProjectLinkMapper:
         self,
         projects: List[Dict[str, Any]],
         validated_links: Dict[str, Any],
-        document_map: Optional[List[Dict[str, Any]]] = None
+        document_map: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Maps validated links uniquely to projects using weighted confidence scores.
@@ -56,18 +86,31 @@ class ProjectLinkMapper:
             return []
 
         links_data = validated_links.get("links", {})
-        
-        # Filter for candidate repositories and deployments only
+
+        # Project evidence differs by domain: a dashboard, case study, Figma
+        # prototype or portfolio item can be as relevant as source code.
         candidate_urls = [
-            raw_url for raw_url, details in links_data.items()
-            if details.get("category") in ["repository", "deployment"]
+            raw_url
+            for raw_url, details in links_data.items()
+            if details.get("category")
+            in [
+                "repository",
+                "deployment",
+                "design",
+                "portfolio",
+                "blog",
+                "project",
+                "dashboard",
+            ]
         ]
 
         assigned_urls = set()
 
         for proj in projects:
             p_title = str(proj.get("title", proj.get("projectName", ""))).strip()
-            p_desc = f"{proj.get('description', '')} {' '.join(proj.get('highlights', []))}"
+            p_desc = (
+                f"{proj.get('description', '')} {' '.join(proj.get('highlights', []))}"
+            )
             p_tech = self._extract_tech_tokens(f"{p_title} {p_desc}")
 
             # Clear out existing non-URL artifacts
@@ -93,7 +136,11 @@ class ProjectLinkMapper:
                 clean_url = raw_url.lower().strip()
 
                 # Signal 1: Direct Inlined Text Footprint Match (+20 pts)
-                if clean_url in p_desc.lower() or clean_url.replace("https://", "").replace("http://", "") in p_desc.lower():
+                if (
+                    clean_url in p_desc.lower()
+                    or clean_url.replace("https://", "").replace("http://", "")
+                    in p_desc.lower()
+                ):
                     confidence_score += 20.0
 
                 # Signal 2: Tech Stack Co-occurrence Overlap (+25 pts)
@@ -109,16 +156,33 @@ class ProjectLinkMapper:
                 # Signal 4: Spatial Document Map BBox Distance (+40 pts if spatial context available)
                 if document_map:
                     for entry in document_map:
-                        if raw_url in entry.get("text", "") and p_title.lower() in entry.get("text", "").lower():
+                        if (
+                            raw_url in entry.get("text", "")
+                            and p_title.lower() in entry.get("text", "").lower()
+                        ):
                             confidence_score += 40.0
                             break
 
                 if confidence_score >= 15.0:
                     url_cat = url_meta.get("category")
-                    if url_cat == "repository" and confidence_score > highest_repo_confidence:
+                    if (
+                        url_cat == "repository"
+                        and confidence_score > highest_repo_confidence
+                    ):
                         highest_repo_confidence = confidence_score
                         best_repo = raw_url
-                    elif url_cat == "deployment" and confidence_score > highest_deployment_confidence:
+                    elif (
+                        url_cat
+                        in [
+                            "deployment",
+                            "design",
+                            "portfolio",
+                            "blog",
+                            "project",
+                            "dashboard",
+                        ]
+                        and confidence_score > highest_deployment_confidence
+                    ):
                         highest_deployment_confidence = confidence_score
                         best_deployment = raw_url
 
@@ -128,15 +192,21 @@ class ProjectLinkMapper:
                 proj["repository"] = {"present": True, "working": is_valid}
                 if not proj.get("projectUrl"):
                     proj["projectUrl"] = best_repo
-                print(f"Project Mapper Bound Repo: '{p_title}' -> '{best_repo}' (Confidence Score: {highest_repo_confidence})")
-            
+                print(
+                    f"Project Mapper Bound Repo: '{p_title}' -> '{best_repo}' (Confidence Score: {highest_repo_confidence})"
+                )
+
             if best_deployment:
                 assigned_urls.add(best_deployment)
                 is_valid = links_data.get(best_deployment, {}).get("valid", False)
                 proj["deployment"] = {"present": True, "working": is_valid}
-                if is_valid and (not proj.get("projectUrl") or proj.get("projectUrl") == best_repo):
+                if is_valid and (
+                    not proj.get("projectUrl") or proj.get("projectUrl") == best_repo
+                ):
                     # Prefer deployment link as the primary project URL if the current one is just a repo
                     proj["projectUrl"] = best_deployment
-                print(f"Project Mapper Bound Deployment: '{p_title}' -> '{best_deployment}' (Confidence Score: {highest_deployment_confidence})")
+                print(
+                    f"Project Mapper Bound Deployment: '{p_title}' -> '{best_deployment}' (Confidence Score: {highest_deployment_confidence})"
+                )
 
         return projects

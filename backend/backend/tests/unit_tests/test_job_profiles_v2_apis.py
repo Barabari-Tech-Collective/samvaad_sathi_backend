@@ -1391,6 +1391,23 @@ def test_upload_job_description_invalid_extension():
     assert response.status_code == 415
 
 
+def test_upload_job_description_rejects_files_over_10_mb():
+    files = {
+        "file": (
+            "oversized-description.pdf",
+            io.BytesIO(b"x" * (10 * 1024 * 1024 + 1)),
+            "application/pdf",
+        )
+    }
+
+    response = client.post(
+        "/api/v2/job-profiles/upload/job-description", files=files
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "File exceeds 10MB limit"
+
+
 # 7. POST /api/v2/job-profiles/upload/knowledge-questions
 def test_upload_knowledge_questions_success():
     # Plain text content with refined candidate type, topic and level structure
