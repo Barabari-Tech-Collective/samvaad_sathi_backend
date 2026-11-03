@@ -62,7 +62,7 @@ def test_route_files_exist():
 
 @pytest.mark.parametrize("path", _route_files(), ids=lambda p: p.name)
 def test_no_raw_is_admin_checks_in_routes(path: pathlib.Path):
-    offenders = [f"{path.name}:{lineno}" for lineno in _raw_admin_reads(path.read_text())]
+    offenders = [f"{path.name}:{lineno}" for lineno in _raw_admin_reads(path.read_text(encoding="utf-8"))]
     assert not offenders, (
         "Use is_admin_user() from api.dependencies.admin instead of reading "
         "is_admin directly, so ADMIN_EMAILS is honoured too:\n  "
