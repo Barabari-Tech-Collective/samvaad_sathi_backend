@@ -459,6 +459,9 @@ async def assign_to_cohort(
             template = await session.get(JobProfile, body.job_profile_id)
             if template is None or template.interview_mode != "practice" or template.status != "published":
                 raise fastapi.HTTPException(422, "Choose a published mock interview template.")
+            from src.services import template_scope
+
+            template_scope.require_assignable(template, course_id)
         from src.api.routes.course_workspace import _shared_student_predicate
 
         coaching = await _shared_student_predicate(course_id, user, session, coaching_only=True)

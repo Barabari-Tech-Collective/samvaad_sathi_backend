@@ -227,6 +227,9 @@ async def create_mock_assignment(
     template = await session.get(JobProfile, body.job_profile_id)
     if template is None or template.interview_mode != "practice" or template.status != "published":
         raise fastapi.HTTPException(422, "Choose a published mock interview template.")
+    from src.services import template_scope
+
+    template_scope.require_assignable(template, course_id)
     if body.due_date and body.due_date < datetime.datetime.now(UTC).date():
         raise fastapi.HTTPException(422, "Choose today or a future due date (UTC).")
     row = MockInterviewAssignment(
