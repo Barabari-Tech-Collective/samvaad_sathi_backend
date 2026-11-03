@@ -266,7 +266,10 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         is_admin: bool,
         interview_mode: str | None,
         search: str | None,
+        status: JobProfileStatus | None = None,
     ):
+        if status is not None:
+            query = query.where(JobProfile.status == status)
         if interview_mode is not None:
             query = query.where(JobProfile.interview_mode == interview_mode)
         if not is_admin:
@@ -289,6 +292,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         is_admin: bool = False,
         interview_mode: str | None = None,
         search: str | None = None,
+        status: JobProfileStatus | None = None,
     ):
         from sqlalchemy.orm import selectinload
 
@@ -304,6 +308,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             is_admin=is_admin,
             interview_mode=interview_mode,
             search=search,
+            status=status,
         )
         if offset:
             query = query.offset(offset)
@@ -320,6 +325,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         interview_mode: str | None = None,
         offset: int = 0,
         search: str | None = None,
+        status: JobProfileStatus | None = None,
     ) -> List[JobProfile]:
         query = self.build_listing_query(
             category=category,
@@ -328,6 +334,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             is_admin=is_admin,
             interview_mode=interview_mode,
             search=search,
+            status=status,
         )
         result = await self.async_session.execute(query)
         return list(result.scalars().all())
@@ -339,6 +346,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         is_admin: bool = False,
         interview_mode: str | None = None,
         search: str | None = None,
+        status: JobProfileStatus | None = None,
     ) -> int:
         query = self._listing_filters(
             select(func.count(JobProfile.id)),
@@ -346,8 +354,37 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             is_admin=is_admin,
             interview_mode=interview_mode,
             search=search,
+            status=status,
         )
         return int((await self.async_session.execute(query)).scalar() or 0)
+
+    async def status_counts(
+        self,
+        *,
+        category: Optional[str] = None,
+        is_admin: bool = False,
+        interview_mode: str | None = None,
+        search: str | None = None,
+    ) -> dict[str, int]:
+        """How many templates are in each status for the same filters, whichever status is shown.
+
+        Every status is present (zero when empty), so a client can label all its tabs from
+        one response, and the counts stay right beyond the page being viewed.
+        """
+        query = self._listing_filters(
+            select(JobProfile.status, func.count(JobProfile.id)).group_by(
+                JobProfile.status
+            ),
+            category=category,
+            is_admin=is_admin,
+            interview_mode=interview_mode,
+            search=search,
+        )
+        rows = (await self.async_session.execute(query)).all()
+        counts = {member.value: 0 for member in JobProfileStatus}
+        for status, number in rows:
+            counts[getattr(status, "value", str(status))] = int(number)
+        return counts
 
     async def create_profile(
         self,

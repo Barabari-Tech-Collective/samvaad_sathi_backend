@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.dialects import postgresql
 
 from src.api.routes import job_profiles_v2
+from src.models.db.job_profile import JobProfileStatus
 from src.repository.crud.job_profile import JobProfileCRUDRepository
 
 
@@ -101,6 +102,9 @@ def test_list_returns_one_page_and_the_real_total(path, mode):
     repo = MagicMock()
     repo.list_profiles = AsyncMock(return_value=[_profile(7, "Data analyst", mode)])
     repo.count_profiles = AsyncMock(return_value=134)
+    repo.status_counts = AsyncMock(
+        return_value={"draft": 100, "under_review": 4, "published": 30, "changes_requested": 0}
+    )
 
     response = _client(repo).get(path, params={"limit": 10, "offset": 30, "q": "data"})
 
@@ -109,31 +113,52 @@ def test_list_returns_one_page_and_the_real_total(path, mode):
     assert len(body["items"]) == 1
     assert body["total"] == 134  # the real count, not the length of this page
     repo.list_profiles.assert_awaited_once_with(
-        limit=10, offset=30, is_admin=True, interview_mode=mode, search="data"
+        category=None,
+        limit=10,
+        offset=30,
+        is_admin=True,
+        interview_mode=mode,
+        search="data",
+        status=None,
     )
     repo.count_profiles.assert_awaited_once_with(
-        is_admin=True, interview_mode=mode, search="data"
+        category=None, is_admin=True, interview_mode=mode, search="data", status=None
     )
+    # Counts per status for the same search, so a client can label every tab.
+    assert body["statusCounts"] == {
+        "draft": 100,
+        "under_review": 4,
+        "published": 30,
+        "changes_requested": 0,
+    }
 
 
 def test_list_defaults_are_unchanged_for_existing_callers():
     repo = MagicMock()
     repo.list_profiles = AsyncMock(return_value=[])
     repo.count_profiles = AsyncMock(return_value=0)
+    repo.status_counts = AsyncMock(return_value={})
     assert _client(repo).get("/v2/practice-templates").status_code == 200
     repo.list_profiles.assert_awaited_once_with(
-        limit=100, offset=0, is_admin=True, interview_mode="practice", search=None
+        category=None,
+        limit=100,
+        offset=0,
+        is_admin=True,
+        interview_mode="practice",
+        search=None,
+        status=None,
     )
 
 
 @pytest.mark.parametrize(
     "params",
-    [{"limit": 0}, {"limit": 201}, {"offset": -1}, {"q": "x" * 101}],
+    [{"limit": 0}, {"limit": 201}, {"offset": -1}, {"q": "x" * 101}, {"status": "nonsense"}],
 )
 def test_list_rejects_out_of_range_paging(params):
     repo = MagicMock()
     repo.list_profiles = AsyncMock(return_value=[])
     repo.count_profiles = AsyncMock(return_value=0)
+    repo.status_counts = AsyncMock(return_value={})
     assert _client(repo).get("/v2/assessment-roles", params=params).status_code == 422
     repo.list_profiles.assert_not_awaited()
 
@@ -166,3 +191,73 @@ def test_opening_a_missing_template_is_a_404():
     repo = MagicMock()
     repo.get_by_id = AsyncMock(return_value=None)
     assert _client(repo).get("/v2/assessment-roles/123").status_code == 404
+
+
+# --- status filter, counts and category -------------------------------------
+
+
+def test_listing_query_can_filter_by_status():
+    sql = _compile(
+        JobProfileCRUDRepository.build_listing_query(
+            is_admin=True, interview_mode="assessment", status=JobProfileStatus.DRAFT
+        )
+    )
+    assert "status = 'DRAFT'" in sql or "status = 'draft'" in sql
+
+
+@pytest.mark.asyncio
+async def test_status_counts_group_by_status_and_zero_fill_every_status():
+    session = MagicMock()
+    result = MagicMock()
+    result.all.return_value = [(JobProfileStatus.DRAFT, 3), (JobProfileStatus.PUBLISHED, 5)]
+    session.execute = AsyncMock(return_value=result)
+    repo = JobProfileCRUDRepository(async_session=session)
+
+    counts = await repo.status_counts(is_admin=True, interview_mode="assessment", search="x")
+
+    assert counts == {"draft": 3, "under_review": 0, "published": 5, "changes_requested": 0}
+    sql = _compile(session.execute.await_args.args[0])
+    assert "GROUP BY" in sql
+    assert "ILIKE" in sql and "interview_mode = 'assessment'" in sql
+    # The counts describe every status, so the query must not filter on one.
+    assert "job_profile.status =" not in sql
+
+
+def _list_repo():
+    repo = MagicMock()
+    repo.async_session = MagicMock()
+    repo.list_profiles = AsyncMock(return_value=[])
+    repo.count_profiles = AsyncMock(return_value=0)
+    repo.status_counts = AsyncMock(return_value={})
+    return repo
+
+
+def test_list_forwards_the_status_filter():
+    repo = _list_repo()
+    assert (
+        _client(repo).get("/v2/assessment-roles", params={"status": "draft"}).status_code
+        == 200
+    )
+    assert repo.list_profiles.await_args.kwargs["status"] == JobProfileStatus.DRAFT
+    assert repo.count_profiles.await_args.kwargs["status"] == JobProfileStatus.DRAFT
+    # The counts must ignore the status shown, or the other tabs would read zero.
+    assert "status" not in repo.status_counts.await_args.kwargs
+
+
+def test_category_is_resolved_by_the_shared_rule_and_only_when_asked_for(monkeypatch):
+    resolver = AsyncMock(return_value="design")
+    monkeypatch.setattr(job_profiles_v2, "resolve_effective_category", resolver)
+
+    repo = _list_repo()
+    _client(repo).get("/v2/assessment-roles", params={"category": "it"})
+    resolver.assert_awaited_once()
+    assert resolver.await_args.kwargs["requested_category"] == "it"
+    # A person scoped to a domain gets their own, whatever they asked for.
+    assert repo.list_profiles.await_args.kwargs["category"] == "design"
+
+    resolver.reset_mock()
+    repo = _list_repo()
+    _client(repo).get("/v2/assessment-roles")
+    _client(repo).get("/v2/assessment-roles", params={"category": "all"})
+    resolver.assert_not_awaited()
+    assert repo.list_profiles.await_args.kwargs["category"] is None
