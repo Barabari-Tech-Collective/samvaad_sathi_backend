@@ -9,7 +9,7 @@ target. This makes it appropriate for local visual QA while preventing an
 accidental staging/production write caused by an environment-file mistake.
 
     python ops/seed_learners_workspace_demo.py
-    python ops/seed_learners_workspace_demo.py --i-know-what-im-doing
+    python ops/seed_learners_workspace_demo.py --course-id <staging-course-id> --i-know-what-im-doing
 
 The second command is intentionally required for a shared database. Do not use
 it on production. Demo accounts use the `demo.learner+` email namespace and
@@ -52,7 +52,7 @@ def _is_local_target() -> bool:
     return settings.DB_POSTGRES_HOST in LOCAL_HOSTS
 
 
-async def seed() -> None:
+async def seed(course_id: str) -> None:
     from src.models.db.cohort import Cohort, CohortMember
     from src.models.db.interview import Interview
     from src.models.db.report import Report
@@ -89,7 +89,7 @@ async def seed() -> None:
             learner.university = college
             learner.degree = "B.Tech"
             learner.target_position = "Software Development"
-            learner.enrolled_course_ids = [COURSE_ID]
+            learner.enrolled_course_ids = [course_id]
             learner.enrollment_source = "demo_seed"
             learner.enrollment_observed_at = now
             learners.append(learner)
@@ -107,7 +107,7 @@ async def seed() -> None:
                         sa.select(Interview)
                         .where(
                             Interview.user_id == learner.id,
-                            Interview.course_id == COURSE_ID,
+                            Interview.course_id == course_id,
                             Interview.track == "Demo Full Stack",
                         )
                         .order_by(Interview.created_at)
@@ -120,7 +120,7 @@ async def seed() -> None:
                 interview = Interview(
                     user_id=learner.id,
                     track="Demo Full Stack",
-                    course_id=COURSE_ID,
+                    course_id=course_id,
                     difficulty="medium",
                     status="completed",
                     interview_mode="practice",
@@ -145,18 +145,18 @@ async def seed() -> None:
             ("Cohort B · Full Stack Development", "Demo batch needing mentoring and mock interview follow-up.", learners[3:]),
         )
         for position, (name, description, members) in enumerate(cohort_specs, start=1):
-            request_key = f"demo-learners-{COURSE_ID}-{position}"
+            request_key = f"demo-learners-{course_id}-{position}"
             cohort = (
                 await session.execute(
                     sa.select(Cohort).where(
-                        Cohort.course_id == COURSE_ID,
+                        Cohort.course_id == course_id,
                         Cohort.request_key == request_key,
                     )
                 )
             ).scalar_one_or_none()
             if cohort is None:
                 cohort = Cohort(
-                    course_id=COURSE_ID,
+                    course_id=course_id,
                     request_key=request_key,
                     name=name,
                     description=description,
@@ -179,7 +179,7 @@ async def seed() -> None:
 
         await session.commit()
         print(f"Learners workspace demo seed complete: {len(learners)} learners, {created} new accounts, 2 cohorts.")
-        print(f"Course ID: {COURSE_ID}")
+        print(f"Course ID: {course_id}")
     except Exception:
         await session.rollback()
         raise
@@ -194,12 +194,17 @@ def main() -> None:
         action="store_true",
         help="allow the configured non-local database target",
     )
+    parser.add_argument(
+        "--course-id",
+        default=COURSE_ID,
+        help="course identifier from the programme catalogue (default: %(default)s)",
+    )
     args = parser.parse_args()
     if not args.i_know_what_im_doing and not _is_local_target():
         raise SystemExit(
             "Refusing to seed a non-local database. Use --i-know-what-im-doing only for an approved disposable staging target."
         )
-    asyncio.run(seed())
+    asyncio.run(seed(args.course_id))
 
 
 if __name__ == "__main__":
