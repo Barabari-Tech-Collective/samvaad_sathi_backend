@@ -7,7 +7,7 @@ from decouple import config
 import boto3
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
 from src.services.aws_storage_config import load_storage_configuration
 
 logger = logging.getLogger(__name__)
@@ -207,27 +207,52 @@ async def upload_answer_audio_to_s3(
             ServerSideEncryption="AES256",
         )
 
-    try:
-        await asyncio.get_running_loop().run_in_executor(None, _put)
-        logger.info(
-            "Stored answer audio | QuestionAttempt=%s | Key=%s",
-            question_attempt_id,
-            object_key,
-        )
-        return object_key
-    except Exception as error:  # noqa: BLE001
-        # Deliberately broad. Catching only ClientError let NoCredentialsError
-        # and EndpointConnectionError - both BotoCoreError, not ClientError -
-        # escape into the upload route, which treats any exception as a save
-        # failure and answers 503. Missing or expired credentials would then
-        # cost a student their answer over a storage problem that does not
-        # affect transcription at all.
-        logger.error(
-            "Failed to store answer audio | QuestionAttempt=%s | %s",
-            question_attempt_id,
-            error,
-        )
-        return None
+    def retryable_storage_error(error: Exception) -> bool:
+        if isinstance(error, (BotoCoreError, EndpointConnectionError)):
+            return True
+        if isinstance(error, ClientError):
+            code = str(error.response.get("Error", {}).get("Code", ""))
+            return code in {"500", "503", "RequestTimeout", "SlowDown", "InternalError"}
+        return False
+
+    # ``put_object`` is idempotent for this stable checksum-based key. A short,
+    # bounded retry absorbs a dropped connection/temporary S3 503 without
+    # making a student re-record. Permanent configuration/IAM failures surface
+    # immediately, with the exception type and provider code in server logs.
+    for attempt in range(1, 4):
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _put)
+            logger.info(
+                "Stored answer audio | QuestionAttempt=%s | Key=%s | Attempt=%s",
+                question_attempt_id,
+                object_key,
+                attempt,
+            )
+            return object_key
+        except Exception as error:  # noqa: BLE001
+            provider_code = (
+                str(error.response.get("Error", {}).get("Code", "unknown"))
+                if isinstance(error, ClientError)
+                else "n/a"
+            )
+            if attempt < 3 and retryable_storage_error(error):
+                logger.warning(
+                    "Answer audio storage retry | QuestionAttempt=%s | Attempt=%s | Error=%s | Code=%s",
+                    question_attempt_id,
+                    attempt,
+                    type(error).__name__,
+                    provider_code,
+                )
+                await asyncio.sleep(0.25 * attempt)
+                continue
+            logger.error(
+                "Failed to store answer audio | QuestionAttempt=%s | Error=%s | Code=%s",
+                question_attempt_id,
+                type(error).__name__,
+                provider_code,
+            )
+            return None
+    return None
 
 
 #: Prefix for Bulk ATS candidate resumes. Kept distinct from resumes/ (the
