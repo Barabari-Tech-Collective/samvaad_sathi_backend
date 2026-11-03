@@ -17,6 +17,22 @@ class UserCRUDRepository(BaseCRUDRepository):
             raise EntityDoesNotExist("Central identity is not bound")
         return user
 
+    async def get_user_by_legacy_sso_identity(self, central_id: str) -> User:
+        """Find a pre-central-binding SSO user without treating it as a new account.
+
+        Early SSO releases accidentally stored the central user ID in ``student_id``.
+        This narrow compatibility lookup is only used after the proper stable binding
+        misses, so a successful sign-in can move that existing learner to
+        ``central_identity_id`` instead of creating a second learner record.
+        """
+        result = await self.async_session.execute(
+            sqlalchemy.select(User).where(User.student_id == central_id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise EntityDoesNotExist("Legacy SSO identity is not bound")
+        return user
+
     async def bind_central_identity(self, user: User, central_id: str) -> User:
         from sqlalchemy.exc import IntegrityError
         if user.central_identity_id not in (None, central_id):
@@ -216,9 +232,15 @@ class UserCRUDRepository(BaseCRUDRepository):
     ) -> User:
         """Link the stable central ID and refresh only fields owned by the registry."""
         user = await self.get_user_by_id(user_id=user_id)
-        if user.student_id and user.student_id != central_user_id:
+        if user.central_identity_id not in (None, central_user_id):
             raise EntityAlreadyExists("This Samvaad account is linked to another central account")
-        user.student_id = central_user_id
+        # ``student_id`` belongs to the legacy Sampark roster. It is not a Central Auth
+        # identifier. Keeping those identifiers separate prevents a later roster import
+        # or an email change from silently splitting one learner into two local accounts.
+        # The conditional UPDATE in bind_central_identity makes simultaneous browser
+        # callbacks deterministic: exactly one can establish a previously-empty binding.
+        if user.central_identity_id is None:
+            user = await self.bind_central_identity(user, central_user_id)
         if name:
             user.name = name
         if degree:

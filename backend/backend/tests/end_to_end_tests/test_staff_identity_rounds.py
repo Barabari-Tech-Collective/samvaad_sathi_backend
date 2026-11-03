@@ -39,6 +39,29 @@ async def test_stable_identity_binding_is_unique_and_independent_of_email(db):
 
 
 @pytest.mark.asyncio
+async def test_sso_sync_uses_central_identity_without_overwriting_legacy_student_id(db):
+    _, factory, user_id = db
+    async with factory() as session:
+        repo = UserCRUDRepository(async_session=session)
+        user = await session.get(User, user_id)
+        user.student_id = "sampark-roster-42"
+        await session.commit()
+
+        await repo.sync_central_identity(
+            user_id=user_id,
+            central_user_id="central-student-42",
+            name="Updated learner",
+        )
+
+        refreshed = await session.get(User, user_id)
+        assert refreshed.student_id == "sampark-roster-42"
+        assert refreshed.central_identity_id == "central-student-42"
+        assert (
+            await repo.get_user_by_legacy_sso_identity("sampark-roster-42")
+        ).id == user_id
+
+
+@pytest.mark.asyncio
 async def test_multi_team_scope_change_is_audited_and_does_not_change_other_membership(
     db,
 ):
