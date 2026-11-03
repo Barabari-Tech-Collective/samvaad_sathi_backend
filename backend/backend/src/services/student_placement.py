@@ -62,6 +62,23 @@ class OpenBatch(BaseModel):
 _cache: dict = {"at": 0.0, "items": None}
 
 
+def describe_failure(exc: Exception) -> str:
+    """A one-line reason for a failed Sampark read, safe to log (never contains the key)."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        hint = {
+            401: "the service key was refused (SAMPARK_SAATHI_API_KEY must equal Sampark's SAMVAAD_SAATHI_AUTH_API_KEY)",
+            403: "the service key was refused",
+            404: "Sampark has no open-batches route (is Sampark's staging branch deployed, and is SAMPARK_SAATHI_BASE_URL its API base?)",
+        }.get(code, "Sampark answered with an error (500 usually means its migration has not been run)" if code >= 500 else "unexpected answer")
+        return f"HTTP {code} from {exc.request.url.host}: {hint}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "Sampark did not answer in time"
+    if isinstance(exc, httpx.HTTPError):
+        return f"could not connect to Sampark ({type(exc).__name__})"
+    return f"{type(exc).__name__}: {exc}"
+
+
 def reset_cache() -> None:
     _cache.update(at=0.0, items=None)
 
@@ -92,7 +109,10 @@ async def open_batches(*, transport=None) -> tuple[list[OpenBatch], bool]:
             if item.key not in seen:
                 seen.add(item.key)
                 items.append(item)
-    except Exception:
+    except Exception as exc:
+        # Say why, without the key: a bare 503 told nobody whether the setting was missing, the
+        # key was refused, the address was wrong or Sampark was down.
+        logger.warning("Could not read Sampark's open batches: %s", describe_failure(exc))
         if _cache["items"] is not None:
             return _cache["items"], True
         raise fastapi.HTTPException(503, UNAVAILABLE)
