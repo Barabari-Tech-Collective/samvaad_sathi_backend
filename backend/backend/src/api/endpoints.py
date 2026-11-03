@@ -108,6 +108,8 @@ from src.api.routes.opportunities import router as opportunities_router
 router.include_router(router=opportunities_router)
 from src.api.routes.learners import router as learners_router
 router.include_router(router=learners_router)
+from src.api.routes.program_learners import router as program_learners_router
+router.include_router(router=program_learners_router)
 from src.api.routes.assessment_records import router as assessment_records_router
 router.include_router(router=assessment_records_router)
 
