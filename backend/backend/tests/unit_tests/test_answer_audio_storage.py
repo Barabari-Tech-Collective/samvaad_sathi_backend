@@ -126,6 +126,22 @@ async def test_endpoint_failure_reports_rather_than_raises(s3):
 
 
 @pytest.mark.anyio
+async def test_transient_storage_failure_retries_without_re_recording(s3):
+    """A dropped S3 request should be retried with the same durable key."""
+    from botocore.exceptions import ClientError
+
+    s3.put_object.side_effect = [
+        ClientError({"Error": {"Code": "503"}}, "PutObject"),
+        None,
+    ]
+    key = await s3_service.upload_answer_audio_to_s3(
+        audio_bytes=b"x", user_id=7, question_attempt_id=42, checksum="abc"
+    )
+    assert key is not None
+    assert s3.put_object.call_count == 2
+
+
+@pytest.mark.anyio
 async def test_unconfigured_s3_reports_rather_than_raises(monkeypatch):
     monkeypatch.setattr(s3_service, "s3_client", None)
     key = await s3_service.upload_answer_audio_to_s3(
