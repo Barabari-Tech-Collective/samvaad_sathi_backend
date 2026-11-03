@@ -1511,15 +1511,21 @@ async def review_practice_template(
 @router.get("/practice-templates", response_model=JobProfileListResponse)
 async def list_practice_templates(
     limit: int = fastapi.Query(100, ge=1, le=200),
+    offset: int = fastapi.Query(0, ge=0, le=1_000_000),
+    q: str | None = fastapi.Query(None, max_length=100, description="Name contains"),
     current_user=fastapi.Depends(get_current_creator_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
         get_repository(repo_type=JobProfileCRUDRepository)
     ),
 ):
+    # One page of templates, newest first, plus the real total so a client can page.
     profiles = await job_profile_repo.list_profiles(
-        limit=limit, is_admin=True, interview_mode="practice"
+        limit=limit, offset=offset, is_admin=True, interview_mode="practice", search=q
     )
-    return JobProfileListResponse(items=profiles, total=len(profiles))
+    total = await job_profile_repo.count_profiles(
+        is_admin=True, interview_mode="practice", search=q
+    )
+    return JobProfileListResponse(items=profiles, total=total)
 
 
 @router.delete(
@@ -1543,18 +1549,53 @@ async def delete_practice_question(
     )
 
 
-@router.get("/assessment-roles", response_model=JobProfileListResponse)
-async def list_assessment_roles(
-    limit: int = fastapi.Query(100, ge=1, le=200),
+@router.get("/practice-templates/{profile_id}", response_model=JobProfileResponse)
+async def get_practice_template(
+    profile_id: int,
     current_user=fastapi.Depends(get_current_creator_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
         get_repository(repo_type=JobProfileCRUDRepository)
     ),
 ):
+    # So an editor can open a template that is not on the page of the list being viewed.
+    profile = await job_profile_repo.get_by_id(job_profile_id=profile_id)
+    if profile is None or profile.interview_mode != "practice":
+        raise fastapi.HTTPException(404, "Practice template not found")
+    return JobProfileResponse.model_validate(profile)
+
+
+@router.get("/assessment-roles/{profile_id}", response_model=JobProfileResponse)
+async def get_assessment_role(
+    profile_id: int,
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    profile = await job_profile_repo.get_by_id(job_profile_id=profile_id)
+    if profile is None or profile.interview_mode != "assessment":
+        raise fastapi.HTTPException(404, "Assessment template not found")
+    return JobProfileResponse.model_validate(profile)
+
+
+@router.get("/assessment-roles", response_model=JobProfileListResponse)
+async def list_assessment_roles(
+    limit: int = fastapi.Query(100, ge=1, le=200),
+    offset: int = fastapi.Query(0, ge=0, le=1_000_000),
+    q: str | None = fastapi.Query(None, max_length=100, description="Name contains"),
+    current_user=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+):
+    # One page of templates, newest first, plus the real total so a client can page.
     profiles = await job_profile_repo.list_profiles(
-        limit=limit, is_admin=True, interview_mode="assessment"
+        limit=limit, offset=offset, is_admin=True, interview_mode="assessment", search=q
     )
-    return JobProfileListResponse(items=profiles, total=len(profiles))
+    total = await job_profile_repo.count_profiles(
+        is_admin=True, interview_mode="assessment", search=q
+    )
+    return JobProfileListResponse(items=profiles, total=total)
 
 
 @router.post(
