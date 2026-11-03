@@ -3,7 +3,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.services.analytics import AnalyticsService
+from src.services.analytics import AnalyticsService, canonical_role_options
+
+
+def test_role_filter_options_are_canonical_across_legacy_formatting():
+    assert canonical_role_options(
+        [
+            "FULL STACK DEVELOPER",
+            " Full-Stack Developer ",
+            "Full Stack Developer",
+            "Backend Engineer",
+            None,
+            "  ",
+        ]
+    ) == ["Backend Engineer", "Full Stack Developer"]
 
 
 class _ScalarResult:

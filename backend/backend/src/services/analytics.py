@@ -26,6 +26,33 @@ from src.models.db.job_profile import JobProfile
 # this service file focused strictly on business logic as requested during PR review.
 from src.services.mappings import TRACK_TO_CATEGORY
 from src.services.people import student_interview, student_only
+
+
+def canonical_role_options(values: Sequence[object]) -> list[str]:
+    """Return one stable filter option per semantic interview role.
+
+    Interview tracks predate role templates and include hand-entered values.
+    Comparing a compact, case-folded key means legacy values such as
+    ``FULL STACK DEVELOPER`` cannot become a separate option from
+    ``Full Stack Developer``.
+    """
+    options: dict[str, str] = {}
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        # Separators are formatting, not part of a different role identity.
+        label = " ".join(re.sub(r"[-_]+", " ", value).split())
+        key = re.sub(r"[^a-z0-9]+", "", label.casefold())
+        if not key:
+            continue
+        existing = options.get(key)
+        # Keep mixed/title case where it is available; otherwise retain the
+        # first stable legacy value instead of returning duplicate filters.
+        if existing is None or (existing.isupper() and not label.isupper()):
+            options[key] = label
+    return sorted(options.values(), key=str.casefold)
+
+
 def _ensure_utc(dt: datetime.datetime | None) -> datetime.datetime:
     """Return dt as UTC-aware; if None, return datetime.min UTC."""
     if not dt:
@@ -882,7 +909,7 @@ class AnalyticsService:
         stmt = sqlalchemy.select(Interview.track).where(Interview.track.is_not(None)).distinct()
         roles = list((await self._db.execute(stmt)).scalars().all())
         
-        return sorted([r for r in roles if r])
+        return canonical_role_options(roles)
 
     async def get_alerts(
         self,
