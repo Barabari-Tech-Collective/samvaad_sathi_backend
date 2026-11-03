@@ -59,7 +59,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         *,
         category: Optional[str] = None,
         limit: Optional[int] = None,
-        is_admin: bool = False
+        is_admin: bool = False,
+        interview_mode: Optional[str] = None,
     ) -> List[JobProfile]:
         from sqlalchemy.orm import selectinload
         query = select(JobProfile).options(selectinload(JobProfile.questions)).order_by(JobProfile.created_at.desc())
@@ -68,6 +69,8 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             query = query.where(JobProfile.status == JobProfileStatus.PUBLISHED)
         if category:
             query = query.where(JobProfile.category == category)
+        if interview_mode:
+            query = query.where(JobProfile.interview_mode == interview_mode)
         if limit is not None:
             query = query.limit(limit)
         result = await self.async_session.execute(query)
