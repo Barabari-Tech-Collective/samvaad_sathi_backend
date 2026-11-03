@@ -215,6 +215,21 @@ async def _fetch_resume_from_url(
             return ResumeFetchResult(
                 None, error="Resume link exceeded the redirect limit"
             )
+    except asyncio.CancelledError:
+        logger.warning(
+            "Question generation was interrupted for job_profile_id=%s token=%s",
+            job_profile_id,
+            generation_token,
+        )
+        await session.rollback()
+        if generation_token is not None:
+            await repo.finish_generation(
+                job_profile_id,
+                generation_token,
+                "failed",
+                "Question generation was interrupted. Your draft is safe; retry.",
+            )
+        raise
     except Exception as exc:
         logger.warning("Bulk ATS: failed to fetch resume_url: %s", exc)
         return ResumeFetchResult(None, error="Resume link could not be downloaded")
@@ -237,11 +252,12 @@ async def generate_questions_task(
     """
     from src.repository.crud.job_profile import JobProfileCRUDRepository
     from src.repository.database import async_db
-    from src.services.question_generation import generate_questions_for_level
+    from src.services.question_generation import generate_question_levels
+    from src.services.question_generation_failures import safe_generation_failure_message
 
     session = async_db.get_session()
+    repo = JobProfileCRUDRepository(async_session=session)
     try:
-        repo = JobProfileCRUDRepository(async_session=session)
         profile = await repo.get_by_id(job_profile_id=job_profile_id)
         if profile is None:
             raise ValueError(f"Job profile {job_profile_id} not found")
@@ -251,21 +267,16 @@ async def generate_questions_task(
         context_text = profile.job_description
         skills_list = profile.skills or []
 
-        level_tasks = [
-            generate_questions_for_level(
-                level=l["level"],
-                count=l["count"],
-                track=track,
-                context_text=context_text,
-                skills_list=skills_list,
-                experience_level=profile.experience_level,
-                category=profile.category,
-                knowledge_reference_context=knowledge_reference_context,
-            )
-            for l in levels
-        ]
         await session.rollback()
-        results = await asyncio.gather(*level_tasks)
+        results = await generate_question_levels(
+            levels=levels,
+            track=track,
+            context_text=context_text,
+            skills_list=skills_list,
+            experience_level=profile.experience_level,
+            category=profile.category,
+            knowledge_reference_context=knowledge_reference_context,
+        )
 
         generated_questions_data = []
         for level_results in results:
@@ -311,10 +322,20 @@ async def generate_questions_task(
             job_profile_id,
         )
         return {"count": len(db_questions)}
-    except Exception:
+    except Exception as exc:
+        logger.exception(
+            "Question generation failed for job_profile_id=%s token=%s",
+            job_profile_id,
+            generation_token,
+        )
         await session.rollback()
         if generation_token is not None:
-            await repo.finish_generation(job_profile_id, generation_token, "failed")
+            await repo.finish_generation(
+                job_profile_id,
+                generation_token,
+                "failed",
+                safe_generation_failure_message(exc),
+            )
         raise
     finally:
         await session.close()

@@ -134,11 +134,14 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         profile.generation_token = str(uuid.uuid4())
         profile.generation_state = "queued"
         profile.generation_result_count = None
+        profile.generation_error = None
         token, revision = profile.generation_token, profile.content_revision
         await self.async_session.commit()
         return token, revision
 
-    async def finish_generation(self, profile_id: int, token: str, state: str):
+    async def finish_generation(
+        self, profile_id: int, token: str, state: str, error: str | None = None
+    ):
         profile = await self.lock_profile(profile_id)
         if (
             profile is not None
@@ -147,6 +150,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             and profile.generation_state in ("queued", "in_progress")
         ):
             profile.generation_state = state
+            profile.generation_error = error[:240] if state == "failed" and error else None
             await self.async_session.commit()
 
     async def cancel_generation(self, profile_id: int):
