@@ -256,6 +256,15 @@ def sampark(handler):
     return httpx.MockTransport(handler)
 
 
+def listen(monkeypatch, caplog):
+    """Capture this module's log lines even if an earlier test reconfigured logging."""
+    import logging
+
+    monkeypatch.setattr(service.logger, "disabled", False)
+    monkeypatch.setattr(service.logger, "propagate", True)
+    caplog.set_level(logging.WARNING, logger=service.logger.name)
+
+
 @pytest.fixture
 def connected(monkeypatch):
     monkeypatch.setattr(service.settings, "SAMPARK_SAATHI_BASE_URL", "https://sampark.test/api", raising=False)
@@ -311,6 +320,45 @@ async def test_without_any_good_copy_an_outage_is_a_plain_503(connected):
     with pytest.raises(fastapi.HTTPException) as refused:
         await service.open_batches(transport=sampark(lambda request: httpx.Response(200, json={"isSuccess": False})))
     assert refused.value.status_code == 503
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status, expected",
+    [
+        (401, "service key was refused"),
+        (404, "no open-batches route"),
+        (500, "migration has not been run"),
+    ],
+)
+async def test_the_log_says_why_sampark_could_not_be_read(connected, caplog, monkeypatch, status, expected):
+    import logging
+
+    listen(monkeypatch, caplog)
+    with pytest.raises(fastapi.HTTPException):
+        await service.open_batches(transport=sampark(lambda request: httpx.Response(status)))
+    assert expected in caplog.text
+    assert "service-key" not in caplog.text  # the key itself is never logged
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_and_a_missing_setting_are_described_too(connected, monkeypatch, caplog):
+    import logging
+
+    listen(monkeypatch, caplog)
+
+    def slow(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with pytest.raises(fastapi.HTTPException):
+        await service.open_batches(transport=sampark(slow))
+    assert "did not answer in time" in caplog.text
+    service.reset_cache()
+    monkeypatch.setattr(service.settings, "SAMPARK_SAATHI_BASE_URL", "", raising=False)
+    caplog.clear()
+    with pytest.raises(fastapi.HTTPException):
+        await service.open_batches()
+    assert "not configured" in caplog.text
 
 
 @pytest.mark.asyncio
