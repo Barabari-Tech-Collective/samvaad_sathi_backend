@@ -219,6 +219,18 @@ class JobProfileResponse(JobProfileBase):
         serialization_alias="submittedAt",
     )
 
+    @pydantic.computed_field(  # type: ignore[prop-decorator]
+        alias="created_at",
+        description=(
+            "The same instant as createdAt, under the snake_case name the student "
+            "app's role-catalogue check requires. Without it the check rejects the "
+            "whole role list and no student can start any interview."
+        ),
+    )
+    @property
+    def createdAtSnake(self) -> datetime.datetime:
+        return self.created_at
+
     @pydantic.computed_field
     @property
     def jobName(self) -> str:
