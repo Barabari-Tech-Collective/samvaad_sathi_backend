@@ -17,6 +17,16 @@ logger = logging.getLogger(__name__)
 RESUME_SCORE_PATH = "/samvaad-saathi/v1/resume-score"
 
 
+def batches_connection() -> tuple[str, str]:
+    """(base URL, service key) for the batch list and batch-choice calls to Sampark.
+
+    SAMPARK_BATCHES_* when set, otherwise the SAMPARK_SAATHI_* pair the resume-score callback uses.
+    Each is chosen separately, so a key can be shared while the address differs."""
+    base = (settings.SAMPARK_BATCHES_BASE_URL or settings.SAMPARK_SAATHI_BASE_URL or "").strip().rstrip("/")
+    key = (settings.SAMPARK_BATCHES_API_KEY or settings.SAMPARK_SAATHI_API_KEY or "").strip()
+    return base, key
+
+
 async def submit_resume_score_to_barabari(
     student_id: str,
     resume_score: int,
@@ -69,11 +79,11 @@ async def submit_batch_choice_to_sampark(email: str, batch_key: str, request_id:
     Runs as an arq job, never inline, so a Sampark outage can never fail the learner's choice.
     A learner who is not in Sampark is an ordinary answer (200), not a failure, so it is not
     retried. Anything else (a network error, a non-2xx reply) raises so arq retries."""
-    api_key = settings.SAMPARK_SAATHI_API_KEY
-    base_url = (settings.SAMPARK_SAATHI_BASE_URL or "").rstrip("/")
+    base_url, api_key = batches_connection()
     if not api_key or not base_url:
         logger.warning(
-            "RequestId: %s | SAMPARK_SAATHI_API_KEY/BASE_URL not configured, skipping batch-choice callback",
+            "RequestId: %s | Sampark batches connection not configured (SAMPARK_BATCHES_* or SAMPARK_SAATHI_*), "
+            "skipping batch-choice callback",
             request_id,
         )
         return

@@ -429,6 +429,11 @@ class BackendBaseSettings(BaseSettings):
     SAMPARK_ENROLLMENT_MAX_AGE_SECONDS: int = decouple.config("SAMPARK_ENROLLMENT_MAX_AGE_SECONDS", cast=int, default=900)
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
+    # Where Samvaad reads Sampark's open batches and reports a learner's batch choice. Optional:
+    # when empty the SAMPARK_SAATHI_* pair above is used. Set these to point the batch list at
+    # one Sampark while the resume-score callback stays on another.
+    SAMPARK_BATCHES_BASE_URL: str = decouple.config("SAMPARK_BATCHES_BASE_URL", cast=str, default="")  # type: ignore
+    SAMPARK_BATCHES_API_KEY: str = decouple.config("SAMPARK_BATCHES_API_KEY", cast=str, default="")  # type: ignore
     # Auth-service Central Student Registry. Product backends use this server-side key to
     # hydrate common profile fields; it must match auth-service CENTRAL_PROFILE_API_KEY.
     CENTRAL_IDENTITY_CHECK_ENABLED: bool = decouple.config("CENTRAL_IDENTITY_CHECK_ENABLED", cast=bool, default=True)  # type: ignore
