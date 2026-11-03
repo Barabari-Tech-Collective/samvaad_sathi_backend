@@ -8,6 +8,7 @@ import fastapi
 import pytest
 from src.services import sso_transactions as tx
 from src.api.routes import auth_sso as routes
+from src.utilities.exceptions.database import EntityDoesNotExist
 
 
 class Store:
@@ -170,6 +171,62 @@ async def test_success_preserves_destination_without_losing_query(setup, monkeyp
     assert parse_qs(target.query)["return_to"] == ["/reports/2?view=all#score"]
     assert "Max-Age=0" in res.headers["set-cookie"]
     assert res.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_sso_prefers_stable_central_identity_after_an_email_change(setup, monkeypatch):
+    """An email change must refresh the existing learner, never create another row."""
+    _, store = setup
+    state, binding = await tx.create(store, "/practice")
+    monkeypatch.setattr(
+        routes,
+        "decode_sso_access_token",
+        lambda token: {"sub": "renamed@example.test", "userUniqueId": "central-42"},
+    )
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *args, **kwargs):
+            return SimpleNamespace(
+                status_code=200,
+                headers={"content-type": "application/json"},
+                json=lambda: {
+                    "isSuccess": True,
+                    "data": {"accessToken": "test-access", "refreshToken": "test-refresh"},
+                },
+            )
+
+    monkeypatch.setattr(routes.httpx, "AsyncClient", lambda **kwargs: Client())
+    existing = SimpleNamespace(id=42, is_onboarded=True)
+    repo = SimpleNamespace(
+        get_user_by_central_identity=AsyncMock(return_value=existing),
+        get_user_by_legacy_sso_identity=AsyncMock(),
+        get_user_by_email=AsyncMock(side_effect=EntityDoesNotExist("old email absent")),
+        sync_central_identity=AsyncMock(),
+    )
+
+    response = await routes.sso_callback(
+        request(f"{tx.cookie_name(state)}={binding}"),
+        state=state,
+        code="test-code",
+        user_repo=repo,
+    )
+
+    assert urlsplit(response.headers["location"]).path == "/"
+    repo.get_user_by_central_identity.assert_awaited_once_with("central-42")
+    repo.get_user_by_legacy_sso_identity.assert_not_awaited()
+    repo.sync_central_identity.assert_awaited_once_with(
+        user_id=42,
+        central_user_id="central-42",
+        name=None,
+        degree=None,
+        university=None,
+    )
 
 @pytest.mark.asyncio
 async def test_real_local_redis_transactions():

@@ -240,9 +240,35 @@ async def sso_callback(
                 # linked below and common fields can refresh on the next login.
                 central_profile = {}
 
+    # Central Auth's stable ID is the account key. Email is only a recovery key: people can
+    # change it, and using it first was creating a new local learner row for an existing
+    # person. The legacy lookup repairs rows created before central_identity_id existed.
+    identity_user = None
     try:
-        user = await user_repo.get_user_by_email(email=email)
+        identity_user = await user_repo.get_user_by_central_identity(str(central_user_id))
+    except (AttributeError, EntityDoesNotExist):
+        try:
+            identity_user = await user_repo.get_user_by_legacy_sso_identity(str(central_user_id))
+        except (AttributeError, EntityDoesNotExist):
+            pass
+
+    email_user = None
+    try:
+        email_user = await user_repo.get_user_by_email(email=email)
     except EntityDoesNotExist:
+        pass
+
+    if identity_user is not None and email_user is not None and identity_user.id != email_user.id:
+        logger.error(
+            "Refusing ambiguous SSO identity binding central_user_id=%s local_ids=%s,%s",
+            central_user_id,
+            identity_user.id,
+            email_user.id,
+        )
+        return redirect(f"{target}#error={quote('Your account needs identity review. Contact your programme team.')}")
+
+    user = identity_user or email_user
+    if user is None:
         # First time this student has reached Samvaad Saathi via Sampark Saathi SSO -
         # mirrors auth_cognito.py's authorize(), which likewise auto-created a local User
         # row keyed by email the first time a Cognito login came through. password_hash is
