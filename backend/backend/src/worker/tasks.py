@@ -266,6 +266,12 @@ async def generate_questions_task(
         track = profile.job_name
         context_text = profile.job_description
         skills_list = profile.skills or []
+        # The LLM call must not keep the database transaction open.  A rollback
+        # expires ORM attributes, however, and touching an expired attribute in
+        # async SQLAlchemy attempts implicit I/O outside greenlet_spawn.  Copy
+        # every profile value the worker needs before releasing the transaction.
+        experience_level = profile.experience_level
+        category = profile.category
 
         await session.rollback()
         results = await generate_question_levels(
@@ -273,8 +279,8 @@ async def generate_questions_task(
             track=track,
             context_text=context_text,
             skills_list=skills_list,
-            experience_level=profile.experience_level,
-            category=profile.category,
+            experience_level=experience_level,
+            category=category,
             knowledge_reference_context=knowledge_reference_context,
         )
 
