@@ -174,6 +174,24 @@ async def test_success_preserves_destination_without_losing_query(setup, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_refresh_keeps_temporary_central_outages_distinct_from_invalid_credentials(monkeypatch):
+    """A 5xx must be retryable, never translated into a logout-inducing 401."""
+    monkeypatch.setattr(routes, "settings", SimpleNamespace(AUTH_SERVICE_BASE_URL="https://central.internal"))
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, *args, **kwargs):
+            return SimpleNamespace(status_code=503, headers={"content-type": "application/json"}, json=lambda: {"isSuccess": False})
+
+    monkeypatch.setattr(routes.httpx, "AsyncClient", lambda **kwargs: Client())
+    with pytest.raises(fastapi.HTTPException) as raised:
+        await routes.sso_refresh("still-valid-refresh-token")
+    assert raised.value.status_code == 503
+    assert "temporarily unavailable" in raised.value.detail.lower()
+
+
+@pytest.mark.asyncio
 async def test_sso_prefers_stable_central_identity_after_an_email_change(setup, monkeypatch):
     """An email change must refresh the existing learner, never create another row."""
     _, store = setup

@@ -342,7 +342,18 @@ async def sso_refresh(refresh_token: str = fastapi.Form(...)):
 
     body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
     if resp.status_code != 200 or not body.get("isSuccess"):
-        raise fastapi.HTTPException(status_code=401, detail=body.get("errorMessage") or "Invalid or expired refresh token")
+        # Only Central Auth's explicit credential rejection can end a local
+        # student session. Mapping every provider failure to 401 made a brief
+        # 5xx/timeout look like logout whenever the browser resumed a tab.
+        if resp.status_code in (400, 401):
+            raise fastapi.HTTPException(
+                status_code=401,
+                detail=body.get("errorMessage") or "Invalid or expired refresh token",
+            )
+        raise fastapi.HTTPException(
+            status_code=503,
+            detail="Secure refresh is temporarily unavailable. Please retry shortly.",
+        )
 
     return {"token": body["data"]["accessToken"], "refresh_token": body["data"]["refreshToken"]}
 
