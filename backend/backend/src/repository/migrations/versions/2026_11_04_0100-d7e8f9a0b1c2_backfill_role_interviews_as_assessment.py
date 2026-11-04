@@ -11,14 +11,14 @@ Practice sessions expire; assessments do not, so the expiry set on the wrongly
 classified rows is cleared as well.
 
 Revision ID: d7e8f9a0b1c2
-Revises: c5e6f7a8b9d0
+Revises: b0c1d2e3f4a6
 Create Date: 2026-11-04 01:00:00.000000
 """
 
 from alembic import op
 
 revision = "d7e8f9a0b1c2"
-down_revision = "c5e6f7a8b9d0"
+down_revision = "b0c1d2e3f4a6"
 branch_labels = None
 depends_on = None
 
