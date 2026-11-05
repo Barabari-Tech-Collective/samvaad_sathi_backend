@@ -333,6 +333,35 @@ async def delete_bulk_ats_resumes_from_s3(object_keys: list[str]) -> dict:
         return {"deleted": 0, "errors": [str(error)]}
 
 
+def generate_bulk_ats_resume_presigned_url(
+    object_key: str, expires_in: int = 1800
+) -> Optional[str]:
+    """Generates a short-lived presigned URL to securely view/stream a Bulk ATS resume in-browser.
+
+    Sets ResponseContentType to 'application/pdf' and ResponseContentDisposition to 'inline'
+    so the browser displays the resume directly in a tab rather than downloading it.
+    """
+    if not s3_client or not BUCKET_NAME:
+        logger.error("S3 client is not configured. Ensure AWS credentials are in .env.")
+        return None
+
+    try:
+        url = s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": BUCKET_NAME,
+                "Key": object_key,
+                "ResponseContentType": "application/pdf",
+                "ResponseContentDisposition": "inline",
+            },
+            ExpiresIn=expires_in,
+        )
+        return url
+    except Exception as e:
+        logger.error(f"Failed to generate presigned URL for Bulk ATS resume: {e}")
+        return None
+
+
 async def fetch_answer_audio_from_s3(object_key: str) -> Optional[bytes]:
     """Reads back a stored answer recording, for the transcription worker."""
     if not s3_client or not BUCKET_NAME:

@@ -37,8 +37,14 @@ async def my_notifications(
         "unread": int(unread),
         "items": [
             {
-                "id": n.id, "kind": n.kind, "title": n.title, "body": n.body, "href": n.href,
-                "created_at": n.created_at, "read": n.read_at is not None,
+                "id": n.id,
+                "kind": n.kind,
+                "title": n.title,
+                "body": n.body,
+                "href": n.href,
+                "created_at": n.created_at,
+                "read": n.read_at is not None,
+                "metadata": getattr(n, "notification_metadata", None) or {},
             }
             for n in rows
         ],

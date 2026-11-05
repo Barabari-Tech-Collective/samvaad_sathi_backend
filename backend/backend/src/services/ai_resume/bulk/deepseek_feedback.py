@@ -344,3 +344,50 @@ async def generate_shareable_feedback(
         raise ShareableFeedbackError(
             "DeepSeek could not generate feedback. Please try again."
         ) from exc
+
+
+class CompanyPitchPayload(pydantic.BaseModel):
+    pitchSummary: str = pydantic.Field(min_length=10, max_length=1000)
+
+
+async def generate_company_pitch_summary(
+    *,
+    company_name: str,
+    role_name: str,
+    candidate_count: int,
+    top_skills: list[str],
+) -> str:
+    """Generate a concise, professional executive pitch for corporate HR."""
+    skills_text = ", ".join(top_skills[:5]) if top_skills else "the required core competencies"
+    default_summary = (
+        f"Following rigorous screening and evaluation, we are excited to recommend {candidate_count} "
+        f"high-performing candidates for the {role_name} opening at {company_name}. Each candidate "
+        f"has demonstrated proven abilities in {skills_text} and was verified through our placement pipeline."
+    )
+
+    if not settings.BULK_ATS_DEEPSEEK_FEEDBACK_ENABLED or not settings.DEEPSEEK_API_KEY:
+        return default_summary
+
+    system_prompt = (
+        "You are a professional placement director writing a brief 2-3 sentence introduction to a corporate HR recruiter. "
+        "Highlight the candidate count, role, and key skills. Be professional, direct, and compelling. "
+        "Return one JSON object shaped like: {\"pitchSummary\": \"...\"} under 120 words."
+    )
+    user_prompt = (
+        f"Company: {company_name}\n"
+        f"Target Role: {role_name}\n"
+        f"Shortlisted Candidate Count: {candidate_count}\n"
+        f"Verified Skill Competencies: {skills_text}"
+    )
+
+    try:
+        generated, _ = await _generate_validated_json(
+            payload_type=CompanyPitchPayload,
+            system_prompt=system_prompt,
+            canonical_input=user_prompt,
+        )
+        return generated.pitchSummary.strip()
+    except Exception as exc:
+        logger.warning("DeepSeek company pitch generation failed, using default: %s", exc)
+        return default_summary
+

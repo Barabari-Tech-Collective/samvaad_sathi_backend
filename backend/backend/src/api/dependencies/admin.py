@@ -505,6 +505,19 @@ def calculate_user_permissions(
         "can_access_colleges": can_access_colleges,
         "can_access_interviews": can_access_interviews,
         "can_access_practice_interview": can_access_practice_interview,
+        "can_review_program_handoff": bool(
+            is_admin_user(user)
+            or is_program_lead
+            or is_sr_facilitator
+            or is_program_creator
+        ),
+        "can_manage_placement_handoff": bool(
+            is_admin_user(user)
+            or is_placement_lead
+            or is_placement_creator
+            or is_placement_staff
+            or can_access_ats_token
+        ),
     }
 
 
@@ -803,6 +816,69 @@ async def get_current_bulk_ats_user(
     raise fastapi.HTTPException(
         status_code=fastapi.status.HTTP_403_FORBIDDEN,
         detail="Bulk ATS access is restricted to Placement/Partnership team creators, recruiters, and administrators. Regular team members do not have access.",
+    )
+
+
+async def get_current_program_review_user(
+    current_user: User = fastapi.Depends(get_current_user),
+    session=fastapi.Depends(get_async_session),
+) -> User:
+    """Require an authenticated Program Lead, Senior Facilitator, Program Creator, or Administrator."""
+    if is_admin_user(current_user):
+        return current_user
+
+    role = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    if role in {
+        "admin",
+        "super admin",
+        "super_admin",
+        "sr facilitator",
+        "senior facilitator",
+        "program lead",
+        "program manager",
+        "lead",
+        "team lead",
+        "creator",
+    }:
+        return current_user
+
+    if session is not None:
+        memberships = await get_user_active_memberships(current_user.id, session)
+        if memberships:
+            perms = calculate_user_permissions(current_user, memberships)
+            if perms.get("can_review_program_handoff"):
+                return current_user
+
+    raise fastapi.HTTPException(
+        status_code=fastapi.status.HTTP_403_FORBIDDEN,
+        detail="Program review access is restricted to Program Leads, Senior Facilitators, and Administrators.",
+    )
+
+
+async def get_current_placement_handoff_user(
+    current_user: User = fastapi.Depends(get_current_user),
+    session=fastapi.Depends(get_async_session),
+) -> User:
+    """Require an authenticated Placement Lead, Placement Creator, Recruiter, Placement Staff, or Administrator."""
+    if is_admin_user(current_user):
+        return current_user
+    if session is None and is_bulk_ats_user(current_user):
+        return current_user
+
+    role = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    if role in _BULK_ATS_ROLES or role in {"placement lead", "placement creator", "recruiter", "placement staff"}:
+        return current_user
+
+    if session is not None:
+        memberships = await get_user_active_memberships(current_user.id, session)
+        if memberships:
+            perms = calculate_user_permissions(current_user, memberships)
+            if perms.get("can_manage_placement_handoff") or perms.get("can_access_ats"):
+                return current_user
+
+    raise fastapi.HTTPException(
+        status_code=fastapi.status.HTTP_403_FORBIDDEN,
+        detail="Placement handoff access is restricted to Placement Leads, Placement Creators, Recruiters, and Administrators.",
     )
 
 

@@ -7,6 +7,7 @@ changes the appointment, and a reminder for an old time is superseded, never sen
 import datetime
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.repository.table import Base
@@ -26,10 +27,19 @@ class Notification(Base):
     href: Mapped[str | None] = mapped_column(sa.String(300))
     related_type: Mapped[str | None] = mapped_column(sa.String(32))
     related_id: Mapped[int | None] = mapped_column(sa.Integer)
+    # Notification metadata payload (e.g. batch_id, candidate_ids, scores for rich cards)
+    notification_metadata: Mapped[dict | None] = mapped_column(
+        "metadata", JSONB, nullable=True, server_default=sa.text("'{}'::jsonb")
+    )
     created_at: Mapped[datetime.datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=sa.func.now(), index=True
     )
     read_at: Mapped[datetime.datetime | None] = mapped_column(sa.DateTime(timezone=True))
+
+    def __init__(self, **kwargs):
+        if "metadata" in kwargs:
+            kwargs["notification_metadata"] = kwargs.pop("metadata")
+        super().__init__(**kwargs)
 
 
 class NotificationDelivery(Base):
