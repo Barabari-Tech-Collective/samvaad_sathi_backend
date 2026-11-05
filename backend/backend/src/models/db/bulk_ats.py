@@ -368,7 +368,6 @@ class BulkATSCandidate(Base):  # type: ignore
             "program_readiness_score IS NULL OR (program_readiness_score >= 1 AND program_readiness_score <= 10)",
             name="chk_bulk_ats_candidate_readiness_score",
         ),
-        sqlalchemy.Index("ix_bulk_ats_candidate_handoff_status", "handoff_status"),
     )
     __mapper_args__ = {"eager_defaults": True}
 
