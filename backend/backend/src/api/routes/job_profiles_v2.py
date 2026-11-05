@@ -1092,21 +1092,32 @@ async def get_job_profile_questions_v2(
         for q in db_questions
     ]
 
+    raw_gen_state = getattr(profile, "generation_state", None)
+    safe_gen_state = raw_gen_state if isinstance(raw_gen_state, str) else None
+    raw_token = getattr(profile, "generation_token", None)
+    safe_token = raw_token if isinstance(raw_token, str) else None
+    raw_error = getattr(profile, "generation_error", None)
+    safe_error = raw_error if isinstance(raw_error, str) else None
+    raw_authoring = getattr(profile, "authoring_mode", None)
+    safe_authoring = raw_authoring if isinstance(raw_authoring, str) else None
+    raw_revision = getattr(profile, "content_revision", 0)
+    safe_revision = raw_revision if isinstance(raw_revision, int) else 0
+
     return JobProfileQuestionsListResponse(
-        profile_status=profile.status,
-        authoring_mode=getattr(profile, "authoring_mode", None),
-        content_revision=getattr(profile, "content_revision", 0),
-        generation_state=getattr(profile, "generation_state", None),
+        profile_status=getattr(profile, "status", None) if isinstance(getattr(profile, "status", None), str) else "draft",
+        authoring_mode=safe_authoring,
+        content_revision=safe_revision,
+        generation_state=safe_gen_state,
         # Only expose an ID while it is an active job for this exact profile.
         # A completed/failed token must never be re-polled by a returning tab.
         generation_job_id=(
-            getattr(profile, "generation_token", None)
-            if getattr(profile, "generation_state", None) in ("queued", "in_progress")
+            safe_token
+            if safe_gen_state in ("queued", "in_progress")
             else None
         ),
         generation_error=(
-            getattr(profile, "generation_error", None)
-            if getattr(profile, "generation_state", None) in ("failed", "stale")
+            safe_error
+            if safe_gen_state in ("failed", "stale")
             else None
         ),
         job_profile_id=str(job_profile_id),
