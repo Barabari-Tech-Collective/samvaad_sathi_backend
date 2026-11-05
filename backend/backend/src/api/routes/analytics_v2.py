@@ -140,6 +140,23 @@ CaseInsensitiveDifficulty = Annotated[DifficultyEnum, BeforeValidator(_to_lower_
 CaseInsensitiveCategory = Annotated[CategoryEnum, BeforeValidator(_to_lower_enum_str)]
 
 
+class InterviewStatusEnum(str, Enum):
+    ALL = "all"
+    COMPLETED = "completed"
+    INCOMPLETE = "incomplete"
+
+    @classmethod
+    def _missing_(cls, value: object):
+        if isinstance(value, str):
+            for member in cls:
+                if member.value.lower() == value.lower():
+                    return member
+        return None
+
+
+CaseInsensitiveInterviewStatus = Annotated[InterviewStatusEnum, BeforeValidator(_to_lower_enum_str)]
+
+
 def _apply_interview_filters(
     stmt: sqlalchemy.sql.Select,
     *,
@@ -149,6 +166,7 @@ def _apply_interview_filters(
     difficulty: str | None,
     college: str | None,
     allowed_colleges: set[str] | list[str] | None = None,
+    status: str | None = None,
 ) -> sqlalchemy.sql.Select:
     # Staff test interviews never count toward student numbers.
     filtered_stmt = stmt.where(student_interview())
@@ -172,6 +190,12 @@ def _apply_interview_filters(
         )
     if difficulty:
         filtered_stmt = filtered_stmt.where(Interview.difficulty == difficulty)
+    if status:
+        norm_status = status.strip().lower()
+        if norm_status == "completed":
+            filtered_stmt = filtered_stmt.where(Interview.status == "completed")
+        elif norm_status == "incomplete":
+            filtered_stmt = filtered_stmt.where(Interview.status != "completed")
     if start_date is not None:
         filtered_stmt = filtered_stmt.where(
             Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
@@ -425,6 +449,10 @@ async def get_dashboard_interviews_per_day(
     role: str | None = None,
     difficulty: CaseInsensitiveDifficulty | None = None,
     college: str | None = None,
+    status: CaseInsensitiveInterviewStatus | None = Query(
+        default=InterviewStatusEnum.ALL,
+        description="Filter by interview completion status: 'all', 'completed', or 'incomplete'",
+    ),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -441,6 +469,7 @@ async def get_dashboard_interviews_per_day(
         difficulty=difficulty.value if difficulty else None,
         college=college,
         allowed_colleges=allowed_colleges,
+        status=status.value if status else None,
     ).order_by(sqlalchemy.func.date(Interview.created_at).asc())
     rows = list((await session.execute(stmt)).all())
     points = [TimeSeriesPoint(label=row[0], value=int(row[1])) for row in rows if row[0] is not None]

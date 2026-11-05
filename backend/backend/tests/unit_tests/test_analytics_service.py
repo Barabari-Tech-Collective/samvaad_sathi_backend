@@ -287,3 +287,60 @@ async def test_answer_processing_alerts_report_only_aggregate_operational_metada
     compiled = str(db.statement.compile(compile_kwargs={"literal_binds": True}))
     assert "interview.user_id = 42" in compiled
     assert "question_attempt.answer_saved_at IS NOT NULL" in compiled
+
+
+def test_apply_interview_filters_status_completed():
+    import sqlalchemy
+    from src.api.routes.analytics_v2 import _apply_interview_filters
+    from src.models.db.interview import Interview
+
+    stmt = sqlalchemy.select(Interview.id)
+    filtered = _apply_interview_filters(
+        stmt,
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        status="completed",
+    )
+    compiled = str(filtered.compile(compile_kwargs={"literal_binds": True}))
+    assert "interview.status = 'completed'" in compiled
+
+
+def test_apply_interview_filters_status_incomplete():
+    import sqlalchemy
+    from src.api.routes.analytics_v2 import _apply_interview_filters
+    from src.models.db.interview import Interview
+
+    stmt = sqlalchemy.select(Interview.id)
+    filtered = _apply_interview_filters(
+        stmt,
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        status="incomplete",
+    )
+    compiled = str(filtered.compile(compile_kwargs={"literal_binds": True}))
+    assert "interview.status != 'completed'" in compiled
+
+
+def test_apply_interview_filters_status_all_has_no_status_clause():
+    import sqlalchemy
+    from src.api.routes.analytics_v2 import _apply_interview_filters
+    from src.models.db.interview import Interview
+
+    stmt = sqlalchemy.select(Interview.id)
+    filtered = _apply_interview_filters(
+        stmt,
+        start_date=None,
+        end_date=None,
+        role=None,
+        difficulty=None,
+        college=None,
+        status="all",
+    )
+    compiled = str(filtered.compile(compile_kwargs={"literal_binds": True}))
+    assert "interview.status" not in compiled
