@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Transactional email through Brevo's SMTP relay or AWS SES.
 
 Sending is best effort: a mail failure is logged and never undoes or blocks the action

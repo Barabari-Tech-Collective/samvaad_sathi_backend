@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import uuid
 import logging
@@ -113,8 +115,6 @@ def upload_resume_to_s3(
 
     unique_suffix = str(uuid.uuid4())[:8]
     # Keep the original extension
-    import os
-
     _, ext = os.path.splitext(filename)
     if not ext:
         ext = ".pdf" if "pdf" in content_type.lower() else ".txt"

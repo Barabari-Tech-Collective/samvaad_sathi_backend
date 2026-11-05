@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Durable in-app notifications and email delivery records (architecture pack F30).
 
 The business record (an appointment, a result) is saved first. A notification is the in-app

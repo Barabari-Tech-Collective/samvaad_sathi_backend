@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """In-app notifications for the signed-in person (students and staff), architecture pack F30."""
 
 import datetime as dt

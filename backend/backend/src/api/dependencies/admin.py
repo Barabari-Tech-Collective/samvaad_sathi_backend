@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Authorization gate for cross-student (analytics/dashboard) endpoints.
 
 Kept separate from api/dependencies/auth.py, which answers "who is this?".

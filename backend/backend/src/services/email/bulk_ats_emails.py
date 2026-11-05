@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Email rendering for Bulk ATS student feedback and corporate placement pitches.
 
 Follows Barabari branding:

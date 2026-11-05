@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Bulk ATS: screen many resumes against one role profile at once.
 
 Backend-level RBAC (see get_current_bulk_ats_user) keeps this unavailable to
@@ -36,7 +38,11 @@ from src.api.dependencies.admin import (
 from src.api.dependencies.rate_limit import hybrid_rate_limiter
 from src.api.dependencies.session import get_async_session
 from src.config.manager import settings
-from src.models.db.bulk_ats import BulkATSCandidate, BulkATSHandoffStatus
+from src.models.db.bulk_ats import (
+    BulkATSBatch,
+    BulkATSCandidate,
+    BulkATSHandoffStatus,
+)
 from src.models.db.notification import Notification
 from src.models.db.user import User
 from src.repository.crud.bulk_ats import (
