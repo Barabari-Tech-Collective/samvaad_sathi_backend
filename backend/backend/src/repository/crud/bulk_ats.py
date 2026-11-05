@@ -210,6 +210,7 @@ class BulkATSCRUDRepository:
         *,
         batch_id: int,
         status: str | None = None,
+        handoff_status: str | None = None,
         limit: int = 100,
         offset: int = 0,
         sort: str = "score",
@@ -221,6 +222,8 @@ class BulkATSCRUDRepository:
         )
         if status:
             query = query.where(BulkATSCandidate.status == status)
+        if handoff_status:
+            query = query.where(BulkATSCandidate.handoff_status == handoff_status)
         if assigned_reviewer_id is not None:
             query = query.where(
                 BulkATSCandidate.assigned_reviewer_id == assigned_reviewer_id
@@ -252,6 +255,7 @@ class BulkATSCRUDRepository:
         *,
         batch_id: int,
         status: str | None = None,
+        handoff_status: str | None = None,
         assigned_reviewer_id: int | None = None,
     ) -> int:
         query = (
@@ -264,6 +268,8 @@ class BulkATSCRUDRepository:
         )
         if status:
             query = query.where(BulkATSCandidate.status == status)
+        if handoff_status:
+            query = query.where(BulkATSCandidate.handoff_status == handoff_status)
         if assigned_reviewer_id is not None:
             query = query.where(
                 BulkATSCandidate.assigned_reviewer_id == assigned_reviewer_id
@@ -412,6 +418,55 @@ class BulkATSCRUDRepository:
         candidate.reviewed_by = reviewed_by
         if assigned_reviewer_id is not None:
             candidate.assigned_reviewer_id = assigned_reviewer_id
+        await self.session.commit()
+        await self.session.refresh(candidate)
+        return candidate
+
+    async def update_program_review(
+        self,
+        candidate_id: int,
+        *,
+        readiness_score: int | None = None,
+        feedback_notes: str | None = None,
+        handoff_status: str | None = None,
+        reviewer_id: int | None = None,
+    ) -> BulkATSCandidate | None:
+        candidate = await self.get_candidate(candidate_id)
+        if candidate is None:
+            return None
+        if readiness_score is not None:
+            candidate.program_readiness_score = readiness_score
+        if feedback_notes is not None:
+            candidate.program_feedback_notes = feedback_notes
+        if handoff_status is not None:
+            candidate.handoff_status = handoff_status
+        candidate.program_reviewed_by = reviewer_id
+        candidate.program_reviewed_at = datetime.datetime.now(datetime.timezone.utc)
+        await self.session.commit()
+        await self.session.refresh(candidate)
+        return candidate
+
+    async def update_placement_handoff(
+        self,
+        candidate_id: int,
+        *,
+        placement_notes: str | None = None,
+        assigned_companies: list[str] | None = None,
+        handoff_status: str | None = None,
+    ) -> BulkATSCandidate | None:
+        candidate = await self.get_candidate(candidate_id)
+        if candidate is None:
+            return None
+        if placement_notes is not None:
+            candidate.placement_notes = placement_notes
+        if assigned_companies is not None:
+            current_companies = list(candidate.placement_assigned_companies or [])
+            for comp in assigned_companies:
+                if comp and comp not in current_companies:
+                    current_companies.append(comp)
+            candidate.placement_assigned_companies = current_companies
+        if handoff_status is not None:
+            candidate.handoff_status = handoff_status
         await self.session.commit()
         await self.session.refresh(candidate)
         return candidate

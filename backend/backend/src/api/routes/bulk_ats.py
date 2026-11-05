@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Bulk ATS: screen many resumes against one role profile at once.
 
 Backend-level RBAC (see get_current_bulk_ats_user) keeps this unavailable to
@@ -17,19 +19,31 @@ from urllib.parse import quote, urlparse
 
 import fastapi
 import pydantic
+import sqlalchemy as sa
 from fastapi import UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
 from src.api.dependencies.admin import (
     get_current_admin_user,
     get_current_bulk_ats_user,
+    get_current_program_review_user,
+    get_current_placement_handoff_user,
     is_admin_user,
+    is_super_admin_user,
     is_bulk_ats_user,
+    get_user_active_memberships,
+    calculate_user_permissions,
+    normalize_role,
 )
 from src.api.dependencies.rate_limit import hybrid_rate_limiter
 from src.api.dependencies.session import get_async_session
 from src.config.manager import settings
-from src.models.db.bulk_ats import BulkATSCandidate
+from src.models.db.bulk_ats import (
+    BulkATSBatch,
+    BulkATSCandidate,
+    BulkATSHandoffStatus,
+)
+from src.models.db.notification import Notification
 from src.models.db.user import User
 from src.repository.crud.bulk_ats import (
     BulkATSCRUDRepository,
@@ -51,7 +65,14 @@ from src.services.ai_resume.bulk.google_drive_oauth import (
 from src.services.s3_service import (
     upload_bulk_ats_resume_to_s3,
     delete_bulk_ats_resumes_from_s3,
+    generate_bulk_ats_resume_presigned_url,
 )
+from src.services.email.bulk_ats_emails import (
+    build_student_feedback_email,
+    build_company_pitch_email,
+)
+from src.services.email.sender import send_email
+from src.services.ai_resume.bulk.deepseek_feedback import generate_company_pitch_summary
 from src.worker.queue import enqueue_job
 from src.utilities.exceptions.database import EntityDoesNotExist
 
@@ -87,6 +108,49 @@ class UpdateRubricBody(pydantic.BaseModel):
     required_skills: list[str] = pydantic.Field(default_factory=list, max_length=100)
     preferred_skills: list[str] = pydantic.Field(default_factory=list, max_length=100)
     experience_mode: Literal["fresher", "experienced"] = "experienced"
+
+
+class ProgramReviewBody(pydantic.BaseModel):
+    program_readiness_score: int | None = pydantic.Field(default=None, ge=1, le=10)
+    program_feedback_notes: str | None = pydantic.Field(default=None, max_length=5000)
+    handoff_status: Literal[
+        "screened", "in_program_review", "approved_for_placement", "shared_with_placement", "archived"
+    ] | None = None
+
+
+class PlacementHandoffBody(pydantic.BaseModel):
+    placement_notes: str | None = pydantic.Field(default=None, max_length=5000)
+    placement_assigned_companies: list[str] = pydantic.Field(default_factory=list, max_length=50)
+    handoff_status: Literal[
+        "approved_for_placement", "shared_with_placement", "accepted_in_placement", "rejected", "needs_info", "referred_to_hr", "archived"
+    ] | None = None
+
+
+class ShareToPlacementBody(pydantic.BaseModel):
+    candidate_ids: list[int] = pydantic.Field(min_length=1, max_length=500)
+    readiness_score: int = pydantic.Field(default=8, ge=1, le=10)
+    notes: str | None = pydantic.Field(default=None, max_length=5000)
+    target_queue: str | None = pydantic.Field(default=None, max_length=200)
+
+
+class AcceptPlacementCandidatesBody(pydantic.BaseModel):
+    candidate_ids: list[int] = pydantic.Field(min_length=1, max_length=500)
+    action: Literal["accept", "reject", "needs_info"] = "accept"
+    placement_notes: str | None = pydantic.Field(default=None, max_length=5000)
+
+
+class SendStudentFeedbackEmailBody(pydantic.BaseModel):
+    candidate_ids: list[int] | None = pydantic.Field(default=None, max_length=100)
+    custom_notes: str | None = pydantic.Field(default=None, max_length=2000)
+
+
+class PitchCompanyEmailBody(pydantic.BaseModel):
+    candidate_ids: list[int] = pydantic.Field(min_length=1, max_length=50)
+    company_name: str = pydantic.Field(min_length=1, max_length=200)
+    hr_name: str = pydantic.Field(min_length=1, max_length=200)
+    hr_email: pydantic.EmailStr
+    custom_notes: str | None = pydantic.Field(default=None, max_length=3000)
+    include_resume_links: bool = True
 
 
 def _drive_oauth_redirect(*, status: str, detail: str | None = None):
@@ -257,6 +321,18 @@ def _candidate_summary(c: BulkATSCandidate) -> dict:
         "hasReviewerNotes": bool((c.reviewer_notes or "").strip()),
         "assignedReviewerId": c.assigned_reviewer_id,
         "feedbackStatus": _feedback_states(c.deterministic_report),
+        "handoffStatus": getattr(c, "handoff_status", "screened") or "screened",
+        "programReadinessScore": getattr(c, "program_readiness_score", None),
+        "programFeedbackNotes": getattr(c, "program_feedback_notes", None),
+        "programReviewedBy": getattr(c, "program_reviewed_by", None),
+        "programReviewedAt": (
+            c.program_reviewed_at.isoformat()
+            if getattr(c, "program_reviewed_at", None)
+            else None
+        ),
+        "placementNotes": getattr(c, "placement_notes", None),
+        "placementAssignedCompanies": getattr(c, "placement_assigned_companies", None) or [],
+        "hasResumeFile": bool(getattr(c, "s3_key", None)),
     }
 
 
@@ -309,6 +385,45 @@ def _candidate_detail(c: BulkATSCandidate) -> dict:
     }
 
 
+async def _can_user_access_batch(
+    repo: BulkATSCRUDRepository,
+    current_user: User,
+    batch: BulkATSBatch,
+) -> bool:
+    if is_admin_user(current_user):
+        return True
+    if batch.created_by == getattr(current_user, "id", None):
+        return True
+
+    role = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+    if role in {
+        "placement staff",
+        "placement_staff",
+        "placement lead",
+        "placement_lead",
+        "placement coordinator",
+        "placement_coordinator",
+    }:
+        return True
+
+    session = getattr(repo, "session", None)
+    if session is not None and hasattr(current_user, "id"):
+        try:
+            memberships = await get_user_active_memberships(current_user.id, session)
+            if memberships:
+                perms = calculate_user_permissions(current_user, memberships)
+                if (
+                    perms.get("can_manage_placement_handoff")
+                    or perms.get("can_access_ats")
+                    or perms.get("can_review_program_handoff")
+                ):
+                    return True
+        except Exception as exc:
+            logger.warning("Error checking batch permissions: %s", exc)
+
+    return False
+
+
 async def _get_authorized_batch(
     repo: BulkATSCRUDRepository,
     *,
@@ -316,9 +431,10 @@ async def _get_authorized_batch(
     current_user: User,
 ):
     batch = await repo.get_batch(batch_id)
-    if batch is None or (
-        not is_admin_user(current_user) and batch.created_by != current_user.id
-    ):
+    if batch is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    allowed = await _can_user_access_batch(repo, current_user, batch)
+    if not allowed:
         # Do not reveal that another recruiter's batch exists.
         raise HTTPException(status_code=404, detail="Batch not found")
     return batch
@@ -331,10 +447,10 @@ async def _get_authorized_candidate(
     current_user: User,
 ) -> BulkATSCandidate:
     candidate = await repo.get_candidate(candidate_id)
-    if candidate is None or (
-        not is_admin_user(current_user)
-        and (candidate.batch is None or candidate.batch.created_by != current_user.id)
-    ):
+    if candidate is None or candidate.batch is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    allowed = await _can_user_access_batch(repo, current_user, candidate.batch)
+    if not allowed:
         raise HTTPException(status_code=404, detail="Candidate not found")
     return candidate
 
@@ -567,8 +683,32 @@ async def list_batches(
     assigned_reviewer_id: int | None = None,
 ):
     repo = BulkATSCRUDRepository(session)
+    can_view_all = False
+    if is_admin_user(current_user):
+        can_view_all = True
+    else:
+        role = normalize_role(getattr(current_user, "_token_role", "") or getattr(current_user, "role", ""))
+        if role in {
+            "placement staff",
+            "placement_staff",
+            "placement lead",
+            "placement_lead",
+            "placement coordinator",
+            "placement_coordinator",
+        }:
+            can_view_all = True
+        elif session is not None and hasattr(current_user, "id"):
+            try:
+                memberships = await get_user_active_memberships(current_user.id, session)
+                if memberships:
+                    perms = calculate_user_permissions(current_user, memberships)
+                    if perms.get("can_manage_placement_handoff") or perms.get("can_access_ats"):
+                        can_view_all = True
+            except Exception:
+                pass
+
     batches = await repo.list_batches(
-        created_by=None if is_admin_user(current_user) else current_user.id,
+        created_by=None if can_view_all else current_user.id,
         limit=min(limit, 200),
         offset=offset,
     )
@@ -798,9 +938,23 @@ async def upload_resumes(
                 "process_bulk_ats_candidate_task", candidate_id=candidate.id
             )
             if not queued:
-                await _mark_queue_failure(
-                    repo, candidate_id=candidate.id, batch_id=batch_id
-                )
+                try:
+                    import asyncio
+                    from src.worker.tasks import process_bulk_ats_candidate_task
+
+                    asyncio.create_task(
+                        process_bulk_ats_candidate_task({}, candidate_id=candidate.id)
+                    )
+                    queued = True
+                except Exception as exc:
+                    logger.warning(
+                        "Could not launch background task fallback for candidate %s: %s",
+                        candidate.id,
+                        exc,
+                    )
+                    await _mark_queue_failure(
+                        repo, candidate_id=candidate.id, batch_id=batch_id
+                    )
             accepted.append(
                 {
                     "fileIndex": file_index,
@@ -934,9 +1088,23 @@ async def import_links(
             "process_bulk_ats_candidate_task", candidate_id=candidate.id
         )
         if not queued:
-            await _mark_queue_failure(
-                repo, candidate_id=candidate.id, batch_id=batch_id
-            )
+            try:
+                import asyncio
+                from src.worker.tasks import process_bulk_ats_candidate_task
+
+                asyncio.create_task(
+                    process_bulk_ats_candidate_task({}, candidate_id=candidate.id)
+                )
+                queued = True
+            except Exception as exc:
+                logger.warning(
+                    "Could not launch background task fallback for candidate %s: %s",
+                    candidate.id,
+                    exc,
+                )
+                await _mark_queue_failure(
+                    repo, candidate_id=candidate.id, batch_id=batch_id
+                )
         accepted.append({"candidateId": candidate.id, "queued": bool(queued)})
 
     await repo.refresh_batch_status(batch_id)
@@ -1003,6 +1171,7 @@ async def list_candidates(
     current_user: User = Depends(get_current_bulk_ats_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
     status: Optional[str] = None,
+    handoff_status: Optional[str] = None,
     sort: Literal["score", "confidence", "review_priority", "created"] = "score",
     limit: int = 50,
     offset: int = 0,
@@ -1013,19 +1182,28 @@ async def list_candidates(
         repo, batch_id=batch_id, current_user=current_user
     )
 
-    candidates = await repo.list_candidates(
-        batch_id=batch_id,
-        status=status,
-        sort=sort,
-        limit=min(limit, 200),
-        offset=offset,
-        assigned_reviewer_id=assigned_reviewer_id,
-    )
-    total = await repo.count_candidates(
-        batch_id=batch_id,
-        status=status,
-        assigned_reviewer_id=assigned_reviewer_id,
-    )
+    list_kwargs = {
+        "batch_id": batch_id,
+        "status": status,
+        "sort": sort,
+        "limit": min(limit, 200),
+        "offset": offset,
+        "assigned_reviewer_id": assigned_reviewer_id,
+    }
+    if handoff_status is not None:
+        list_kwargs["handoff_status"] = handoff_status
+
+    candidates = await repo.list_candidates(**list_kwargs)
+
+    count_kwargs = {
+        "batch_id": batch_id,
+        "status": status,
+        "assigned_reviewer_id": assigned_reviewer_id,
+    }
+    if handoff_status is not None:
+        count_kwargs["handoff_status"] = handoff_status
+
+    total = await repo.count_candidates(**count_kwargs)
     return {"total": total, "candidates": [_candidate_summary(c) for c in candidates]}
 
 
@@ -1076,6 +1254,85 @@ async def get_candidate(
         "missingEvidence": candidate.warnings or [],
     }
     return detail
+
+
+@router.get("/batches/{batch_id}/candidates/{candidate_id}/resume-url")
+async def get_batch_candidate_resume_url(
+    batch_id: int,
+    candidate_id: int,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Generate a short-lived presigned URL to view a candidate's uploaded resume in browser."""
+    repo = BulkATSCRUDRepository(session)
+    await _get_authorized_batch(repo, batch_id=batch_id, current_user=current_user)
+    candidate = await repo.get_candidate(candidate_id)
+    if candidate is None or candidate.batch_id != batch_id:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    if candidate.s3_key:
+        presigned_url = generate_bulk_ats_resume_presigned_url(candidate.s3_key, expires_in=1800)
+        if presigned_url:
+            return {
+                "url": presigned_url,
+                "type": "s3_presigned",
+                "expiresIn": 1800,
+                "filename": candidate.original_filename,
+            }
+        logger.warning(
+            "Failed to generate presigned URL for candidate=%s s3_key=%s",
+            candidate_id,
+            candidate.s3_key,
+        )
+
+    if candidate.resume_url:
+        return {
+            "url": candidate.resume_url,
+            "type": "external",
+            "expiresIn": None,
+            "filename": candidate.original_filename,
+        }
+
+    raise HTTPException(
+        status_code=404,
+        detail="No resume document found for this candidate",
+    )
+
+
+@router.get("/candidates/{candidate_id}/resume-url")
+async def get_candidate_resume_url(
+    candidate_id: int,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Direct alias to view candidate resume by candidate ID."""
+    repo = BulkATSCRUDRepository(session)
+    candidate = await _get_authorized_candidate(
+        repo, candidate_id=candidate_id, current_user=current_user
+    )
+
+    if candidate.s3_key:
+        presigned_url = generate_bulk_ats_resume_presigned_url(candidate.s3_key, expires_in=1800)
+        if presigned_url:
+            return {
+                "url": presigned_url,
+                "type": "s3_presigned",
+                "expiresIn": 1800,
+                "filename": candidate.original_filename,
+            }
+
+    if candidate.resume_url:
+        return {
+            "url": candidate.resume_url,
+            "type": "external",
+            "expiresIn": None,
+            "filename": candidate.original_filename,
+        }
+
+    raise HTTPException(
+        status_code=404,
+        detail="No resume document found for this candidate",
+    )
 
 
 @router.post("/candidates/{candidate_id}/merge")
@@ -1446,6 +1703,643 @@ async def review_candidate(
     return _candidate_detail(candidate)
 
 
+@router.patch("/candidates/{candidate_id}/program-review")
+async def update_candidate_program_review_endpoint(
+    candidate_id: int,
+    payload: ProgramReviewBody,
+    current_user: User = Depends(get_current_program_review_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Program team qualitative review: record readiness score (1-10), notes, and approve for placement."""
+    repo = BulkATSCRUDRepository(session)
+    candidate = await _get_authorized_candidate(
+        repo, candidate_id=candidate_id, current_user=current_user
+    )
+
+    if payload.program_readiness_score is not None:
+        if payload.program_readiness_score < 1 or payload.program_readiness_score > 10:
+            raise HTTPException(
+                status_code=400,
+                detail="program_readiness_score must be an integer between 1 and 10",
+            )
+
+    if payload.handoff_status is not None:
+        valid_statuses = {"screened", "in_program_review", "approved_for_placement", "shared_with_placement", "archived"}
+        if payload.handoff_status not in valid_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid handoff_status for program review. Must be one of {valid_statuses}",
+            )
+
+    updated = await repo.update_program_review(
+        candidate.id,
+        readiness_score=payload.program_readiness_score,
+        feedback_notes=payload.program_feedback_notes,
+        handoff_status=payload.handoff_status,
+        reviewer_id=current_user.id,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    await repo.record_audit(
+        action="candidate_program_reviewed",
+        actor_id=current_user.id,
+        batch_id=candidate.batch_id,
+        candidate_id=candidate.id,
+        metadata={
+            "program_readiness_score": payload.program_readiness_score,
+            "handoff_status": payload.handoff_status,
+            "has_notes": bool((payload.program_feedback_notes or "").strip()),
+        },
+    )
+    return _candidate_detail(updated)
+
+
+@router.patch("/candidates/{candidate_id}/placement-handoff")
+async def update_candidate_placement_handoff_endpoint(
+    candidate_id: int,
+    payload: PlacementHandoffBody,
+    current_user: User = Depends(get_current_placement_handoff_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Placement team action: assign target companies, append notes, and transition to referred_to_hr."""
+    repo = BulkATSCRUDRepository(session)
+    candidate = await _get_authorized_candidate(
+        repo, candidate_id=candidate_id, current_user=current_user
+    )
+
+    if payload.handoff_status is not None:
+        valid_statuses = {
+            "approved_for_placement",
+            "shared_with_placement",
+            "accepted_in_placement",
+            "rejected",
+            "needs_info",
+            "referred_to_hr",
+            "archived",
+        }
+        if payload.handoff_status not in valid_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid handoff_status for placement handoff. Must be one of {valid_statuses}",
+            )
+
+    updated = await repo.update_placement_handoff(
+        candidate.id,
+        placement_notes=payload.placement_notes,
+        assigned_companies=payload.placement_assigned_companies,
+        handoff_status=payload.handoff_status,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    await repo.record_audit(
+        action="candidate_placement_handoff_updated",
+        actor_id=current_user.id,
+        batch_id=candidate.batch_id,
+        candidate_id=candidate.id,
+        metadata={
+            "handoff_status": payload.handoff_status,
+            "assigned_companies": payload.placement_assigned_companies,
+            "has_notes": bool((payload.placement_notes or "").strip()),
+        },
+    )
+    return _candidate_detail(updated)
+
+
+@router.get("/batches/{batch_id}/placement-queue")
+async def get_batch_placement_queue(
+    batch_id: int,
+    min_score: float | None = None,
+    min_readiness: int | None = None,
+    current_user: User = Depends(get_current_placement_handoff_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """List approved candidates in a batch ready for corporate referral and pitches."""
+    repo = BulkATSCRUDRepository(session)
+    batch = await _get_authorized_batch(
+        repo, batch_id=batch_id, current_user=current_user
+    )
+    candidates = await repo.list_candidates(
+        batch_id=batch_id,
+        limit=500,
+        sort="score",
+    )
+    approved = [
+        c for c in candidates
+        if c.handoff_status in {
+            "approved_for_placement",
+            "shared_with_placement",
+            "accepted_in_placement",
+            "referred_to_hr",
+        }
+    ]
+
+    filtered = []
+    for c in approved:
+        if min_score is not None and (c.final_score is None or c.final_score < min_score):
+            continue
+        if min_readiness is not None and (
+            c.program_readiness_score is None or c.program_readiness_score < min_readiness
+        ):
+            continue
+        filtered.append(_candidate_detail(c))
+
+    return {
+        "batchId": batch_id,
+        "roleName": batch.role_name,
+        "totalApproved": len(filtered),
+        "candidates": filtered,
+    }
+
+
+async def _get_placement_recipient_user_ids(session: SQLAlchemyAsyncSession) -> list[int]:
+    """Find all active staff, admins, and super admins who should receive placement handoff bell notifications:
+    - Super Admins (is_super_admin=True, in SUPER_ADMIN_EMAILS, or role 'super_admin' / 'super admin')
+    - Admins (is_admin=True, in ADMIN_EMAILS, or role 'admin')
+    - Placement / recruiter staff ('placement_staff', 'recruiter', 'placement_coordinator', 'placement_lead')
+    - Active members of teams with 'placement' or 'partner' in their name
+    """
+    recipient_ids: set[int] = set()
+
+    try:
+        from src.api.dependencies.admin import _allow_listed_emails, _super_admin_allow_listed_emails
+        allow_listed = _allow_listed_emails() | _super_admin_allow_listed_emails()
+
+        conditions = [
+            sa.func.lower(User.role).in_([
+                "super_admin",
+                "super admin",
+                "superadmin",
+                "admin",
+                "placement_staff",
+                "placement staff",
+                "recruiter",
+                "placement_coordinator",
+                "placement coordinator",
+                "placement_lead",
+                "placement lead",
+            ]),
+            User.is_admin.is_(True),
+            User.is_super_admin.is_(True),
+        ]
+        if allow_listed:
+            conditions.append(sa.func.lower(User.email).in_(list(allow_listed)))
+
+        role_stmt = sa.select(User.id).where(sa.or_(*conditions))
+        role_results = (await session.execute(role_stmt)).scalars().all()
+        for uid in role_results:
+            if uid:
+                recipient_ids.add(uid)
+    except Exception as exc:
+        logger.warning("Could not query users by placement/admin roles: %s", exc)
+
+    try:
+        from src.models.db.team import Team
+        from src.models.db.team_member import TeamMember
+
+        team_stmt = (
+            sa.select(TeamMember.user_id)
+            .join(Team, TeamMember.team_id == Team.id)
+            .where(
+                TeamMember.status == "active",
+                Team.status == "active",
+                sa.or_(
+                    Team.name.ilike("%placement%"),
+                    Team.name.ilike("%partner%"),
+                ),
+            )
+        )
+        team_results = (await session.execute(team_stmt)).scalars().all()
+        for uid in team_results:
+            if uid:
+                recipient_ids.add(uid)
+    except Exception as exc:
+        logger.warning("Could not query team members for placement notifications: %s", exc)
+
+    return sorted(list(recipient_ids))
+
+
+@router.post("/batches/{batch_id}/share-to-placement")
+async def share_to_placement_endpoint(
+    batch_id: int,
+    payload: ShareToPlacementBody,
+    current_user: User = Depends(get_current_program_review_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Program team hands off reviewed candidates to the Placement Team:
+    - Updates candidates to handoff_status='shared_with_placement', sets readiness score & notes.
+    - Emits in-app bell notification records targeted at placement staff, admins, and super admins.
+    """
+    repo = BulkATSCRUDRepository(session)
+    batch = await _get_authorized_batch(repo, batch_id=batch_id, current_user=current_user)
+
+    all_candidates = await repo.list_candidates(
+        batch_id=batch_id, limit=settings.BULK_ATS_MAX_FILES_PER_BATCH, sort="created"
+    )
+    candidate_map = {c.id: c for c in all_candidates}
+
+    selected_candidates = []
+    missing_ids = []
+    for cid in payload.candidate_ids:
+        c = candidate_map.get(cid)
+        if c is None:
+            missing_ids.append(cid)
+        else:
+            selected_candidates.append(c)
+
+    if missing_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Candidates not found in this batch: {missing_ids}",
+        )
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for c in selected_candidates:
+        c.handoff_status = "shared_with_placement"
+        c.program_readiness_score = payload.readiness_score
+        if payload.notes:
+            c.program_feedback_notes = payload.notes
+        c.program_reviewed_by = current_user.id
+        c.program_reviewed_at = now
+
+    # Emit bell icon notifications to Placement Team members, Admins, and Super Admins
+    placement_user_ids = await _get_placement_recipient_user_ids(session)
+    target_recipients = set(placement_user_ids)
+    # Guarantee admins and super admins receive the notification badge even if they initiated the handoff
+    if is_admin_user(current_user) or is_super_admin_user(current_user):
+        target_recipients.add(current_user.id)
+    if not target_recipients:
+        target_recipients.add(current_user.id)
+
+    recipient_list = sorted(list(target_recipients))
+
+    sender_name = current_user.name or current_user.email or "Program Team"
+    count = len(selected_candidates)
+    noun = "candidate" if count == 1 else "candidates"
+    notif_title = "New Candidates Shared by Program Team"
+    notif_body = (
+        f"{sender_name} shared {count} {noun} with a {payload.readiness_score}/10 "
+        f"Readiness Score for Placement Review."
+    )
+    notif_href = f"/dashboard/samvaad/bulk-ats/{batch_id}?view=placement_review"
+    notif_metadata = {
+        "batch_id": batch_id,
+        "candidate_ids": [c.id for c in selected_candidates],
+        "readiness_score": payload.readiness_score,
+        "notes": payload.notes,
+        "target_queue": payload.target_queue,
+        "sender_name": sender_name,
+        "sender_id": current_user.id,
+    }
+
+    for r_id in recipient_list:
+        session.add(
+            Notification(
+                recipient_id=r_id,
+                kind="placement_candidate_handoff",
+                title=notif_title,
+                body=notif_body,
+                href=notif_href,
+                related_type="bulk_ats_batch",
+                related_id=batch_id,
+                notification_metadata=notif_metadata,
+            )
+        )
+
+    await repo.record_audit(
+        action="candidates_shared_with_placement",
+        actor_id=current_user.id,
+        batch_id=batch_id,
+        metadata={
+            "candidate_ids": [c.id for c in selected_candidates],
+            "readiness_score": payload.readiness_score,
+            "target_queue": payload.target_queue,
+            "notes": payload.notes,
+            "notified_users_count": len(recipient_list),
+        },
+    )
+
+    await session.commit()
+
+    return {
+        "status": "success",
+        "batch_id": batch_id,
+        "shared_count": count,
+        "candidate_ids": [c.id for c in selected_candidates],
+        "readiness_score": payload.readiness_score,
+        "target_queue": payload.target_queue,
+        "notifications_sent": len(recipient_list),
+        "message": f"Successfully shared {count} {noun} with the Placement Team.",
+    }
+
+
+@router.post("/batches/{batch_id}/accept-placement-candidates")
+async def accept_placement_candidates_endpoint(
+    batch_id: int,
+    payload: AcceptPlacementCandidatesBody,
+    current_user: User = Depends(get_current_placement_handoff_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Placement team action to accept candidates into the active placement pipeline or reject/request info."""
+    repo = BulkATSCRUDRepository(session)
+    batch = await _get_authorized_batch(repo, batch_id=batch_id, current_user=current_user)
+
+    all_candidates = await repo.list_candidates(
+        batch_id=batch_id, limit=settings.BULK_ATS_MAX_FILES_PER_BATCH, sort="created"
+    )
+    candidate_map = {c.id: c for c in all_candidates}
+
+    selected_candidates = []
+    missing_ids = []
+    for cid in payload.candidate_ids:
+        c = candidate_map.get(cid)
+        if c is None:
+            missing_ids.append(cid)
+        else:
+            selected_candidates.append(c)
+
+    if missing_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Candidates not found in this batch: {missing_ids}",
+        )
+
+    status_map = {
+        "accept": "accepted_in_placement",
+        "reject": "rejected",
+        "needs_info": "needs_info",
+    }
+    target_status = status_map[payload.action]
+
+    for c in selected_candidates:
+        c.handoff_status = target_status
+        if payload.placement_notes:
+            c.placement_notes = payload.placement_notes
+
+    await repo.record_audit(
+        action="placement_candidates_decision",
+        actor_id=current_user.id,
+        batch_id=batch_id,
+        metadata={
+            "action": payload.action,
+            "target_status": target_status,
+            "candidate_ids": [c.id for c in selected_candidates],
+            "placement_notes": payload.placement_notes,
+        },
+    )
+
+    await session.commit()
+
+    count = len(selected_candidates)
+    noun = "candidate" if count == 1 else "candidates"
+    return {
+        "status": "success",
+        "batch_id": batch_id,
+        "action": payload.action,
+        "handoff_status": target_status,
+        "updated_count": count,
+        "candidate_ids": [c.id for c in selected_candidates],
+        "message": f"Successfully updated {count} {noun} to '{target_status}'.",
+    }
+
+
+@router.post("/batches/{batch_id}/send-student-feedback")
+async def send_student_feedback_emails_endpoint(
+    batch_id: int,
+    payload: SendStudentFeedbackEmailBody,
+    current_user: User = Depends(get_current_bulk_ats_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Dispatch personalized improvement emails with skill gaps and link alerts to students."""
+    repo = BulkATSCRUDRepository(session)
+    batch = await _get_authorized_batch(
+        repo, batch_id=batch_id, current_user=current_user
+    )
+    all_candidates = await repo.list_candidates(
+        batch_id=batch_id, limit=500, sort="created"
+    )
+
+    if payload.candidate_ids:
+        target_ids = set(payload.candidate_ids)
+        targets = [c for c in all_candidates if c.id in target_ids]
+    else:
+        # Default: target unplaced/developing candidates who completed screening
+        targets = [
+            c for c in all_candidates
+            if c.handoff_status in {"screened", "in_program_review"}
+            and c.status in {"completed", "needs_review"}
+        ]
+
+    delivery_results = []
+    sent_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    for c in targets:
+        recipient = (c.email_or_candidate_id or "").strip()
+        if not recipient or "@" not in recipient:
+            delivery_results.append({
+                "candidateId": c.id,
+                "candidateName": c.candidate_name,
+                "status": "skipped",
+                "reason": "No valid email address found",
+            })
+            skipped_count += 1
+            continue
+
+        report = c.deterministic_report or {}
+        metrics = report.get("deterministicMetrics") or {}
+        skills_mod = metrics.get("skillsModule") or {}
+        missing_skills = (
+            skills_mod.get("missingSkills")
+            or report.get("missing_skills")
+            or []
+        )
+
+        link_rep = c.link_report or {}
+        links = link_rep.get("links") or []
+        broken_links = [
+            {
+                "url": l.get("url") or "Project Link",
+                "reason": l.get("reason") or f"HTTP {l.get('statusCode', 404)}",
+            }
+            for l in links
+            if (l.get("statusCode") and l.get("statusCode") >= 400) or l.get("valid") is False
+        ]
+
+        # Extract DeepSeek feedback or build defaults
+        student_fb = (report.get("shareableFeedback") or {}).get("student") or {}
+        recommendations = (
+            student_fb.get("improvements", []) + student_fb.get("nextSteps", [])
+        )
+        strengths = student_fb.get("strengths", [])
+
+        if not recommendations and missing_skills:
+            recommendations = [
+                f"Develop practical projects demonstrating proficiency in {', '.join(missing_skills[:3])}.",
+                "Ensure all public repositories and portfolio sites are live and properly configured.",
+                "Review core foundational questions and practice technical explanation drills.",
+            ]
+
+        subject, html, text = build_student_feedback_email(
+            candidate_name=c.candidate_name or "Candidate",
+            role_name=batch.role_name,
+            missing_skills=missing_skills,
+            broken_links=broken_links,
+            recommendations=recommendations,
+            strengths=strengths,
+            mentor_notes=c.program_feedback_notes,
+        )
+
+        success = send_email(to=recipient, subject=subject, html=html, text=text)
+        if success:
+            sent_count += 1
+            delivery_results.append({
+                "candidateId": c.id,
+                "candidateName": c.candidate_name,
+                "email": recipient,
+                "status": "sent",
+            })
+        else:
+            failed_count += 1
+            delivery_results.append({
+                "candidateId": c.id,
+                "candidateName": c.candidate_name,
+                "email": recipient,
+                "status": "failed",
+                "reason": "Email transport skipped or failed",
+            })
+
+    await repo.record_audit(
+        action="bulk_student_feedback_emails_dispatched",
+        actor_id=current_user.id,
+        batch_id=batch_id,
+        candidate_id=None,
+        metadata={
+            "totalTargets": len(targets),
+            "sentCount": sent_count,
+            "skippedCount": skipped_count,
+            "failedCount": failed_count,
+        },
+    )
+
+    return {
+        "batchId": batch_id,
+        "total": len(targets),
+        "sent": sent_count,
+        "skipped": skipped_count,
+        "failed": failed_count,
+        "results": delivery_results,
+    }
+
+
+@router.post("/batches/{batch_id}/pitch-to-company")
+async def pitch_to_company_endpoint(
+    batch_id: int,
+    payload: PitchCompanyEmailBody,
+    current_user: User = Depends(get_current_placement_handoff_user),
+    session: SQLAlchemyAsyncSession = Depends(get_async_session),
+):
+    """Draft an AI-personalized pitch email and deliver shortlisted candidate profiles to corporate HR."""
+    repo = BulkATSCRUDRepository(session)
+    batch = await _get_authorized_batch(
+        repo, batch_id=batch_id, current_user=current_user
+    )
+    all_candidates = await repo.list_candidates(
+        batch_id=batch_id, limit=500, sort="score"
+    )
+
+    target_ids = set(payload.candidate_ids)
+    selected = [c for c in all_candidates if c.id in target_ids]
+    if not selected:
+        raise HTTPException(
+            status_code=400,
+            detail="None of the specified candidates were found in this batch",
+        )
+
+    candidate_summaries = []
+    all_matched_skills: list[str] = []
+
+    for c in selected:
+        report = c.deterministic_report or {}
+        metrics = report.get("deterministicMetrics") or {}
+        skills_mod = metrics.get("skillsModule") or {}
+        matched = skills_mod.get("matchedSkills") or []
+        for s in matched:
+            if s and s not in all_matched_skills:
+                all_matched_skills.append(s)
+
+        resume_link = None
+        if payload.include_resume_links and c.s3_key:
+            # 24 hour temporary link for corporate review
+            resume_link = generate_bulk_ats_resume_presigned_url(
+                c.s3_key, expires_in=86400
+            )
+        elif c.resume_url:
+            resume_link = c.resume_url
+
+        candidate_summaries.append({
+            "name": c.candidate_name or f"Candidate {c.id}",
+            "score": round(c.final_score, 1) if c.final_score is not None else None,
+            "readiness_score": c.program_readiness_score,
+            "matched_skills": matched[:6],
+            "resume_url": resume_link,
+        })
+
+    # AI pitch summary generation
+    pitch_summary = await generate_company_pitch_summary(
+        company_name=payload.company_name,
+        role_name=batch.role_name,
+        candidate_count=len(selected),
+        top_skills=all_matched_skills[:8],
+    )
+
+    subject, html, text = build_company_pitch_email(
+        company_name=payload.company_name,
+        hr_name=payload.hr_name,
+        role_name=batch.role_name,
+        candidate_summaries=candidate_summaries,
+        pitch_summary=pitch_summary,
+        custom_notes=payload.custom_notes,
+    )
+
+    sent = send_email(to=payload.hr_email, subject=subject, html=html, text=text)
+
+    # Transition pitched candidates to referred_to_hr and attach company name
+    for c in selected:
+        await repo.update_placement_handoff(
+            c.id,
+            placement_notes=f"Pitched to {payload.company_name} ({payload.hr_email})",
+            assigned_companies=[payload.company_name],
+            handoff_status="referred_to_hr",
+        )
+
+    await repo.record_audit(
+        action="company_pitch_dispatched",
+        actor_id=current_user.id,
+        batch_id=batch_id,
+        candidate_id=None,
+        metadata={
+            "company_name": payload.company_name,
+            "hr_email": payload.hr_email,
+            "candidate_count": len(selected),
+            "email_sent": sent,
+        },
+    )
+
+    return {
+        "batchId": batch_id,
+        "companyName": payload.company_name,
+        "hrEmail": payload.hr_email,
+        "candidateCount": len(selected),
+        "emailSent": sent,
+        "pitchSummary": pitch_summary,
+        "candidates": candidate_summaries,
+    }
+
+
+
 @router.get("/batches/{batch_id}/audit-events")
 async def list_audit_events(
     batch_id: int,
@@ -1705,14 +2599,21 @@ async def disconnect_google_drive(
 async def get_bulk_ats_self(current_user: User = Depends(get_current_bulk_ats_user)):
     """Lets the frontend decide what to show (e.g. the staff-access admin tab)
     without duplicating the RBAC logic in get_current_bulk_ats_user client-side.
-    Reaching this route at all already proves bulk-ats access; isAdmin further
-    distinguishes who may grant/revoke it for others."""
+    Reaching this route at all already proves bulk-ats access; isAdmin and isSuperAdmin further
+    distinguish who may grant/revoke access and take super-admin actions."""
     import shutil
+
+    is_admin = is_admin_user(current_user)
+    is_super_admin = is_super_admin_user(current_user)
 
     return {
         "email": current_user.email,
         "name": current_user.name,
-        "isAdmin": is_admin_user(current_user),
+        "role": current_user.role or ("super_admin" if is_super_admin else ("admin" if is_admin else "user")),
+        "isAdmin": is_admin,
+        "isSuperAdmin": is_super_admin,
+        "canManagePlacementHandoff": True,
+        "canReviewProgram": True,
         "supportsRecruiterTools": True,
         "jevConfigured": bool(settings.JEV_API_KEY),
         "deepseekConfigured": bool(settings.DEEPSEEK_API_KEY),

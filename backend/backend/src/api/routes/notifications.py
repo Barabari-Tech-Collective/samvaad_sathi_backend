@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """In-app notifications for the signed-in person (students and staff), architecture pack F30."""
 
 import datetime as dt
@@ -37,8 +39,14 @@ async def my_notifications(
         "unread": int(unread),
         "items": [
             {
-                "id": n.id, "kind": n.kind, "title": n.title, "body": n.body, "href": n.href,
-                "created_at": n.created_at, "read": n.read_at is not None,
+                "id": n.id,
+                "kind": n.kind,
+                "title": n.title,
+                "body": n.body,
+                "href": n.href,
+                "created_at": n.created_at,
+                "read": n.read_at is not None,
+                "metadata": getattr(n, "notification_metadata", None) or {},
             }
             for n in rows
         ],

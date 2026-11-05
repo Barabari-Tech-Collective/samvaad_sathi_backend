@@ -35,6 +35,18 @@ class BulkATSExperienceMode(str, _Enum):
     EXPERIENCED = "experienced"
 
 
+class BulkATSHandoffStatus(str, _Enum):
+    SCREENED = "screened"
+    IN_PROGRAM_REVIEW = "in_program_review"
+    APPROVED_FOR_PLACEMENT = "approved_for_placement"
+    SHARED_WITH_PLACEMENT = "shared_with_placement"
+    ACCEPTED_IN_PLACEMENT = "accepted_in_placement"
+    REJECTED = "rejected"
+    NEEDS_INFO = "needs_info"
+    REFERRED_TO_HR = "referred_to_hr"
+    ARCHIVED = "archived"
+
+
 class BulkATSBatch(Base):  # type: ignore
     """One recruiter-initiated bulk screening run against a role profile.
 
@@ -283,6 +295,32 @@ class BulkATSCandidate(Base):  # type: ignore
         sqlalchemy.ForeignKey("bulk_ats_candidate.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
+    # Program -> Placement Hand-off lifecycle
+    handoff_status: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=50),
+        nullable=False,
+        server_default=BulkATSHandoffStatus.SCREENED.value,
+        index=True,
+    )
+    program_readiness_score: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.Integer, nullable=True
+    )
+    program_feedback_notes: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.Text, nullable=True
+    )
+    program_reviewed_by: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.ForeignKey("user.id", ondelete="SET NULL"), nullable=True
+    )
+    program_reviewed_at: SQLAlchemyMapped[datetime.datetime | None] = (
+        sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True), nullable=True)
+    )
+    placement_notes: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.Text, nullable=True
+    )
+    placement_assigned_companies: SQLAlchemyMapped[list | None] = (
+        sqlalchemy_mapped_column(JSONB, nullable=True, server_default=sqlalchemy.text("'[]'::jsonb"))
+    )
+
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True),
         nullable=False,
@@ -321,6 +359,14 @@ class BulkATSCandidate(Base):  # type: ignore
             "interview_outcome IS NULL OR interview_outcome IN "
             "('not_interviewed', 'interviewed', 'advanced', 'rejected', 'hired', 'withdrew')",
             name="chk_bulk_ats_candidate_interview_outcome",
+        ),
+        sqlalchemy.CheckConstraint(
+            "handoff_status IN ('screened', 'in_program_review', 'approved_for_placement', 'shared_with_placement', 'accepted_in_placement', 'rejected', 'needs_info', 'referred_to_hr', 'archived')",
+            name="chk_bulk_ats_candidate_handoff_status",
+        ),
+        sqlalchemy.CheckConstraint(
+            "program_readiness_score IS NULL OR (program_readiness_score >= 1 AND program_readiness_score <= 10)",
+            name="chk_bulk_ats_candidate_readiness_score",
         ),
     )
     __mapper_args__ = {"eager_defaults": True}

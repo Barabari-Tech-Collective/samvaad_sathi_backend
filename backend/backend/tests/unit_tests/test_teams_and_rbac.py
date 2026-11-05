@@ -2561,6 +2561,9 @@ async def test_job_profile_questions_endpoint_allows_junior_facilitator():
     mock_profile.status = "draft"
     mock_profile.authoring_mode = "manual"
     mock_profile.content_revision = 1
+    mock_profile.generation_state = None
+    mock_profile.generation_token = None
+    mock_profile.generation_error = None
     mock_repo.get_by_id.return_value = mock_profile
 
     mock_q = MagicMock()
