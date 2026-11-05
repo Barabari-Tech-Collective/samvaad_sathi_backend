@@ -66,7 +66,7 @@ def upgrade() -> None:
     op.create_check_constraint(
         "chk_bulk_ats_candidate_handoff_status",
         "bulk_ats_candidate",
-        "handoff_status IN ('screened', 'in_program_review', 'approved_for_placement', 'referred_to_hr', 'archived')",
+        "handoff_status IN ('screened', 'in_program_review', 'approved_for_placement', 'shared_with_placement', 'accepted_in_placement', 'rejected', 'needs_info', 'referred_to_hr', 'archived')",
     )
     op.create_check_constraint(
         "chk_bulk_ats_candidate_readiness_score",
