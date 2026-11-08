@@ -391,37 +391,11 @@ def _fingerprint(course_id, student_id, body):
     ).hexdigest()
 
 
-@router.post("/courses/{course_id}/{cohort_id}/assign")
-async def assign_to_cohort(
-    course_id: str,
-    cohort_id: int,
-    body: Assign,
-    user=fastapi.Depends(get_current_admin_user),
-    session=fastapi.Depends(get_async_session),
-):
-    """Give every visible member the same drill or mock, or add them to an opening.
+async def assign_group(session, user, course_id, names, body, meta):
+    """Assign one thing to these learners in one course, each checked under the usual rule.
 
-    Each member is checked under the usual rule for that action (coaching needs the
-    learner's coaching consent; an opening needs a placement responsibility), so a cohort
-    never widens anyone's access. Retrying with the same request_key creates nothing twice."""
-    visible = await scope(user, course_id, session)
-    row = await load(session, course_id, cohort_id)
-    if row.archived_at is not None:
-        raise fastapi.HTTPException(409, "Restore this cohort before assigning to it.")
-    members = (
-        await session.execute(
-            sa.select(User.id, User.name)
-            .join(CohortMember, CohortMember.student_id == User.id)
-            .where(CohortMember.cohort_id == row.id, visible)
-            .order_by(User.name, User.id)
-        )
-    ).all()
-    total = (
-        await session.execute(
-            sa.select(sa.func.count(CohortMember.id)).where(CohortMember.cohort_id == row.id)
-        )
-    ).scalar_one()
-    names = {m.id: m.name for m in members}
+    Shared by cohorts and the Learners hub. The caller audits and commits. Retrying with the
+    same request_key creates nothing twice."""
     done, skipped = [], []
 
     if body.kind == "plan":
@@ -500,7 +474,7 @@ async def assign_to_cohort(
                     target_type="coaching_assignment" if body.kind == "drill" else "mock_assignment",
                     target_id=str(item.id),
                     reason=body.reason,
-                    event_metadata={"course_id": course_id, "student_id": sid, "cohort_id": row.id},
+                    event_metadata={"course_id": course_id, "student_id": sid, **meta},
                 )
             )
             done.append({"id": sid, "name": name})
@@ -535,12 +509,47 @@ async def assign_to_cohort(
                 .on_conflict_do_nothing(constraint="uq_opportunity_candidate")
             )
             opening_audit(session, user, opening, "opportunity_candidates_added",
-                          {"student_ids": new, "cohort_id": row.id})
+                          {"student_ids": new, **meta})
         for sid, name in names.items():
             if sid in allowed:
                 done.append({"id": sid, "name": name})
             else:
                 skipped.append({"id": sid, "name": name, "reason": "Outside your placement responsibility for this course."})
+    return done, skipped
+
+
+@router.post("/courses/{course_id}/{cohort_id}/assign")
+async def assign_to_cohort(
+    course_id: str,
+    cohort_id: int,
+    body: Assign,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Give every visible member the same drill or mock, or add them to an opening.
+
+    Each member is checked under the usual rule for that action (coaching needs the
+    learner's coaching consent; an opening needs a placement responsibility), so a cohort
+    never widens anyone's access. Retrying with the same request_key creates nothing twice."""
+    visible = await scope(user, course_id, session)
+    row = await load(session, course_id, cohort_id)
+    if row.archived_at is not None:
+        raise fastapi.HTTPException(409, "Restore this cohort before assigning to it.")
+    members = (
+        await session.execute(
+            sa.select(User.id, User.name)
+            .join(CohortMember, CohortMember.student_id == User.id)
+            .where(CohortMember.cohort_id == row.id, visible)
+            .order_by(User.name, User.id)
+        )
+    ).all()
+    total = (
+        await session.execute(
+            sa.select(sa.func.count(CohortMember.id)).where(CohortMember.cohort_id == row.id)
+        )
+    ).scalar_one()
+    names = {m.id: m.name for m in members}
+    done, skipped = await assign_group(session, user, course_id, names, body, {"cohort_id": row.id})
     audit(session, user, row, f"cohort_assigned_{body.kind}", body.reason,
           {"done": [d["id"] for d in done], "skipped": [s["id"] for s in skipped]})
     await session.commit()

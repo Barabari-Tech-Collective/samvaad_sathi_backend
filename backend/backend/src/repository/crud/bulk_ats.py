@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import datetime
 
-from sqlalchemy import select, func
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -88,8 +88,36 @@ class BulkATSCRUDRepository:
         )
         return result.scalar_one_or_none()
 
+    async def teammate_ids(self, user_id: int) -> set[int]:
+        """This person and everyone who shares an active team with them."""
+        from src.models.db.team import Team
+        from src.models.db.team_member import TeamMember
+
+        teams = (
+            select(TeamMember.team_id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(TeamMember.user_id == user_id, TeamMember.status == "active", Team.status == "active")
+        )
+        rows = await self.session.execute(
+            select(TeamMember.user_id).where(TeamMember.team_id.in_(teams), TeamMember.status == "active")
+        )
+        return {user_id, *rows.scalars().all()}
+
+    async def is_assigned_reviewer(self, batch_id: int, user_id: int) -> bool:
+        found = await self.session.execute(
+            select(BulkATSCandidate.id)
+            .where(BulkATSCandidate.batch_id == batch_id, BulkATSCandidate.assigned_reviewer_id == user_id)
+            .limit(1)
+        )
+        return found.first() is not None
+
     async def list_batches(
-        self, *, created_by: int | None = None, limit: int = 100, offset: int = 0
+        self,
+        *,
+        created_by: int | None = None,
+        visible_to: int | None = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[BulkATSBatch]:
         query = (
             select(BulkATSBatch)
@@ -99,6 +127,16 @@ class BulkATSCRUDRepository:
         )
         if created_by is not None:
             query = query.where(BulkATSBatch.created_by == created_by)
+        if visible_to is not None:
+            assigned = select(BulkATSCandidate.batch_id).where(
+                BulkATSCandidate.assigned_reviewer_id == visible_to
+            )
+            query = query.where(
+                or_(
+                    BulkATSBatch.created_by.in_(await self.teammate_ids(visible_to)),
+                    BulkATSBatch.id.in_(assigned),
+                )
+            )
         result = await self.session.execute(query)
         return list(result.scalars().all())
 

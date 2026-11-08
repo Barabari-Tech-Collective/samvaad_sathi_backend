@@ -10,6 +10,7 @@ from uuid import UUID
 import fastapi
 import sqlalchemy as sa
 from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy.orm import aliased
 
 from src.api.dependencies.admin import get_current_admin_user
 from src.api.dependencies.auth import get_current_user
@@ -28,6 +29,7 @@ from src.services.interview_eligibility import unavailable_reason
 router = fastapi.APIRouter(prefix="/v2/assessment-assignments", tags=["assessment-assignments"])
 UTC = dt.timezone.utc
 DIFFICULTIES = ("easy", "medium", "hard", "expert")
+_newer = aliased(JobProfile)
 
 
 class Window(BaseModel):
@@ -170,6 +172,7 @@ async def options(
         await session.execute(
             sa.select(JobProfile.id, JobProfile.job_name)
             .where(JobProfile.interview_mode == "assessment", JobProfile.status == "published")
+            .where(~sa.exists().where(_newer.parent_profile_id == JobProfile.id, _newer.status == "published"))
             .order_by(JobProfile.job_name).limit(200)
         )
     ).all()

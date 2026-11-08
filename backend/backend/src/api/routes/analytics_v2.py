@@ -2658,7 +2658,7 @@ async def get_forecasting(
     return ForecastResponse(chart_type="line", points=points)
 
 
-_PULSE_PERIOD_DAYS = (7, 30)
+_PULSE_PERIOD_DAYS = (1, 3, 7, 15, 30)
 
 
 def _count_by_ist_day(moments) -> dict[datetime.date, int]:
@@ -2682,16 +2682,16 @@ def _count_by_ist_day(moments) -> dict[datetime.date, int]:
     " Students only; averages use finished assessments only.",
 )
 async def get_dashboard_pulse(
-    days: int = fastapi.Query(default=7, description="Period length in days: 7 or 30."),
+    days: int = fastapi.Query(default=7, description="Period length in days: 1, 3, 7, 15 or 30."),
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
     # Query-string values arrive as text, and a Literal[7, 30] parameter rejects "7" and
     # "30" with a 422, so the overview's period buttons could never load. Accept the
-    # integer and enforce the two supported values here.
+    # integer and enforce the supported values here.
     if days not in _PULSE_PERIOD_DAYS:
         raise fastapi.HTTPException(
-            status_code=422, detail="days must be 7 or 30."
+            status_code=422, detail="days must be 1, 3, 7, 15 or 30."
         )
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     today = datetime.datetime.now(_IST).date()

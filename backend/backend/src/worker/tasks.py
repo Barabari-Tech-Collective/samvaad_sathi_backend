@@ -347,6 +347,53 @@ async def generate_questions_task(
         await session.close()
 
 
+REPORT_WAIT_SECONDS = 60
+REPORT_MAX_TRIES = 8
+
+
+async def generate_summary_report_task(ctx: dict, *, interview_id: int) -> dict:
+    """Build a report staff asked to retry. Waits while any saved answer is still being read."""
+    from src.models.db.user import User
+    from src.repository.crud.interview_question import InterviewQuestionCRUDRepository
+    from src.repository.crud.question import QuestionAttemptCRUDRepository
+    from src.repository.crud.summary_report import SummaryReportCRUDRepository
+    from src.services.analysis import analysis_service
+    from src.services.summary_report_v2 import SummaryReportServiceV2
+    from src.models.db.interview import Interview
+    from src.worker.database import get_session
+
+    session = get_session()
+    try:
+        interview = await session.get(Interview, interview_id)
+        if interview is None:
+            return {"status": "missing"}
+        repo = QuestionAttemptCRUDRepository(async_session=session)
+        attempts = await repo.list_by_interview(interview_id=interview.id)
+        busy = any(
+            a.answer_saved_at is not None and a.transcription_status in ("pending", "processing")
+            for a in attempts
+        )
+        if busy and int(ctx.get("job_try", 1)) < REPORT_MAX_TRIES:
+            raise Retry(defer=REPORT_WAIT_SECONDS)
+        analyzed = await analysis_service.ensure_recorded_attempts_analyzed(
+            question_attempts=attempts, user_id=interview.user_id, db=session, logger=logger,
+        )
+        if analyzed:
+            attempts = await repo.list_by_interview(interview_id=interview.id)
+        questions = await InterviewQuestionCRUDRepository(session).list_by_interview(interview_id=interview.id)
+        owner = await session.get(User, interview.user_id)
+        result = await SummaryReportServiceV2(session).generate_for_interview_lite(
+            interview.id, attempts, interview.track,
+            any(q.resume_used for q in questions) if questions else None,
+            getattr(owner, "name", None),
+        )
+        await SummaryReportCRUDRepository(session).upsert(interview_id=interview.id, report_json=result)
+        await session.commit()
+        return {"status": "done", "interview_id": interview.id}
+    finally:
+        await session.close()
+
+
 async def process_answer_transcription_task(
     ctx: dict,
     *,

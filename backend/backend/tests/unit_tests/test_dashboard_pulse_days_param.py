@@ -52,7 +52,7 @@ def _pulse_path() -> str:
     )
 
 
-@pytest.mark.parametrize("days", [7, 30])
+@pytest.mark.parametrize("days", [1, 3, 7, 15, 30])
 def test_pulse_accepts_supported_periods_from_the_query_string(monkeypatch, days):
     response = _client(monkeypatch).get(_pulse_path(), params={"days": days})
     assert response.status_code == 200, response.text
@@ -65,7 +65,7 @@ def test_pulse_defaults_to_seven_days(monkeypatch):
     assert response.json()["days"] == 7
 
 
-@pytest.mark.parametrize("days", ["1", "14", "0", "abc"])
+@pytest.mark.parametrize("days", ["2", "14", "0", "abc"])
 def test_pulse_rejects_unsupported_periods(monkeypatch, days):
     response = _client(monkeypatch).get(_pulse_path(), params={"days": days})
     assert response.status_code == 422

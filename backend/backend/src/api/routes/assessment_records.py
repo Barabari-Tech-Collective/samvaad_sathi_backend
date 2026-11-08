@@ -35,7 +35,7 @@ from src.services.analytics import (
     _extract_speech_score,
 )
 from src.services.course_access import grants_for, student_predicate
-from src.services import notifications
+from src.services import interview_hub, notifications
 from src.services.accommodations import confirmed_conditions
 from src.services.feature_access import permits
 from src.services.people import student_interview, student_only
@@ -240,7 +240,7 @@ async def integrity(user, interview, session):
             "state": c.state,
             "outcome": c.outcome,
             "appeal_deadline": c.appeal_deadline,
-            "href": f"/dashboard/samvaad/integrity-review?course={c.course_id}&case={c.id}",
+            "href": f"/dashboard/samvaad/interviews/integrity?case={c.id}",
         }
         for c in rows
     ]
@@ -412,7 +412,10 @@ async def human_record(
         "can_report_result": bool(current),
         "enrollment_current": bool(current),
     }
+    failed_invite = (await interview_hub.failed_invites(session, [row.id])).get(row.id)
     return {
+        "invite_delivery_id": failed_invite,
+        "can_schedule": interviews.permitted(user, "create"),
         "appointment": appointment,
         "accommodations": await confirmed_conditions(session, row.student_id),
         "kind": "human",

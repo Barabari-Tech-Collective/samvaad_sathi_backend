@@ -12,6 +12,7 @@ import fastapi
 import sqlalchemy as sa
 
 from src.api.dependencies.admin import (
+    calculate_user_permissions,
     get_current_admin_user,
     get_user_active_memberships,
     is_admin_user,
@@ -19,6 +20,7 @@ from src.api.dependencies.admin import (
 )
 from src.api.dependencies.session import get_async_session
 from src.models.db.user import User
+from src.services.feature_access import permits
 
 
 @dataclass(frozen=True)
@@ -115,8 +117,50 @@ async def require_global_legacy_analytics(current_user: User, session=None) -> N
     )
 
 
+# Which page permission each analytics area belongs to. Having one of them, or being a team
+# lead, is the same rule the staff menu uses, so hiding a page now also closes its data.
+ANALYTICS_AREAS = {
+    "dashboard": ("can_access_dashboard",),
+    "dropoffs": ("can_access_dashboard",),
+    "insights": ("can_access_dashboard",),
+    "difficulty": ("can_access_dashboard", "can_access_interviews"),
+    "questions": ("can_access_dashboard", "can_access_interviews"),
+    "students": ("can_access_students",),
+    "student": ("can_access_students",),
+    "search": ("can_access_students",),
+    "rankings": ("can_access_students",),
+    "colleges": ("can_access_colleges", "can_access_students"),
+    "interviews": ("can_access_interviews",),
+    "interview": ("can_access_interviews",),
+    "roles": ("can_access_interviews", "can_create_roles"),
+}
+ANALYTICS_DEFAULT = ("can_access_dashboard",)
+
+
+async def require_analytics_area(path: str, user: User, session) -> None:
+    """Refuse analytics areas whose page this person does not have."""
+    if is_admin_user(user) or session is None:
+        return
+    policy = getattr(user, "feature_permissions", None)
+    if isinstance(policy, dict) and permits(policy, "analytics", "read"):
+        return  # an administrator granted reports to this person by name
+    memberships = await get_user_active_memberships(user.id, session)
+    if not memberships:
+        return  # get_current_admin_user has already refused anyone who is not staff
+    perms = calculate_user_permissions(user, memberships)
+    parts = path.split("/analytics/", 1)
+    area = parts[1].split("/", 1)[0] if len(parts) == 2 else ""
+    if perms.get("is_team_lead") or any(
+        perms.get(flag) for flag in ANALYTICS_AREAS.get(area, ANALYTICS_DEFAULT)
+    ):
+        return
+    raise fastapi.HTTPException(403, "This report is not part of your role.")
+
+
 async def legacy_analytics_guard(
+    request: fastapi.Request,
     current_user: User = fastapi.Depends(get_current_admin_user),
     session=fastapi.Depends(get_async_session),
 ) -> None:
     await require_global_legacy_analytics(current_user, session)
+    await require_analytics_area(request.url.path, current_user, session)

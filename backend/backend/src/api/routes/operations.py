@@ -139,28 +139,11 @@ async def answers(
     }
 
 
-@router.post("/answers/{attempt_id}/retry")
-async def retry_answer(
-    attempt_id: int,
-    user=fastapi.Depends(get_current_admin_user),
-    session=fastapi.Depends(get_async_session),
-):
-    """Process the same saved recording again. Never edits the answer, its score or the student's
-    attempt count; only one request can reserve a given failed state, so a double click is safe."""
+async def restart_saved_answer(session, attempt, owner_id, user) -> str:
+    """Queue one saved recording again. Commits nothing; the caller does, after every answer."""
     from src.repository.crud.question import QuestionAttemptCRUDRepository
     from src.worker import queue
 
-    administrators_only(user)
-    found = (
-        await session.execute(
-            sa.select(QuestionAttempt, Interview.user_id)
-            .join(Interview, Interview.id == QuestionAttempt.interview_id)
-            .where(QuestionAttempt.id == attempt_id)
-        )
-    ).first()
-    if found is None or found[0].answer_kind != "audio" or not found[0].answer_checksum:
-        raise fastapi.HTTPException(404, "No saved recording to process for that answer.")
-    attempt, owner_id = found
     repo = QuestionAttemptCRUDRepository(async_session=session)
     reserved = await repo.reserve_transcription_retry(
         question_attempt_id=attempt.id, user_id=owner_id, checksum=attempt.answer_checksum,
@@ -180,7 +163,7 @@ async def retry_answer(
         await repo.fail_transcription_retry_reservation(
             question_attempt_id=attempt.id, checksum=attempt.answer_checksum,
             reserved_at=reserved.transcription_updated_at,
-            error="Your answer is saved, but speech feedback could not be restarted. Select Retry speech feedback.",
+            error="Your answer is saved, but speech feedback could not be restarted. Select Retry speech feedback."
         )
         raise fastapi.HTTPException(503, "The processing queue is unavailable. Try again shortly.")
     session.add(
@@ -191,5 +174,28 @@ async def retry_answer(
             event_metadata={"interview_id": attempt.interview_id, "job_id": job_id},
         )
     )
+    return job_id
+
+
+@router.post("/answers/{attempt_id}/retry")
+async def retry_answer(
+    attempt_id: int,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Process the same saved recording again. Never edits the answer, its score or the student's
+    attempt count; only one request can reserve a given failed state, so a double click is safe."""
+    administrators_only(user)
+    found = (
+        await session.execute(
+            sa.select(QuestionAttempt, Interview.user_id)
+            .join(Interview, Interview.id == QuestionAttempt.interview_id)
+            .where(QuestionAttempt.id == attempt_id)
+        )
+    ).first()
+    if found is None or found[0].answer_kind != "audio" or not found[0].answer_checksum:
+        raise fastapi.HTTPException(404, "No saved recording to process for that answer.")
+    attempt, owner_id = found
+    job_id = await restart_saved_answer(session, attempt, owner_id, user)
     await session.commit()
     return {"id": attempt.id, "state": "queued", "job_id": job_id}

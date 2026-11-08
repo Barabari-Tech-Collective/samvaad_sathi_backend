@@ -1,7 +1,8 @@
 from src.models.db import JobProfileQuestion
 from typing import List, Optional
 import sqlalchemy
-from sqlalchemy import select, func
+from sqlalchemy import exists, select, func
+from sqlalchemy.orm import aliased
 from src.models.db.job_profile import JobProfile, JobProfileStatus
 from src.repository.crud.base import BaseCRUDRepository
 from src.services.interview_eligibility import LEVEL_TO_DIFFICULTY
@@ -305,6 +306,14 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             from src.services.template_scope import visible_to_courses as in_courses
 
             query = query.where(in_courses(*visible_to))
+            # A learner sees only the newest published version of an interview.
+            newer = aliased(JobProfile)
+            query = query.where(
+                ~exists().where(
+                    newer.parent_profile_id == JobProfile.id,
+                    newer.status == JobProfileStatus.PUBLISHED,
+                )
+            )
         if status is not None:
             query = query.where(JobProfile.status == status)
         if interview_mode is not None:

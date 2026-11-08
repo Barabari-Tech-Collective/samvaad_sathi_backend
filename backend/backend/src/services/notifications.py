@@ -100,12 +100,46 @@ def send_now(event: str, payload: dict) -> str:
     from src.services.email.human_interview_emails import build
     from src.services.email import sender
 
-    if not payload.get("to"):
+    # .invalid addresses are staging dummy learners and can never receive mail.
+    if not payload.get("to") or str(payload["to"]).lower().endswith(".invalid"):
         return "skipped"
     if not sender.configured():
         return "skipped"
-    subject, html, text = build(event, payload)
+    if event == "nudge":
+        from src.services.email.learner_nudge_emails import build as build_nudge
+
+        subject, html, text = build_nudge(payload)
+    else:
+        subject, html, text = build(event, payload)
     return "sent" if sender.send_email(payload["to"], subject, html, text) else "failed"
+
+
+def _student_app_link() -> str:
+    from src.config.manager import settings
+
+    return (getattr(settings, "STUDENT_APP_URL", "") or getattr(settings, "FRONTEND_URL", "") or "").rstrip("/")
+
+
+async def _finish_simple(item, event, payload, send, now, counts) -> None:
+    """Send one non-interview email with the usual attempt tracking."""
+    try:
+        outcome = await asyncio.to_thread(send, event, payload)
+    except Exception as error:
+        logger.exception("notification_delivery_failed")
+        outcome, item.last_error = "failed", str(error)[:300]
+    item.attempts += 1
+    if outcome == "sent":
+        item.status, item.sent_at, item.last_error = "sent", now, None
+    elif outcome == "skipped":
+        item.status, item.last_error = "skipped", "Email is not configured or the person has no address."
+    elif item.attempts < MAX_ATTEMPTS:
+        item.scheduled_for = now + dt.timedelta(minutes=5 * item.attempts)
+        item.last_error = item.last_error or "Send failed; will retry."
+        counts["retry"] += 1
+        return
+    else:
+        item.status, item.last_error = "failed", item.last_error or "Send failed after several attempts."
+    counts[item.status] = counts.get(item.status, 0) + 1
 
 
 async def dispatch_due(session, *, now=None, limit=50, send=send_now):
@@ -122,6 +156,22 @@ async def dispatch_due(session, *, now=None, limit=50, send=send_now):
     ).scalars().all()
     counts = {"sent": 0, "skipped": 0, "failed": 0, "superseded": 0, "retry": 0}
     for item in due:
+        if item.related_type == "learner_nudge":
+            student = await session.get(User, item.related_id)
+            nudge = await session.execute(
+                sa.select(Notification.body)
+                .where(Notification.recipient_id == item.related_id, Notification.kind == "learner_nudge")
+                .order_by(Notification.created_at.desc())
+                .limit(1)
+            )
+            payload = {
+                "to": getattr(student, "email", None),
+                "student_name": getattr(student, "name", None),
+                "message": nudge.scalar_one_or_none(),
+                "link": _student_app_link(),
+            }
+            await _finish_simple(item, "nudge", payload, send, now, counts)
+            continue
         row = await session.get(HumanInterview, item.related_id)
         if row is None:
             item.status, item.last_error = "superseded", "The interview no longer exists."

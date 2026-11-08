@@ -412,11 +412,13 @@ async def _can_user_access_batch(
             memberships = await get_user_active_memberships(current_user.id, session)
             if memberships:
                 perms = calculate_user_permissions(current_user, memberships)
-                if (
-                    perms.get("can_manage_placement_handoff")
-                    or perms.get("can_access_ats")
-                    or perms.get("can_review_program_handoff")
-                ):
+                if perms.get("can_manage_placement_handoff") or perms.get("can_review_program_handoff"):
+                    return True
+                # Otherwise a run stays inside the team that made it, plus anyone assigned to
+                # review one of its candidates. Using Bulk ATS never opens every team's resumes.
+                if batch.created_by in await repo.teammate_ids(current_user.id):
+                    return True
+                if await repo.is_assigned_reviewer(batch.id, current_user.id):
                     return True
         except Exception as exc:
             logger.warning("Error checking batch permissions: %s", exc)
@@ -702,13 +704,14 @@ async def list_batches(
                 memberships = await get_user_active_memberships(current_user.id, session)
                 if memberships:
                     perms = calculate_user_permissions(current_user, memberships)
-                    if perms.get("can_manage_placement_handoff") or perms.get("can_access_ats"):
+                    if perms.get("can_manage_placement_handoff") or perms.get("can_review_program_handoff"):
                         can_view_all = True
             except Exception:
                 pass
 
     batches = await repo.list_batches(
-        created_by=None if can_view_all else current_user.id,
+        created_by=None,
+        visible_to=None if can_view_all else current_user.id,
         limit=min(limit, 200),
         offset=offset,
     )
