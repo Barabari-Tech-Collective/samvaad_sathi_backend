@@ -28,6 +28,7 @@ from src.models.schemas.job_profile import (
     JobProfileAddQuestionResponse,
     JobProfileUpdateQuestionRequest,
     JobProfileUpdateQuestionResponse,
+    JobProfileRegenerateQuestionRequest,
     JobProfileRegenerateQuestionResponse,
     JobProfileDeleteQuestionResponse,
     JobProfileDeleteResponse,
@@ -950,6 +951,7 @@ async def update_job_profile_question_v2(
 )
 async def regenerate_job_profile_question_v2(
     question_id: int,
+    payload: JobProfileRegenerateQuestionRequest | None = fastapi.Body(default=None),
     current_user=fastapi.Depends(get_current_creator_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileRegenerateQuestionResponse:
@@ -993,7 +995,10 @@ async def regenerate_job_profile_question_v2(
     )
     topics = gen_ctx["topics"]
     ratio = gen_ctx["ratio"]
-    influence = gen_ctx["influence"]
+    # Same level rule and bank as first-time generation, so a redo can't drift from the set.
+    influence = {**gen_ctx["influence"], "level": question.level}
+    if payload and payload.knowledge_reference_context:
+        influence["knowledge_reference_context"] = payload.knowledge_reference_context
 
     # 5. Generate new question using existing LLM service
     questions_list, error, latency_ms, llm_model, structured_items = await generate_interview_questions_with_llm(

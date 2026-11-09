@@ -9,6 +9,7 @@ from pydantic import Field, AliasChoices
 from openai import AsyncOpenAI
 from src.config.manager import settings
 from src.models.schemas.summary_report import SummarySection, SummarySectionGroup, SummaryMetrics
+from src.services.knowledge_parser import reference_questions_for_level
 logger = logging.getLogger(__name__)
 # Lazy client holder; create only when needed and when API key is present
 _client: AsyncOpenAI | None = None
@@ -1449,18 +1450,22 @@ async def extract_jd_skills_with_llm(text: str) -> tuple[list[str], str | None]:
 
 
 DOMAIN_SPECS: dict[str, dict[str, Any]] = {
+    # A general HR round for a candidate applying to any job, not an interview for a job
+    # in the HR function. Category keys match non_tech_blueprint so analytics stay uniform.
     "hr": {
-        "options": "'hr_operations', 'talent_acquisition', or 'behavioral'",
-        "ratio": {"hr_operations": 2, "talent_acquisition": 2, "behavioral": 1},
+        "options": "'self', 'behavioral', 'productivity', or 'company_candidate'",
+        "ratio": {"self": 1, "behavioral": 2, "productivity": 1, "company_candidate": 1},
         "labels": {
-            "hr_operations": "HR Operations & Compliance (hr_operations)",
-            "talent_acquisition": "Talent Acquisition & People Strategy (talent_acquisition)",
-            "behavioral": "Behavioral & Employee Relations (behavioral)",
+            "self": "Self Introduction (self)",
+            "behavioral": "Behavioral (behavioral)",
+            "productivity": "Productivity (productivity)",
+            "company_candidate": "Company and Candidate (company_candidate)",
         },
         "definitions": {
-            "hr_operations": "Core HR operations, employee onboarding, company policies, compliance, payroll, and workplace frameworks",
-            "talent_acquisition": "Recruitment lifecycle, talent sourcing, candidate screening/interviewing, job descriptions, and hiring strategy",
-            "behavioral": "Workplace scenarios, conflict resolution, stakeholder coordination, and culture fit from the provided list",
+            "self": "Background, strengths, weaknesses, goals, and personal motivation",
+            "behavioral": "Teamwork, conflict, feedback, mistakes, and ownership from the provided list",
+            "productivity": "Prioritising work, managing time, and staying motivated",
+            "company_candidate": "Why this role or company, expectations, and professionalism",
         },
     },
     "sales": {
@@ -1550,6 +1555,65 @@ DOMAIN_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
+# Level rules for roles without a software or engineering interview. The software rules
+# (on-call scenarios, systems at scale, architecture) do not apply to these candidates.
+NON_TECH_LEVEL_RULES: dict[int, str] = {
+    1: (
+        "7. LEVEL 1 — FUNDAMENTALS: Ask about the basic ideas and everyday vocabulary of this "
+        "kind of work. They must be answerable without any work experience."
+    ),
+    2: (
+        "7. LEVEL 2 — OWN EXPERIENCE: Ask what the candidate has personally done, in jobs, "
+        "internships, college, or volunteering, and why they made the choices they did."
+    ),
+    3: (
+        "7. LEVEL 3 — WORK SCENARIOS: Give a realistic situation from this kind of work and ask "
+        "how the candidate would handle it. Stay within this kind of work and never mention "
+        "software systems or technical operations."
+    ),
+    4: (
+        "7. LEVEL 4 — PRESSURE AND JUDGEMENT: Ask about difficult decisions with competing "
+        "priorities and no single right answer, such as an unhappy client, a missed target, or "
+        "an ethical dilemma. Never mention software systems or technical architecture."
+    ),
+}
+
+HR_ROUND_LEVEL_RULES: dict[int, str] = {
+    1: (
+        "7. LEVEL 1 — ABOUT YOU: Ask simple, common HR questions about the candidate's "
+        "background, strengths, goals, and reasons for applying."
+    ),
+    2: (
+        "7. LEVEL 2 — YOUR EXPERIENCE: Ask for a specific time the candidate showed a quality "
+        "such as teamwork or responsibility. College, internships, volunteering, and personal "
+        "life all count as valid examples."
+    ),
+    3: (
+        "7. LEVEL 3 — WORKPLACE SITUATIONS: Describe an everyday workplace situation, such as a "
+        "disagreement with a colleague or a tight deadline, and ask what the candidate would do."
+    ),
+    4: (
+        "7. LEVEL 4 — PRESSURE AND JUDGEMENT: Ask harder questions about failure, ethical "
+        "choices, criticism, or competing priorities that have no single right answer. They "
+        "must still need no technical or specialist knowledge."
+    ),
+}
+
+_FRESHER_RULE = (
+    "FRESHER RULE (takes priority over the level rule): This candidate may never have had a "
+    "job. Every question must be answerable from education, internships, personal projects, or "
+    "everyday life. Never assume paid work experience, past employers, or having managed anyone."
+)
+
+
+def _is_fresher(experience_level: Any) -> bool:
+    """Whether the profile's experience level means little or no work history."""
+    text = str(experience_level or "").strip().lower().replace("\u2013", "-").replace(" ", "")
+    return text in {"0", "0-1", "0-1years", "fresher"} or any(
+        marker in text for marker in ("fresher", "entry", "graduate")
+    )
+
+
 async def generate_interview_questions_with_llm(
     track: str,
     context_text: str | None = None,
@@ -1594,12 +1658,12 @@ async def generate_interview_questions_with_llm(
     is_non_tech = is_non_tech_flag or is_hr or is_sales or is_marketing or (job_category in ["operations", "finance", "business", "legal"])
 
     domain_key = "tech"
-    if is_data:
+    if is_hr:
+        domain_key = "hr"
+    elif is_data:
         domain_key = "data"
     elif is_design:
         domain_key = "design"
-    elif is_hr:
-        domain_key = "hr"
     elif is_sales:
         domain_key = "sales"
     elif is_marketing:
@@ -1640,11 +1704,24 @@ async def generate_interview_questions_with_llm(
     ]
     cat_mix = "\n".join(cat_mix_lines) + "\n"
 
-    if is_non_tech:
+    level_int = int((influence or {}).get("level", 0))
+    bank_context = reference_questions_for_level(
+        (influence or {}).get("knowledge_reference_context"), level_int
+    )
+
+    if is_hr:
+        role_type_str = "HR"
+        role_mandate_rule = (
+            f"6. STRICT NON-TECHNICAL MANDATE: This is a general HR round for someone applying for {track}. "
+            "Ask about the candidate as a person and a future colleague. Do NOT ask about programming, "
+            "software, system design, technical tools, or specialist HR work such as payroll, compliance, "
+            "or recruitment strategy, even if the job title, description, or skills mention them."
+        )
+    elif is_non_tech:
         role_type_str = "professional"
         role_mandate_rule = (
             f"6. STRICT NON-TECHNICAL MANDATE: This is a non-technical {track} role. "
-            f"All questions MUST be strictly relevant to {track} and the provided job description. "
+            f"All questions MUST be strictly relevant to {track}. "
             "Do NOT ask any programming, software coding, JavaScript, or developer syntax questions."
         )
     else:
@@ -1657,7 +1734,6 @@ async def generate_interview_questions_with_llm(
 
     # Level-specific archetype constraint — aligns the question character with
     # what each level label promises on the admin review screen.
-    _level_int = int((influence or {}).get("level", 0))
     _level_archetypes = {
         1: (
             "7. LEVEL 1 — GENERAL FUNDAMENTALS: Questions must test core conceptual "
@@ -1688,34 +1764,57 @@ async def generate_interview_questions_with_llm(
             "under pressure, not recall of facts."
         ),
     }
-    level_archetype_rule = _level_archetypes.get(_level_int, "")
+    if is_hr:
+        level_archetype_rule = HR_ROUND_LEVEL_RULES.get(level_int, "")
+    elif is_non_tech:
+        level_archetype_rule = NON_TECH_LEVEL_RULES.get(level_int, "")
+    else:
+        level_archetype_rule = _level_archetypes.get(level_int, "")
+
+    extra_rules: list[str] = []
+    if _is_fresher((influence or {}).get("experience_level")):
+        extra_rules.append(_FRESHER_RULE)
+    if is_non_tech or bank_context:
+        extra_rules.append(
+            "JOB DESCRIPTION IS BACKGROUND ONLY: Use 'context' only to understand the role and company. "
+            "Do not build questions from the duties, tools, or technologies it lists."
+        )
+
+    depth_rule = (
+        "3. Ask clear, direct questions a candidate can understand the first time they hear them.\n"
+        if is_non_tech
+        else "3. Ask deep, targeted questions that require thoughtful answers.\n"
+    )
+    mix_header = (
+        "CATEGORY LABELS:\nLabel each question with its closest category. The reference bank "
+        "below decides what is asked, so treat these counts as a target only:\n"
+        if bank_context
+        else "STRICT CATEGORY DISTRIBUTION MANDATE:\nYou MUST generate the questions following this EXACT category mix:\n"
+    )
 
     sys_prompt = (
         f"You are an expert {role_type_str} interviewer generating a set of exactly {{count}} interview questions for a candidate in the {{track}} role.\n\n"
-        "STRICT CATEGORY DISTRIBUTION MANDATE:\n"
-        "You MUST generate the questions following this EXACT category mix:\n"
+        f"{mix_header}"
         f"{cat_mix}\n"
         "RULES FOR QUESTION GENERATION:\n"
         f"1. The 'category' field for each item MUST strictly be set to one of: {cat_options}.\n"
         "2. Ensure questions are suitable for spoken verbal answers (no coding or writing code).\n"
-        "3. Ask deep, targeted questions that require thoughtful answers.\n"
+        f"{depth_rule}"
         "4. Return ONLY valid JSON with key 'items' containing array of objects with fields: text, topic, difficulty, category, keywords, concepts_covered, expected_answer, example_output.\n"
         "5. The 'keywords' array MUST contain at most 2 keywords.\n"
         f"{role_mandate_rule}"
         + (f"\n{level_archetype_rule}" if level_archetype_rule else "")
+        + "".join(f"\n{rule}" for rule in extra_rules)
     ).format(count=total, track=track)
-    knowledge_reference_context = (influence or {}).get("knowledge_reference_context")
-    if knowledge_reference_context:
+    if bank_context:
         sys_prompt += (
-            f"\n\nReference Knowledge Base:\n{knowledge_reference_context}\n\n"
+            f"\n\nReference Question Bank (main source):\n{bank_context}\n\n"
             "Instructions:\n"
-            "Use the above uploaded knowledge base only as topic guidance.\n"
-            "Generate interview questions related to these reference questions.\n"
-            "Do not copy reference questions exactly.\n"
-            "Generate new related questions using the same topics/concepts.\n"
-            "Keep the questions aligned with the job profile, skills, experience level, and requested difficulty level.\n"
-            "Return the same structured output as before:\n"
-            "question, keywords, concepts_covered, level, difficulty, type."
+            "This bank is the main source for this interview.\n"
+            "Base every question on one question from the bank, keeping its topic and difficulty.\n"
+            "Reword it naturally, but do not copy it word for word.\n"
+            "Do not add topics, tools, or specialist knowledge that the bank does not contain.\n"
+            "If the bank conflicts with the job title, description, skills, or the subject of the level rule, follow the bank."
         )
     # Prepare a sampled syllabus so we don't send the entire topic bank to the LLM
     topics = syllabus_topics or {}
@@ -1731,7 +1830,8 @@ async def generate_interview_questions_with_llm(
     if is_non_tech:
         skills_from_inf = (influence.get("skills") if influence else []) or []
         allied_source = list(topics.get("tech_allied") or skills_from_inf or [])
-        allied_pool = _pick(list(dict.fromkeys(allied_source)), 4)
+        # A general HR round is about the person, so skills never become question topics.
+        allied_pool = [] if is_hr else _pick(list(dict.fromkeys(allied_source)), 4)
         beh_pool_full = list(topics.get("behavioral", []))
         beh_pool = _pick(beh_pool_full, 3)
         sampled_syllabus = {
@@ -1754,25 +1854,46 @@ async def generate_interview_questions_with_llm(
             "behavioral": beh_pool,
         }
 
+    if bank_context:
+        # The bank replaces the syllabus; sending both would compete with it.
+        sampled_syllabus = {}
+        beh_pool = []
+
     exclude_list = (influence or {}).get("exclude_questions", [])
     constraints = [
         "No preambles, no numbering in the JSON itself",
         "Questions should be single sentences when possible",
         "Avoid duplicate or trivial questions",
         f"Each item must include a 'category' of {cat_options}",
-        "Behavioral questions must come from the provided behavioral topics and probe for specific actions/decisions",
-        "Vary topics and ensure depth appropriate to difficulty; do not ask purely opinion-based questions",
-        "Use a mix of the provided archetypes to ensure variety (e.g., concept, trade-offs, debug, design)",
-        "Follow the depth guidelines for the given difficulty",
-        "Ask deep questions but make sure they have a clear, specific answer"
     ]
+    if bank_context:
+        constraints.append("Every question must trace back to a question in the reference bank")
+    else:
+        constraints.append("Behavioral questions must come from the provided behavioral topics and probe for specific actions/decisions")
     if is_non_tech:
-        constraints.append("Questions should assess real-world business scenarios, execution, and domain expertise from the job description")
-    elif not (is_data or is_design):
-        constraints.append("Tech-allied questions should be related to the candidate's experience/skills when available")
+        constraints.append("Vary topics and do not ask purely opinion-based questions")
+        if is_hr and not bank_context:
+            constraints.append("Anyone applying for any job must be able to answer without technical or HR-specialist knowledge")
+        elif not is_hr:
+            constraints.append("Questions should assess real-world business scenarios, execution, and domain expertise for the role")
+    else:
+        constraints.extend([
+            "Vary topics and ensure depth appropriate to difficulty; do not ask purely opinion-based questions",
+            "Use a mix of the provided archetypes to ensure variety (e.g., concept, trade-offs, debug, design)",
+            "Follow the depth guidelines for the given difficulty",
+            "Ask deep questions but make sure they have a clear, specific answer",
+        ])
+        if not (is_data or is_design) and not bank_context:
+            constraints.append("Tech-allied questions should be related to the candidate's experience/skills when available")
 
     if exclude_list:
         constraints.append(f"Do NOT generate any questions similar or identical to these existing questions: {exclude_list}")
+
+    # The system prompt already holds this level's bank. Without this the full, unfiltered
+    # bank (and, for HR, the skills) would reach the model again through the influence dict.
+    prompt_influence = {k: v for k, v in (influence or {}).items() if k != "knowledge_reference_context"}
+    if is_hr or bank_context:
+        prompt_influence.pop("skills", None)
 
     user_prompt = {
         "track": track,
@@ -1786,11 +1907,12 @@ async def generate_interview_questions_with_llm(
         },
         # Only pass a random subset of topics so the model focuses and varies questions over runs
         "syllabus": sampled_syllabus,
-        "archetypes": (syllabus_topics or {}).get("archetypes", []),
-        "depth_guidelines": (syllabus_topics or {}).get("depth_guidelines", []),
+        "archetypes": [] if is_non_tech else (syllabus_topics or {}).get("archetypes", []),
+        # The shared depth text talks about syntax and architecture; level rules cover non-tech depth.
+        "depth_guidelines": [] if is_non_tech else (syllabus_topics or {}).get("depth_guidelines", []),
         # Also trim behavioral list passed separately to reinforce selection
         "behavioral_topics": beh_pool,
-        "influence": influence or {},
+        "influence": prompt_influence,
         "constraints": constraints,
     }
 

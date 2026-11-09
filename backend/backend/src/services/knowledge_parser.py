@@ -1,4 +1,7 @@
+import json
 import re
+from typing import Any
+
 import pydantic
 
 class KnowledgeQuestionLevel(pydantic.BaseModel):
@@ -138,3 +141,36 @@ def parse_knowledge_base_text(text: str) -> tuple[KnowledgeBaseExtraction | None
     latency_ms = int((time.perf_counter() - start_time) * 1000)
     
     return result, None, latency_ms, "heuristic-regex-parser"
+
+
+def reference_questions_for_level(context: str | None, level: int) -> str:
+    """Return only the uploaded bank's questions for one level, grouped by topic.
+
+    The admin form sends the bank as JSON topics. Anything else, or a bank with nothing
+    at this level, is returned unchanged so an unusual upload is still used.
+    """
+    if not context or not level:
+        return context or ""
+    try:
+        parsed: Any = json.loads(context)
+    except (TypeError, ValueError):
+        return context
+    topics = parsed.get("topics") if isinstance(parsed, dict) else parsed
+    if not isinstance(topics, list):
+        return context
+
+    sections: list[str] = []
+    for topic in topics:
+        if not isinstance(topic, dict):
+            continue
+        questions = [
+            str(question).strip()
+            for entry in topic.get("levels") or []
+            if isinstance(entry, dict) and entry.get("level") == level
+            for question in entry.get("questions") or []
+            if str(question).strip()
+        ]
+        if questions:
+            name = str(topic.get("topicName") or topic.get("topic_name") or "General").strip()
+            sections.append("\n".join([f"Topic: {name}", *(f"- {q}" for q in questions)]))
+    return "\n\n".join(sections) or context
