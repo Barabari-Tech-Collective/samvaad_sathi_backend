@@ -258,6 +258,10 @@ class JobProfileGenerateQuestionsRequest(BaseSchemaModel):
     levels: List[JobProfileQuestionLevelRequest] = pydantic.Field(max_length=4)
     knowledge_reference_context: Optional[str] = None
 
+
+class JobProfileRegenerateQuestionRequest(BaseSchemaModel):
+    knowledge_reference_context: Optional[str] = None
+
 class JobProfileGeneratedQuestionItem(BaseSchemaModel):
     question_id: str
     question: str
