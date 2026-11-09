@@ -479,7 +479,7 @@ class SyllabusService:
                 "depth_guidelines": topic_bank.depth_guidelines,
             }
             if is_hr:
-                ratio = {"hr_operations": 2, "talent_acquisition": 2, "behavioral": 1}
+                ratio = {"self": 1, "behavioral": 2, "productivity": 1, "company_candidate": 1}
             elif is_sales:
                 ratio = {"sales_strategy": 2, "client_management": 2, "behavioral": 1}
             elif is_marketing:

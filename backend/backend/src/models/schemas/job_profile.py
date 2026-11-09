@@ -406,6 +406,10 @@ class JobProfileGenerateQuestionsRequest(BaseSchemaModel):
     knowledge_reference_context: Optional[str] = None
 
 
+class JobProfileRegenerateQuestionRequest(BaseSchemaModel):
+    knowledge_reference_context: Optional[str] = None
+
+
 class JobProfileGeneratedQuestionItem(BaseSchemaModel):
     question_id: str
     question: str

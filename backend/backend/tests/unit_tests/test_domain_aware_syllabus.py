@@ -22,13 +22,8 @@ def test_resolve_generation_context_for_hr_role():
     assert "Talent Acquisition" in context["topics"]["tech_allied"]
     assert "Payroll Compliance" in context["topics"]["tech_allied"]
 
-    # Category ratio must be HR specific
-    assert "hr_operations" in context["ratio"]
-    assert "talent_acquisition" in context["ratio"]
-    assert "behavioral" in context["ratio"]
-    assert context["ratio"]["hr_operations"] == 2
-    assert context["ratio"]["talent_acquisition"] == 2
-    assert context["ratio"]["behavioral"] == 1
+    # HR is a general round, so the mix is about the person, not the HR function
+    assert context["ratio"] == {"self": 1, "behavioral": 2, "productivity": 1, "company_candidate": 1}
 
     # Influence flags
     assert context["influence"]["is_non_tech"] is True
@@ -46,8 +41,7 @@ def test_resolve_generation_context_for_recruiter_by_title_only():
 
     assert context["is_non_tech"] is True
     assert context["topics"]["tech"] == []
-    assert "hr_operations" in context["ratio"]
-    assert "talent_acquisition" in context["ratio"]
+    assert "company_candidate" in context["ratio"]
 
 
 def test_resolve_generation_context_for_sales():
@@ -141,11 +135,12 @@ async def test_llm_prompt_allocates_exact_question_count_in_category_mix():
             call_kwargs = mock_out.call_args.kwargs
             sys_prompt = call_kwargs["system_prompt"]
 
-            # Must allocate exactly 10 questions (4 + 4 + 2 = 10), NEVER hardcoded 2+2+1=5
+            # Must allocate exactly 10 questions (2 + 4 + 2 + 2 = 10), NEVER hardcoded totals
             assert "generating a set of exactly 10 interview questions" in sys_prompt
-            assert "HR Operations & Compliance (hr_operations): 4 questions" in sys_prompt
-            assert "Talent Acquisition & People Strategy (talent_acquisition): 4 questions" in sys_prompt
-            assert "Behavioral & Employee Relations (behavioral): 2 questions" in sys_prompt
+            assert "Self Introduction (self): 2 questions" in sys_prompt
+            assert "Behavioral (behavioral): 4 questions" in sys_prompt
+            assert "Productivity (productivity): 2 questions" in sys_prompt
+            assert "Company and Candidate (company_candidate): 2 questions" in sys_prompt
             assert "STRICT NON-TECHNICAL MANDATE" in sys_prompt
     finally:
         settings.OPENAI_API_KEY = orig_key
