@@ -2523,10 +2523,10 @@ async def test_generate_interview_questions_llm_prompt_with_knowledge_base():
             call_kwargs = mock_structured_output.call_args.kwargs
             sys_prompt = call_kwargs["system_prompt"]
             
-            assert "Reference Knowledge Base:" in sys_prompt
+            assert "Reference Question Bank (main source):" in sys_prompt
             assert "Frontend - Level 1: What is HTML5?" in sys_prompt
-            assert "Do not copy reference questions exactly." in sys_prompt
-            assert "Generate new related questions using the same topics/concepts." in sys_prompt
+            assert "do not copy it word for word" in sys_prompt
+            assert "Base every question on one question from the bank" in sys_prompt
     finally:
         settings.OPENAI_API_KEY = orig_key
 
