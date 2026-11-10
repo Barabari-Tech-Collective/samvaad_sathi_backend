@@ -94,7 +94,7 @@ async def load_items(session, context, ids: set[int]) -> list[dict]:
         title = view.get("plan", {}).get("title") if isinstance(view.get("plan"), dict) else view.get("title")
         out.append(
             base(f"p{row.id}", "plan", row, title or "Learning Plan", f"Step {min(done + 1, total)} of {total}", status,
-                 names.get(row.assigned_by), row.source != "staff") | {"plan_id": row.plan_id, "done": done, "total": total, "steps": view["steps"]}
+                 names.get(row.assigned_by), row.source == "self") | {"plan_id": row.plan_id, "done": done, "total": total, "steps": view["steps"]}
         )
     add_score_change(context, out)
     return out

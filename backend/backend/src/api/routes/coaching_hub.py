@@ -252,7 +252,7 @@ async def plan_detail(plan_id: int, user=fastapi.Depends(get_current_admin_user)
             if step["status"] == "done":
                 done += 1
                 finished[step["id"]] = finished.get(step["id"], 0) + 1
-        who.append({"assignment_id": row.id, "student_id": row.student_id, "course_id": row.course_id, "name": by_id[row.student_id].name, "college": by_id[row.student_id].college_label, "status": row.status, "version": row.version, "done": done, "total": len(view["steps"]), "self_started": row.source != "staff", "due_date": row.due_date})
+        who.append({"assignment_id": row.id, "student_id": row.student_id, "course_id": row.course_id, "name": by_id[row.student_id].name, "college": by_id[row.student_id].college_label, "status": row.status, "version": row.version, "done": done, "total": len(view["steps"]), "self_started": row.source == "self", "due_date": row.due_date})
     return detail | {"finished_by_step": finished, "who": who, "can": can_of(context, user)}
 
 
