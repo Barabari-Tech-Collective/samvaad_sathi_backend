@@ -77,6 +77,19 @@ class Round(BaseModel):
     job_profile_id: int | None = Field(None, ge=1)
 
 
+async def _course_names(session, ids):
+    from src.models.db.student_placement import StudentPlacement
+
+    if not ids:
+        return {}
+    rows = await session.execute(
+        sa.select(StudentPlacement.course_id, sa.func.max(StudentPlacement.course_name))
+        .where(StudentPlacement.course_id.in_(ids))
+        .group_by(StudentPlacement.course_id)
+    )
+    return {k: v for k, v in rows.all() if v}
+
+
 def _audit(session, user, opportunity, action, extra=None):
     session.add(
         PracticeDashboardAuditEvent(
@@ -170,6 +183,58 @@ async def list_opportunities(
         "items": [_summary(r, candidates=int(c or 0), rounds=int(n or 0)) for r, c, n in rows],
         "can_create": shortlists.permission(user, "create"),
     }
+
+
+@router.get("/board")
+async def board(
+    response: fastapi.Response,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Every opening this person may read, with who is at which stage and what to do next."""
+    if not shortlists.permission(user, "read"):
+        # Not an error here: Program staff use the other two tabs of this page.
+        return {"items": [], "can": {"create": False, "update": False, "publish": False}, "allowed": False}
+    response.headers["Cache-Control"] = "no-store"
+    courses = await shortlists.placement_course_ids(user, session)
+    can = {"create": shortlists.permission(user, "create"), "update": shortlists.permission(user, "update"), "publish": shortlists.permission(user, "publish")}
+    if courses is not None and not courses:
+        return {"items": [], "can": can}
+    query = sa.select(Opportunity).order_by(Opportunity.created_at.desc(), Opportunity.id.desc()).limit(300)
+    if courses is not None:
+        query = query.where(Opportunity.course_id.in_(sorted(courses)))
+    from src.services import opportunity_selection as selection
+    from src.models.db.opportunity_handoff import OpportunityHandoff
+
+    openings = list((await session.execute(query)).scalars())
+    rounds = dict(
+        (await session.execute(
+            sa.select(OpportunityRound.opportunity_id, sa.func.count()).group_by(OpportunityRound.opportunity_id)
+        )).all()
+    )
+    sent = set(
+        (await session.execute(sa.select(OpportunityHandoff.opportunity_id).where(OpportunityHandoff.status == "shared"))).scalars()
+    )
+    items = []
+    for opening in openings:
+        _, predicate = await _load(session, user, opening.id, "read")
+        latest = await selection.latest(session, opening.id)
+        view = await selection.detail(session, user, opening, latest, predicate)
+        need = todo = inc = exc = 0
+        for item in view["items"]:
+            decided = item.get("decision")
+            if decided:
+                state = decided["decision"] if isinstance(decided, dict) else decided
+                inc += state == "include"
+                exc += state == "exclude"
+            elif item["evidence"]["state"] != "ready":
+                need += 1
+            else:
+                todo += 1
+        items.append(_summary(opening, people=len(view["items"]), rounds=int(rounds.get(opening.id, 0)), need=need, todo=todo, included=inc, excluded=exc,
+                              selection=view["status"] if latest else "draft", sent=opening.id in sent))
+    names = await _course_names(session, {o.course_id for o in openings})
+    return {"items": [i | {"course_name": names.get(i["course_id"], i["course_id"])} for i in items], "can": can}
 
 
 @router.post("/courses/{course_id}", status_code=201)
@@ -266,6 +331,17 @@ async def opportunity_detail(
             )
         ).all()
     }
+    waiting: dict[int, list[str]] = {}
+    round_names = {r.id: r.name for r, _ in rounds}
+    for student_id, round_id in (
+        await session.execute(
+            sa.select(AssessmentAssignment.student_id, AssessmentAssignment.opportunity_round_id).where(
+                AssessmentAssignment.opportunity_round_id.in_(list(round_names) or [-1]),
+                AssessmentAssignment.status.not_in(["cancelled", "completed"]),
+            )
+        )
+    ).all():
+        waiting.setdefault(student_id, []).append(round_names[round_id])
     linked_shortlists = (
         await session.execute(
             sa.select(PracticeShortlist).where(PracticeShortlist.opportunity_id == row.id)
@@ -287,6 +363,7 @@ async def opportunity_detail(
                 "college": p.university,
                 "added_at": p.added_at.isoformat(),
                 "shares_mock_data": bool(p.shares),
+                "waiting_on": waiting.get(p.id, []),
                 **evidence[p.id],
             }
             for p in people
@@ -300,6 +377,7 @@ async def opportunity_detail(
         shortlists=[shortlists.metadata(s) for s in linked_shortlists],
         screening=[{"id": b.id, "name": b.name} for b in batches],
         can_update=shortlists.permission(user, "update"),
+        can_manage=shortlists.permission(user, "publish"),
     )
 
 
@@ -342,8 +420,12 @@ async def eligible_students(
     if q.strip():
         pattern = f"%{q.strip()}%"
         stmt = stmt.where(sa.or_(User.name.ilike(pattern), User.email.ilike(pattern)))
-    rows = (await session.execute(stmt.order_by(User.name).limit(25))).all()
-    return {"items": [{"student_id": r.id, "name": r.name, "college": r.university} for r in rows]}
+    rows = (await session.execute(stmt.order_by(User.name).limit(200 if not q.strip() else 25))).all()
+    from src.services import learner_hub as hub
+
+    context = await hub.load_context(user, session, 30, row.course_id)
+    status = {p.id: p.status for p in context.learners}
+    return {"items": [{"student_id": r.id, "name": r.name, "college": r.university, "status": status.get(r.id)} for r in rows]}
 
 
 @router.post("/{opportunity_id}/candidates")
@@ -452,10 +534,10 @@ async def link_screening(
     session=fastapi.Depends(get_async_session),
 ):
     """Attach a resume-screening run. Needs both: changing this opportunity, and owning
-    the run (the screening rule: its creator or an admin)."""
+    the run: its creator, an admin, or a lead who decides this opening."""
     row, _ = await _load(session, user, opportunity_id, "update", lock=True)
     batch = await session.get(BulkATSBatch, batch_id)
-    if batch is None or (not is_admin_user(user) and batch.created_by != user.id):
+    if batch is None or not (is_admin_user(user) or batch.created_by == user.id or shortlists.permission(user, "publish")):
         raise fastapi.HTTPException(404, "Screening run not found.")
     if batch.opportunity_id not in (None, row.id):
         # Moving a run silently would take it away from another opening's reviewers.
@@ -481,7 +563,7 @@ async def unlink_screening(
     if (
         batch is None
         or batch.opportunity_id != row.id
-        or (not is_admin_user(user) and batch.created_by != user.id)
+        or not (is_admin_user(user) or batch.created_by == user.id or shortlists.permission(user, "publish"))
     ):
         raise fastapi.HTTPException(404, "Screening run not found on this opening.")
     batch.opportunity_id = None
@@ -497,6 +579,8 @@ class AssignRound(BaseModel):
     opens_at: datetime.datetime
     closes_at: datetime.datetime | None = None
     instructions: str | None = Field(default=None, max_length=2000)
+    # Only these people, when given; otherwise everyone in the opening.
+    student_ids: list[int] | None = Field(default=None, min_length=1, max_length=500)
 
     @field_validator("opens_at", "closes_at")
     @classmethod
@@ -542,7 +626,11 @@ async def assign_round(
         await session.execute(
             sa.select(User.id)
             .join(OpportunityCandidate, OpportunityCandidate.student_id == User.id)
-            .where(OpportunityCandidate.opportunity_id == row.id, predicate)
+            .where(
+                OpportunityCandidate.opportunity_id == row.id,
+                predicate,
+                *([User.id.in_(body.student_ids)] if body.student_ids else []),
+            )
         )
     ).scalars().all()
     if not students:

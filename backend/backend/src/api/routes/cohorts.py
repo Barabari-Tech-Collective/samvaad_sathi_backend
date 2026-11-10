@@ -370,7 +370,7 @@ class Assign(BaseModel):
 
     request_key: UUID
     kind: Literal["drill", "mock", "opening", "plan"]
-    module: Literal["warm_up", "think_fast"] | None = None
+    module: Literal["warm_up", "think_fast", "pronunciation", "structure", "pace"] | None = None
     job_profile_id: int | None = Field(None, ge=1)
     opportunity_id: int | None = Field(None, ge=1)
     plan_id: int | None = Field(None, ge=1)
@@ -411,7 +411,7 @@ async def assign_group(session, user, course_id, names, body, meta):
         )
         for sid, name in names.items():
             if sid not in allowed:
-                skipped.append({"id": sid, "name": name, "reason": "Not sharing practice for coaching in this course."})
+                skipped.append({"id": sid, "name": name, "reason": "Outside your coaching responsibility in this course."})
                 continue
             await learning_plans.create_assignment(
                 session, user, course_id, sid,
@@ -445,7 +445,7 @@ async def assign_group(session, user, course_id, names, body, meta):
         Model = CoachingAssignment if body.kind == "drill" else MockInterviewAssignment
         for sid, name in names.items():
             if sid not in allowed:
-                skipped.append({"id": sid, "name": name, "reason": "Not sharing practice for coaching in this course."})
+                skipped.append({"id": sid, "name": name, "reason": "Outside your coaching responsibility in this course."})
                 continue
             key = str(uuid5(body.request_key, str(sid)))
             if (

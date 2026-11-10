@@ -67,12 +67,8 @@ from src.services.s3_service import (
     delete_bulk_ats_resumes_from_s3,
     generate_bulk_ats_resume_presigned_url,
 )
-from src.services.email.bulk_ats_emails import (
-    build_student_feedback_email,
-    build_company_pitch_email,
-)
+from src.services.email.bulk_ats_emails import build_student_feedback_email
 from src.services.email.sender import send_email
-from src.services.ai_resume.bulk.deepseek_feedback import generate_company_pitch_summary
 from src.worker.queue import enqueue_job
 from src.utilities.exceptions.database import EntityDoesNotExist
 
@@ -126,31 +122,9 @@ class PlacementHandoffBody(pydantic.BaseModel):
     ] | None = None
 
 
-class ShareToPlacementBody(pydantic.BaseModel):
-    candidate_ids: list[int] = pydantic.Field(min_length=1, max_length=500)
-    readiness_score: int = pydantic.Field(default=8, ge=1, le=10)
-    notes: str | None = pydantic.Field(default=None, max_length=5000)
-    target_queue: str | None = pydantic.Field(default=None, max_length=200)
-
-
-class AcceptPlacementCandidatesBody(pydantic.BaseModel):
-    candidate_ids: list[int] = pydantic.Field(min_length=1, max_length=500)
-    action: Literal["accept", "reject", "needs_info"] = "accept"
-    placement_notes: str | None = pydantic.Field(default=None, max_length=5000)
-
-
 class SendStudentFeedbackEmailBody(pydantic.BaseModel):
     candidate_ids: list[int] | None = pydantic.Field(default=None, max_length=100)
     custom_notes: str | None = pydantic.Field(default=None, max_length=2000)
-
-
-class PitchCompanyEmailBody(pydantic.BaseModel):
-    candidate_ids: list[int] = pydantic.Field(min_length=1, max_length=50)
-    company_name: str = pydantic.Field(min_length=1, max_length=200)
-    hr_name: str = pydantic.Field(min_length=1, max_length=200)
-    hr_email: pydantic.EmailStr
-    custom_notes: str | None = pydantic.Field(default=None, max_length=3000)
-    include_resume_links: bool = True
 
 
 def _drive_oauth_redirect(*, status: str, detail: str | None = None):
@@ -720,12 +694,14 @@ async def list_batches(
     for batch in batches:
         if batch.status == "processing":
             await repo.refresh_batch_status(batch.id)
+    counts = await repo.decision_counts([b.id for b in batches])
     return [
         {
             "id": b.id,
             "name": b.name,
             "roleName": b.role_name,
             "status": b.status,
+            "counts": counts.get(b.id, {}),
             "opportunityId": b.opportunity_id,
             "createdAt": b.created_at,
             "createdBy": {
@@ -1923,190 +1899,6 @@ async def _get_placement_recipient_user_ids(session: SQLAlchemyAsyncSession) -> 
     return sorted(list(recipient_ids))
 
 
-@router.post("/batches/{batch_id}/share-to-placement")
-async def share_to_placement_endpoint(
-    batch_id: int,
-    payload: ShareToPlacementBody,
-    current_user: User = Depends(get_current_program_review_user),
-    session: SQLAlchemyAsyncSession = Depends(get_async_session),
-):
-    """Program team hands off reviewed candidates to the Placement Team:
-    - Updates candidates to handoff_status='shared_with_placement', sets readiness score & notes.
-    - Emits in-app bell notification records targeted at placement staff, admins, and super admins.
-    """
-    repo = BulkATSCRUDRepository(session)
-    batch = await _get_authorized_batch(repo, batch_id=batch_id, current_user=current_user)
-
-    all_candidates = await repo.list_candidates(
-        batch_id=batch_id, limit=settings.BULK_ATS_MAX_FILES_PER_BATCH, sort="created"
-    )
-    candidate_map = {c.id: c for c in all_candidates}
-
-    selected_candidates = []
-    missing_ids = []
-    for cid in payload.candidate_ids:
-        c = candidate_map.get(cid)
-        if c is None:
-            missing_ids.append(cid)
-        else:
-            selected_candidates.append(c)
-
-    if missing_ids:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Candidates not found in this batch: {missing_ids}",
-        )
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    for c in selected_candidates:
-        c.handoff_status = "shared_with_placement"
-        c.program_readiness_score = payload.readiness_score
-        if payload.notes:
-            c.program_feedback_notes = payload.notes
-        c.program_reviewed_by = current_user.id
-        c.program_reviewed_at = now
-
-    # Emit bell icon notifications to Placement Team members, Admins, and Super Admins
-    placement_user_ids = await _get_placement_recipient_user_ids(session)
-    target_recipients = set(placement_user_ids)
-    # Guarantee admins and super admins receive the notification badge even if they initiated the handoff
-    if is_admin_user(current_user) or is_super_admin_user(current_user):
-        target_recipients.add(current_user.id)
-    if not target_recipients:
-        target_recipients.add(current_user.id)
-
-    recipient_list = sorted(list(target_recipients))
-
-    sender_name = current_user.name or current_user.email or "Program Team"
-    count = len(selected_candidates)
-    noun = "candidate" if count == 1 else "candidates"
-    notif_title = "New Candidates Shared by Program Team"
-    notif_body = (
-        f"{sender_name} shared {count} {noun} with a {payload.readiness_score}/10 "
-        f"Readiness Score for Placement Review."
-    )
-    notif_href = f"/dashboard/samvaad/bulk-ats/{batch_id}?view=placement_review"
-    notif_metadata = {
-        "batch_id": batch_id,
-        "candidate_ids": [c.id for c in selected_candidates],
-        "readiness_score": payload.readiness_score,
-        "notes": payload.notes,
-        "target_queue": payload.target_queue,
-        "sender_name": sender_name,
-        "sender_id": current_user.id,
-    }
-
-    for r_id in recipient_list:
-        session.add(
-            Notification(
-                recipient_id=r_id,
-                kind="placement_candidate_handoff",
-                title=notif_title,
-                body=notif_body,
-                href=notif_href,
-                related_type="bulk_ats_batch",
-                related_id=batch_id,
-                notification_metadata=notif_metadata,
-            )
-        )
-
-    await repo.record_audit(
-        action="candidates_shared_with_placement",
-        actor_id=current_user.id,
-        batch_id=batch_id,
-        metadata={
-            "candidate_ids": [c.id for c in selected_candidates],
-            "readiness_score": payload.readiness_score,
-            "target_queue": payload.target_queue,
-            "notes": payload.notes,
-            "notified_users_count": len(recipient_list),
-        },
-    )
-
-    await session.commit()
-
-    return {
-        "status": "success",
-        "batch_id": batch_id,
-        "shared_count": count,
-        "candidate_ids": [c.id for c in selected_candidates],
-        "readiness_score": payload.readiness_score,
-        "target_queue": payload.target_queue,
-        "notifications_sent": len(recipient_list),
-        "message": f"Successfully shared {count} {noun} with the Placement Team.",
-    }
-
-
-@router.post("/batches/{batch_id}/accept-placement-candidates")
-async def accept_placement_candidates_endpoint(
-    batch_id: int,
-    payload: AcceptPlacementCandidatesBody,
-    current_user: User = Depends(get_current_placement_handoff_user),
-    session: SQLAlchemyAsyncSession = Depends(get_async_session),
-):
-    """Placement team action to accept candidates into the active placement pipeline or reject/request info."""
-    repo = BulkATSCRUDRepository(session)
-    batch = await _get_authorized_batch(repo, batch_id=batch_id, current_user=current_user)
-
-    all_candidates = await repo.list_candidates(
-        batch_id=batch_id, limit=settings.BULK_ATS_MAX_FILES_PER_BATCH, sort="created"
-    )
-    candidate_map = {c.id: c for c in all_candidates}
-
-    selected_candidates = []
-    missing_ids = []
-    for cid in payload.candidate_ids:
-        c = candidate_map.get(cid)
-        if c is None:
-            missing_ids.append(cid)
-        else:
-            selected_candidates.append(c)
-
-    if missing_ids:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Candidates not found in this batch: {missing_ids}",
-        )
-
-    status_map = {
-        "accept": "accepted_in_placement",
-        "reject": "rejected",
-        "needs_info": "needs_info",
-    }
-    target_status = status_map[payload.action]
-
-    for c in selected_candidates:
-        c.handoff_status = target_status
-        if payload.placement_notes:
-            c.placement_notes = payload.placement_notes
-
-    await repo.record_audit(
-        action="placement_candidates_decision",
-        actor_id=current_user.id,
-        batch_id=batch_id,
-        metadata={
-            "action": payload.action,
-            "target_status": target_status,
-            "candidate_ids": [c.id for c in selected_candidates],
-            "placement_notes": payload.placement_notes,
-        },
-    )
-
-    await session.commit()
-
-    count = len(selected_candidates)
-    noun = "candidate" if count == 1 else "candidates"
-    return {
-        "status": "success",
-        "batch_id": batch_id,
-        "action": payload.action,
-        "handoff_status": target_status,
-        "updated_count": count,
-        "candidate_ids": [c.id for c in selected_candidates],
-        "message": f"Successfully updated {count} {noun} to '{target_status}'.",
-    }
-
-
 @router.post("/batches/{batch_id}/send-student-feedback")
 async def send_student_feedback_emails_endpoint(
     batch_id: int,
@@ -2235,112 +2027,6 @@ async def send_student_feedback_emails_endpoint(
         "failed": failed_count,
         "results": delivery_results,
     }
-
-
-@router.post("/batches/{batch_id}/pitch-to-company")
-async def pitch_to_company_endpoint(
-    batch_id: int,
-    payload: PitchCompanyEmailBody,
-    current_user: User = Depends(get_current_placement_handoff_user),
-    session: SQLAlchemyAsyncSession = Depends(get_async_session),
-):
-    """Draft an AI-personalized pitch email and deliver shortlisted candidate profiles to corporate HR."""
-    repo = BulkATSCRUDRepository(session)
-    batch = await _get_authorized_batch(
-        repo, batch_id=batch_id, current_user=current_user
-    )
-    all_candidates = await repo.list_candidates(
-        batch_id=batch_id, limit=500, sort="score"
-    )
-
-    target_ids = set(payload.candidate_ids)
-    selected = [c for c in all_candidates if c.id in target_ids]
-    if not selected:
-        raise HTTPException(
-            status_code=400,
-            detail="None of the specified candidates were found in this batch",
-        )
-
-    candidate_summaries = []
-    all_matched_skills: list[str] = []
-
-    for c in selected:
-        report = c.deterministic_report or {}
-        metrics = report.get("deterministicMetrics") or {}
-        skills_mod = metrics.get("skillsModule") or {}
-        matched = skills_mod.get("matchedSkills") or []
-        for s in matched:
-            if s and s not in all_matched_skills:
-                all_matched_skills.append(s)
-
-        resume_link = None
-        if payload.include_resume_links and c.s3_key:
-            # 24 hour temporary link for corporate review
-            resume_link = generate_bulk_ats_resume_presigned_url(
-                c.s3_key, expires_in=86400
-            )
-        elif c.resume_url:
-            resume_link = c.resume_url
-
-        candidate_summaries.append({
-            "name": c.candidate_name or f"Candidate {c.id}",
-            "score": round(c.final_score, 1) if c.final_score is not None else None,
-            "readiness_score": c.program_readiness_score,
-            "matched_skills": matched[:6],
-            "resume_url": resume_link,
-        })
-
-    # AI pitch summary generation
-    pitch_summary = await generate_company_pitch_summary(
-        company_name=payload.company_name,
-        role_name=batch.role_name,
-        candidate_count=len(selected),
-        top_skills=all_matched_skills[:8],
-    )
-
-    subject, html, text = build_company_pitch_email(
-        company_name=payload.company_name,
-        hr_name=payload.hr_name,
-        role_name=batch.role_name,
-        candidate_summaries=candidate_summaries,
-        pitch_summary=pitch_summary,
-        custom_notes=payload.custom_notes,
-    )
-
-    sent = send_email(to=payload.hr_email, subject=subject, html=html, text=text)
-
-    # Transition pitched candidates to referred_to_hr and attach company name
-    for c in selected:
-        await repo.update_placement_handoff(
-            c.id,
-            placement_notes=f"Pitched to {payload.company_name} ({payload.hr_email})",
-            assigned_companies=[payload.company_name],
-            handoff_status="referred_to_hr",
-        )
-
-    await repo.record_audit(
-        action="company_pitch_dispatched",
-        actor_id=current_user.id,
-        batch_id=batch_id,
-        candidate_id=None,
-        metadata={
-            "company_name": payload.company_name,
-            "hr_email": payload.hr_email,
-            "candidate_count": len(selected),
-            "email_sent": sent,
-        },
-    )
-
-    return {
-        "batchId": batch_id,
-        "companyName": payload.company_name,
-        "hrEmail": payload.hr_email,
-        "candidateCount": len(selected),
-        "emailSent": sent,
-        "pitchSummary": pitch_summary,
-        "candidates": candidate_summaries,
-    }
-
 
 
 @router.get("/batches/{batch_id}/audit-events")

@@ -562,3 +562,12 @@ async def test_history_is_read_only_and_retains_frozen_evidence(selection):
         )
         await s.commit()
     assert (await c.get(base + "?revision=1")).json()["items"] == []
+
+
+async def test_board_counts_people_by_stage(selection):
+    c, factory, oid, users = selection
+    r = await c.get("/v2/opportunities/board", headers={"x-test-actor": "lead"})
+    assert r.status_code == 200, r.text
+    row = next(i for i in r.json()["items"] if i["id"] == oid)
+    assert row["people"] == row["need"] + row["todo"] + row["included"] + row["excluded"]
+    assert row["selection"] == "draft" and row["sent"] is False

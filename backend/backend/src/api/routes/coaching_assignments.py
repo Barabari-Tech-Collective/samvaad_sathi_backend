@@ -31,7 +31,7 @@ router = fastapi.APIRouter(
 
 class AssignmentCreate(BaseModel):
     request_key: UUID
-    module: Literal["warm_up", "think_fast"]
+    module: Literal["warm_up", "think_fast", "pronunciation", "structure", "pace"]
     reason: str = Field(min_length=10, max_length=1000)
     note: str | None = Field(default=None, max_length=2000)
     due_date: datetime.date | None = None
@@ -89,6 +89,23 @@ async def own_assignment(
     if row.status == "assigned":
         await require_owned_enrollment(session, user.id, row.course_id)
     return serialize(row)
+
+
+class SessionDone(BaseModel):
+    session_id: int = Field(ge=1)
+
+
+@router.post("/me/{assignment_id}/drill-session")
+async def finish_with_session(
+    assignment_id: int,
+    body: SessionDone,
+    user=fastapi.Depends(get_current_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Pronunciation, structure and pace end on a server-owned session the learner finished."""
+    from src.services.coaching_assignments import complete_with_session
+
+    return serialize(await complete_with_session(session, user.id, assignment_id, body.session_id))
 
 
 async def assignment_page(session, predicate, page, limit):

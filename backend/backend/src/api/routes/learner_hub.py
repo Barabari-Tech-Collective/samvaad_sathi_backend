@@ -355,7 +355,7 @@ class Assign(BaseModel):
     course_id: str = Field(min_length=1, max_length=128)
     request_key: UUID
     kind: Literal["drill", "mock", "opening", "plan", "assessment"]
-    module: Literal["warm_up", "think_fast"] | None = None
+    module: Literal["warm_up", "think_fast", "pronunciation", "structure", "pace"] | None = None
     job_profile_id: int | None = Field(None, ge=1)
     opportunity_id: int | None = Field(None, ge=1)
     plan_id: int | None = Field(None, ge=1)

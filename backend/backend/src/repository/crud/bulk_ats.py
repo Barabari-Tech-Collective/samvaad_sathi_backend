@@ -111,6 +111,28 @@ class BulkATSCRUDRepository:
         )
         return found.first() is not None
 
+    async def decision_counts(self, batch_ids: list[int]) -> dict[int, dict[str, int]]:
+        """How many resumes in each run wait for a person, for the runs list."""
+        if not batch_ids:
+            return {}
+        c = BulkATSCandidate
+        rows = await self.session.execute(
+            select(
+                c.batch_id,
+                func.count().label("total"),
+                func.count().filter(c.status.in_(["completed", "needs_review"]), c.reviewer_decision.is_(None)).label("decide"),
+                func.count().filter(c.reviewer_decision == "shortlist").label("shortlisted"),
+                func.count().filter(c.status.in_(["queued", "parsing", "evaluating"])).label("reading"),
+                func.count().filter(c.status == "failed").label("failed"),
+            )
+            .where(c.batch_id.in_(batch_ids), c.merged_into_id.is_(None))
+            .group_by(c.batch_id)
+        )
+        return {
+            r.batch_id: {"total": r.total, "decide": r.decide, "shortlisted": r.shortlisted, "reading": r.reading, "failed": r.failed}
+            for r in rows.all()
+        }
+
     async def list_batches(
         self,
         *,

@@ -17,7 +17,8 @@ class CoachingAssignment(Base):
             name="ck_coaching_assignment_status",
         ),
         sa.CheckConstraint(
-            "module IN ('warm_up', 'think_fast')", name="ck_coaching_assignment_module"
+            "module IN ('warm_up', 'think_fast', 'pronunciation', 'structure', 'pace')",
+            name="ck_coaching_assignment_module",
         ),
         sa.CheckConstraint("version >= 1", name="ck_coaching_assignment_version"),
     )
@@ -40,6 +41,9 @@ class CoachingAssignment(Base):
     completion_id: Mapped[int | None] = mapped_column(
         sa.ForeignKey("practice_drill_completion.id", ondelete="RESTRICT"), unique=True
     )
+    # Pronunciation, structure and pace finish on a server session, not a drill receipt.
+    evidence_kind: Mapped[str | None] = mapped_column(sa.String(24))
+    evidence_id: Mapped[int | None] = mapped_column(sa.Integer)
     created_at: Mapped[datetime.datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=sa.func.now()
     )

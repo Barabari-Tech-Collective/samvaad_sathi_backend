@@ -1114,9 +1114,9 @@ async def audit_events(
     session: AsyncSession = fastapi.Depends(get_async_session),
 ) -> list[dict[str, Any]]:
     role, _ = await _context(current_user, session)
-    if role != "super_admin":
+    if role not in {"admin", "super_admin"}:
         raise fastapi.HTTPException(
-            status_code=403, detail="Super Administrator audit permission required"
+            status_code=403, detail="Administrator audit permission required"
         )
     rows = list(
         (

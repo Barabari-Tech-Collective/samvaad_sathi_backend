@@ -59,6 +59,8 @@ router.include_router(router=analytics_router, dependencies=[fastapi.Depends(fea
 router.include_router(router=analytics_v2_router, dependencies=[fastapi.Depends(feature_gate("analytics"))])
 router.include_router(router=ai_resume_router)
 router.include_router(router=resume_builder_router)
+from src.api.routes.bulk_ats_handoff import router as bulk_ats_handoff_router
+router.include_router(router=bulk_ats_handoff_router, dependencies=[fastapi.Depends(feature_gate("bulk_ats"))])
 router.include_router(router=bulk_ats_router, dependencies=[fastapi.Depends(feature_gate("bulk_ats"))])
 router.include_router(router=teams_v2_router, dependencies=[fastapi.Depends(feature_gate("teams"))])
 router.include_router(router=practice_dashboard_router, dependencies=[fastapi.Depends(feature_gate("practice_coaching"))])
@@ -110,6 +112,8 @@ from src.api.routes.learners import router as learners_router
 from src.api.routes.learner_hub import router as learner_hub_router
 from src.api.routes.interview_hub import router as interview_hub_router
 router.include_router(router=learner_hub_router)
+from src.api.routes.coaching_hub import router as coaching_hub_router
+router.include_router(router=coaching_hub_router)
 router.include_router(router=interview_hub_router)
 router.include_router(router=learners_router)
 from src.api.routes.assessment_records import router as assessment_records_router

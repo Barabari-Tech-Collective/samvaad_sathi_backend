@@ -6,6 +6,8 @@ from .bulk_ats import (  # noqa: F401
     BulkATSBatch,
     BulkATSCandidate,
     BulkATSDriveCredential,
+    BulkATSHandoffMessage,
+    BulkATSPitch,
 )
 from .college_alias import CollegeAlias, LearnerImportCollege  # noqa: F401
 from .interview import Interview  # noqa: F401

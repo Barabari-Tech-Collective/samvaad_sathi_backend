@@ -321,6 +321,9 @@ class BulkATSCandidate(Base):  # type: ignore
         sqlalchemy_mapped_column(JSONB, nullable=True, server_default=sqlalchemy.text("'[]'::jsonb"))
     )
 
+    handoff_shared_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True))
+    placement_decided_by: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(sqlalchemy.Integer)
+    placement_decided_at: SQLAlchemyMapped[datetime.datetime | None] = sqlalchemy_mapped_column(sqlalchemy.DateTime(timezone=True))
     created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
         sqlalchemy.DateTime(timezone=True),
         nullable=False,
@@ -370,6 +373,47 @@ class BulkATSCandidate(Base):  # type: ignore
         ),
     )
     __mapper_args__ = {"eager_defaults": True}
+
+
+class BulkATSHandoffMessage(Base):  # type: ignore
+    """One step in a candidate's journey from Program to Placement, in plain order."""
+
+    __tablename__ = "bulk_ats_handoff_message"
+
+    id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(sqlalchemy.Integer, primary_key=True)
+    candidate_id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(
+        sqlalchemy.ForeignKey("bulk_ats_candidate.id", ondelete="CASCADE"), index=True
+    )
+    author_id: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(
+        sqlalchemy.ForeignKey("user.id", ondelete="SET NULL")
+    )
+    author_name: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(255))
+    kind: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(16))
+    body: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.Text)
+    created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
+        sqlalchemy.DateTime(timezone=True), server_default=sqlalchemy.func.now()
+    )
+
+
+class BulkATSPitch(Base):  # type: ignore
+    """One email to a company. Delivered says whether it really went."""
+
+    __tablename__ = "bulk_ats_pitch"
+
+    id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(sqlalchemy.Integer, primary_key=True)
+    candidate_id: SQLAlchemyMapped[int] = sqlalchemy_mapped_column(
+        sqlalchemy.ForeignKey("bulk_ats_candidate.id", ondelete="CASCADE"), index=True
+    )
+    company_name: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(255))
+    hr_name: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(255))
+    hr_email: SQLAlchemyMapped[str] = sqlalchemy_mapped_column(sqlalchemy.String(255))
+    custom_notes: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(sqlalchemy.Text)
+    include_resume_links: SQLAlchemyMapped[bool] = sqlalchemy_mapped_column(sqlalchemy.Boolean, server_default=sqlalchemy.true())
+    delivered: SQLAlchemyMapped[bool] = sqlalchemy_mapped_column(sqlalchemy.Boolean, server_default=sqlalchemy.false())
+    sent_by: SQLAlchemyMapped[int | None] = sqlalchemy_mapped_column(sqlalchemy.ForeignKey("user.id", ondelete="SET NULL"))
+    created_at: SQLAlchemyMapped[datetime.datetime] = sqlalchemy_mapped_column(
+        sqlalchemy.DateTime(timezone=True), server_default=sqlalchemy.func.now()
+    )
 
 
 class BulkATSAuditEvent(Base):  # type: ignore

@@ -513,6 +513,7 @@ def calculate_user_permissions(
             or is_sr_facilitator
             or is_program_creator
         ),
+        "is_placement_team": bool(is_admin_user(user) or is_placement_lead or is_placement_creator or is_placement_staff),
         "can_manage_placement_handoff": bool(
             is_admin_user(user)
             or is_placement_lead

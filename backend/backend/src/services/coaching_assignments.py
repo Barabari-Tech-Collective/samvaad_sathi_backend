@@ -160,3 +160,90 @@ async def complete_assignment(session, *, user_id, payload):
     )
     await session.commit()
     return await session.get(PracticeDrillCompletion, evidence_id), True
+
+
+async def session_evidence(session, module, user_id, session_id, since):
+    """The finished session that proves this drill, or (None, None)."""
+    from src.models.db.pacing_practice import PacingPracticeSession
+    from src.models.db.pronunciation_practice import PronunciationPractice
+    from src.models.db.structure_practice import StructurePractice, StructurePracticeAnswer
+
+    if module == "pronunciation":
+        row = (
+            await session.execute(
+                sa.select(PronunciationPractice).where(
+                    PronunciationPractice.id == session_id,
+                    PronunciationPractice.user_id == user_id,
+                    PronunciationPractice.status == "completed",
+                    PronunciationPractice.created_at >= since,
+                )
+            )
+        ).scalar_one_or_none()
+        return ("pronunciation_session", row.created_at) if row else (None, None)
+    if module == "structure":
+        row = (
+            await session.execute(
+                sa.select(StructurePractice).where(
+                    StructurePractice.id == session_id,
+                    StructurePractice.user_id == user_id,
+                    StructurePractice.created_at >= since,
+                    sa.exists(
+                        sa.select(StructurePracticeAnswer.id).where(
+                            StructurePracticeAnswer.practice_id == StructurePractice.id,
+                            StructurePracticeAnswer.analyzed_at.is_not(None),
+                        )
+                    ),
+                )
+            )
+        ).scalar_one_or_none()
+        return ("structure_practice", row.updated_at) if row else (None, None)
+    if module == "pace":
+        row = (
+            await session.execute(
+                sa.select(PacingPracticeSession).where(
+                    PacingPracticeSession.id == session_id,
+                    PacingPracticeSession.user_id == user_id,
+                    PacingPracticeSession.status == "completed",
+                    PacingPracticeSession.updated_at >= since,
+                )
+            )
+        ).scalar_one_or_none()
+        return ("pacing_session", row.updated_at) if row else (None, None)
+    return None, None
+
+
+async def complete_with_session(session, user_id, assignment_id, session_id):
+    await lock_student(session, user_id)
+    row = (
+        await session.execute(
+            sa.select(CoachingAssignment)
+            .where(CoachingAssignment.id == assignment_id, CoachingAssignment.student_id == user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise fastapi.HTTPException(404, "Assignment not found.")
+    if row.status == "completed":
+        return row
+    if row.status != "assigned":
+        raise fastapi.HTTPException(409, "This assignment has been cancelled.")
+    await require_owned_enrollment(session, user_id, row.course_id)
+    kind, finished = await session_evidence(session, row.module, user_id, session_id, row.created_at)
+    if kind is None:
+        raise fastapi.HTTPException(409, "This session cannot finish this practice.")
+    used = (
+        await session.execute(
+            sa.select(CoachingAssignment.id).where(
+                CoachingAssignment.evidence_kind == kind, CoachingAssignment.evidence_id == session_id
+            )
+        )
+    ).scalar_one_or_none()
+    if used is not None:
+        raise fastapi.HTTPException(409, "This session already finished another practice.")
+    row.status, row.evidence_kind, row.evidence_id = "completed", kind, session_id
+    row.version += 1
+    row.closed_at = datetime.datetime.now(datetime.timezone.utc)
+    audit(session, user_id, row, "coaching_assignment_completed", "Student finished the assigned practice session.")
+    await session.commit()
+    return row
