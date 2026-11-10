@@ -19,7 +19,11 @@ def test_trimmed_reason_minimum(reason):
 def test_only_connected_drills_can_be_assigned():
     with pytest.raises(ValidationError):
         AssignmentCreate(
-            request_key=uuid4(), module="pace", reason="Practise a clearer introduction"
+            request_key=uuid4(), module="singing", reason="Practise a clearer introduction"
+        )
+    for module in ("warm_up", "think_fast", "pronunciation", "structure", "pace"):
+        AssignmentCreate(
+            request_key=uuid4(), module=module, reason="Practise a clearer introduction"
         )
 
 

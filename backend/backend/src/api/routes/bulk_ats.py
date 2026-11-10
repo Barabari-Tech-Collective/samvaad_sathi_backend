@@ -26,8 +26,6 @@ from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 from src.api.dependencies.admin import (
     get_current_admin_user,
     get_current_bulk_ats_user,
-    get_current_program_review_user,
-    get_current_placement_handoff_user,
     is_admin_user,
     is_super_admin_user,
     is_bulk_ats_user,
@@ -104,22 +102,6 @@ class UpdateRubricBody(pydantic.BaseModel):
     required_skills: list[str] = pydantic.Field(default_factory=list, max_length=100)
     preferred_skills: list[str] = pydantic.Field(default_factory=list, max_length=100)
     experience_mode: Literal["fresher", "experienced"] = "experienced"
-
-
-class ProgramReviewBody(pydantic.BaseModel):
-    program_readiness_score: int | None = pydantic.Field(default=None, ge=1, le=10)
-    program_feedback_notes: str | None = pydantic.Field(default=None, max_length=5000)
-    handoff_status: Literal[
-        "screened", "in_program_review", "approved_for_placement", "shared_with_placement", "archived"
-    ] | None = None
-
-
-class PlacementHandoffBody(pydantic.BaseModel):
-    placement_notes: str | None = pydantic.Field(default=None, max_length=5000)
-    placement_assigned_companies: list[str] = pydantic.Field(default_factory=list, max_length=50)
-    handoff_status: Literal[
-        "approved_for_placement", "shared_with_placement", "accepted_in_placement", "rejected", "needs_info", "referred_to_hr", "archived"
-    ] | None = None
 
 
 class SendStudentFeedbackEmailBody(pydantic.BaseModel):
@@ -1680,156 +1662,6 @@ async def review_candidate(
         },
     )
     return _candidate_detail(candidate)
-
-
-@router.patch("/candidates/{candidate_id}/program-review")
-async def update_candidate_program_review_endpoint(
-    candidate_id: int,
-    payload: ProgramReviewBody,
-    current_user: User = Depends(get_current_program_review_user),
-    session: SQLAlchemyAsyncSession = Depends(get_async_session),
-):
-    """Program team qualitative review: record readiness score (1-10), notes, and approve for placement."""
-    repo = BulkATSCRUDRepository(session)
-    candidate = await _get_authorized_candidate(
-        repo, candidate_id=candidate_id, current_user=current_user
-    )
-
-    if payload.program_readiness_score is not None:
-        if payload.program_readiness_score < 1 or payload.program_readiness_score > 10:
-            raise HTTPException(
-                status_code=400,
-                detail="program_readiness_score must be an integer between 1 and 10",
-            )
-
-    if payload.handoff_status is not None:
-        valid_statuses = {"screened", "in_program_review", "approved_for_placement", "shared_with_placement", "archived"}
-        if payload.handoff_status not in valid_statuses:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid handoff_status for program review. Must be one of {valid_statuses}",
-            )
-
-    updated = await repo.update_program_review(
-        candidate.id,
-        readiness_score=payload.program_readiness_score,
-        feedback_notes=payload.program_feedback_notes,
-        handoff_status=payload.handoff_status,
-        reviewer_id=current_user.id,
-    )
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
-    await repo.record_audit(
-        action="candidate_program_reviewed",
-        actor_id=current_user.id,
-        batch_id=candidate.batch_id,
-        candidate_id=candidate.id,
-        metadata={
-            "program_readiness_score": payload.program_readiness_score,
-            "handoff_status": payload.handoff_status,
-            "has_notes": bool((payload.program_feedback_notes or "").strip()),
-        },
-    )
-    return _candidate_detail(updated)
-
-
-@router.patch("/candidates/{candidate_id}/placement-handoff")
-async def update_candidate_placement_handoff_endpoint(
-    candidate_id: int,
-    payload: PlacementHandoffBody,
-    current_user: User = Depends(get_current_placement_handoff_user),
-    session: SQLAlchemyAsyncSession = Depends(get_async_session),
-):
-    """Placement team action: assign target companies, append notes, and transition to referred_to_hr."""
-    repo = BulkATSCRUDRepository(session)
-    candidate = await _get_authorized_candidate(
-        repo, candidate_id=candidate_id, current_user=current_user
-    )
-
-    if payload.handoff_status is not None:
-        valid_statuses = {
-            "approved_for_placement",
-            "shared_with_placement",
-            "accepted_in_placement",
-            "rejected",
-            "needs_info",
-            "referred_to_hr",
-            "archived",
-        }
-        if payload.handoff_status not in valid_statuses:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid handoff_status for placement handoff. Must be one of {valid_statuses}",
-            )
-
-    updated = await repo.update_placement_handoff(
-        candidate.id,
-        placement_notes=payload.placement_notes,
-        assigned_companies=payload.placement_assigned_companies,
-        handoff_status=payload.handoff_status,
-    )
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
-    await repo.record_audit(
-        action="candidate_placement_handoff_updated",
-        actor_id=current_user.id,
-        batch_id=candidate.batch_id,
-        candidate_id=candidate.id,
-        metadata={
-            "handoff_status": payload.handoff_status,
-            "assigned_companies": payload.placement_assigned_companies,
-            "has_notes": bool((payload.placement_notes or "").strip()),
-        },
-    )
-    return _candidate_detail(updated)
-
-
-@router.get("/batches/{batch_id}/placement-queue")
-async def get_batch_placement_queue(
-    batch_id: int,
-    min_score: float | None = None,
-    min_readiness: int | None = None,
-    current_user: User = Depends(get_current_placement_handoff_user),
-    session: SQLAlchemyAsyncSession = Depends(get_async_session),
-):
-    """List approved candidates in a batch ready for corporate referral and pitches."""
-    repo = BulkATSCRUDRepository(session)
-    batch = await _get_authorized_batch(
-        repo, batch_id=batch_id, current_user=current_user
-    )
-    candidates = await repo.list_candidates(
-        batch_id=batch_id,
-        limit=500,
-        sort="score",
-    )
-    approved = [
-        c for c in candidates
-        if c.handoff_status in {
-            "approved_for_placement",
-            "shared_with_placement",
-            "accepted_in_placement",
-            "referred_to_hr",
-        }
-    ]
-
-    filtered = []
-    for c in approved:
-        if min_score is not None and (c.final_score is None or c.final_score < min_score):
-            continue
-        if min_readiness is not None and (
-            c.program_readiness_score is None or c.program_readiness_score < min_readiness
-        ):
-            continue
-        filtered.append(_candidate_detail(c))
-
-    return {
-        "batchId": batch_id,
-        "roleName": batch.role_name,
-        "totalApproved": len(filtered),
-        "candidates": filtered,
-    }
 
 
 async def _get_placement_recipient_user_ids(session: SQLAlchemyAsyncSession) -> list[int]:

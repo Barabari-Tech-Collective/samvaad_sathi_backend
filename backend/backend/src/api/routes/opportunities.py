@@ -215,24 +215,24 @@ async def board(
     sent = set(
         (await session.execute(sa.select(OpportunityHandoff.opportunity_id).where(OpportunityHandoff.status == "shared"))).scalars()
     )
-    items = []
-    for opening in openings:
-        _, predicate = await _load(session, user, opening.id, "read")
-        latest = await selection.latest(session, opening.id)
-        view = await selection.detail(session, user, opening, latest, predicate)
-        need = todo = inc = exc = 0
-        for item in view["items"]:
-            decided = item.get("decision")
-            if decided:
-                state = decided["decision"] if isinstance(decided, dict) else decided
-                inc += state == "include"
-                exc += state == "exclude"
-            elif item["evidence"]["state"] != "ready":
-                need += 1
-            else:
-                todo += 1
-        items.append(_summary(opening, people=len(view["items"]), rounds=int(rounds.get(opening.id, 0)), need=need, todo=todo, included=inc, excluded=exc,
-                              selection=view["status"] if latest else "draft", sent=opening.id in sent))
+    predicates = {}
+    for course_id in {o.course_id for o in openings}:
+        predicates[course_id] = await service.authorize(user, course_id, session, "read")
+    counts = await selection.board_counts(session, openings, predicates)
+    items = [
+        _summary(
+            opening,
+            people=counts[opening.id]["people"],
+            rounds=int(rounds.get(opening.id, 0)),
+            need=counts[opening.id]["need"],
+            todo=counts[opening.id]["todo"],
+            included=counts[opening.id]["included"],
+            excluded=counts[opening.id]["excluded"],
+            selection=counts[opening.id]["selection"],
+            sent=opening.id in sent,
+        )
+        for opening in openings
+    ]
     names = await _course_names(session, {o.course_id for o in openings})
     return {"items": [i | {"course_name": names.get(i["course_id"], i["course_id"])} for i in items], "can": can}
 

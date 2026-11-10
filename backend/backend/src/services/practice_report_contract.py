@@ -20,7 +20,7 @@ REPORT_VERSION = "practice-report-v1"
 _DRILLS = (
     {
         "module": "structure",
-        "title": "Structure your answers",
+        "title": "Plan your answers",
         "description": "Use a simple framework to make your next answer easier to follow.",
         "href": "/structure-your-answer",
         "keywords": (
@@ -42,7 +42,7 @@ _DRILLS = (
     },
     {
         "module": "pace",
-        "title": "Control your pace",
+        "title": "Speak at a good speed",
         "description": "Use calm pauses and reduce filler words while keeping your answer moving.",
         "href": "/control-your-pace",
         "keywords": (

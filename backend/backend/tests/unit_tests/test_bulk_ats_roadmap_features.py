@@ -13,8 +13,6 @@ from src.services.email.bulk_ats_emails import (
 )
 from src.services.ai_resume.bulk.deepseek_feedback import generate_company_pitch_summary
 from src.api.routes.bulk_ats import (
-    ProgramReviewBody,
-    PlacementHandoffBody,
     SendStudentFeedbackEmailBody,
     _candidate_summary,
     _candidate_detail,
@@ -146,37 +144,6 @@ def test_candidate_serialization_includes_handoff_fields():
     assert summary["placementNotes"] == "Pitched to Acme"
     assert summary["placementAssignedCompanies"] == ["Acme"]
     assert summary["hasResumeFile"] is True
-
-
-def test_program_review_body_validation():
-    with pytest.raises(Exception):
-        ProgramReviewBody(program_readiness_score=15)  # must be <= 10
-
-    with pytest.raises(Exception):
-        ProgramReviewBody(program_readiness_score=0)   # must be >= 1
-
-    body = ProgramReviewBody(
-        program_readiness_score=8,
-        program_feedback_notes="Good candidate",
-        handoff_status="approved_for_placement",
-    )
-    assert body.program_readiness_score == 8
-    assert body.handoff_status == "approved_for_placement"
-
-
-def test_placement_handoff_body_validation():
-    body = PlacementHandoffBody(
-        placement_notes="Scheduled client round",
-        placement_assigned_companies=["Google", "Microsoft"],
-        handoff_status="referred_to_hr",
-    )
-    assert body.handoff_status == "referred_to_hr"
-    assert len(body.placement_assigned_companies) == 2
-
-
-
-
-
 
 
 @pytest.mark.asyncio

@@ -134,7 +134,7 @@ def test_existing_report_without_gate_four_metadata_still_validates():
         },
         "questionAnalysis": [],
         "recommendedPractice": {
-            "title": "Structure your answers",
+            "title": "Plan your answers",
             "description": "Use a clear beginning, middle and end.",
         },
     }

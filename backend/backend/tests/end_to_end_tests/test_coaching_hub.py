@@ -16,6 +16,8 @@ from src.models.db.coaching_assignment import CoachingAssignment
 from src.models.db.interview import Interview
 from src.models.db.notification import Notification
 from src.models.db.pacing_practice import PacingPracticeSession
+from src.models.db.pronunciation_practice import PronunciationPractice
+from src.models.db.structure_practice import StructurePractice, StructurePracticeAnswer
 from src.models.db.summary_report import SummaryReport
 from src.models.db.team import Team
 from src.models.db.team_member import TeamMember
@@ -175,6 +177,37 @@ async def test_session_drill_finishes_only_with_own_finished_session(ctx):
     assert ok.status_code == 200 and ok.json()["status"] == "completed"
     r = (await c.get("/v2/coaching-hub/learners?card=done", headers=as_("admin"))).json()
     assert r["counts"]["done"] == 1
+
+
+@pytest.mark.parametrize("module", ["pronunciation", "structure"])
+async def test_assigned_speaking_drills_finish_with_their_own_session(ctx, module):
+    """Pronunciation and Plan your answers, from assignment to the staff "finished" list."""
+    c, users, factory = ctx
+    await assign(c, users, module)
+    async with factory() as s:
+        aid = (await s.execute(sa.select(CoachingAssignment))).scalar_one().id
+        if module == "pronunciation":
+            mine = PronunciationPractice(user_id=users["bilal"], difficulty="easy", words=[{"word": "clarity"}], status="completed")
+            theirs = PronunciationPractice(user_id=users["asha"], difficulty="easy", words=[{"word": "clarity"}], status="completed")
+            s.add_all([mine, theirs])
+            await s.flush()
+        else:
+            mine = StructurePractice(user_id=users["bilal"], track="Developer", questions=[{"sections": ["Situation"]}], status="active")
+            theirs = StructurePractice(user_id=users["asha"], track="Developer", questions=[{"sections": ["Situation"]}], status="active")
+            s.add_all([mine, theirs])
+            await s.flush()
+            for record in (mine, theirs):
+                s.add(StructurePracticeAnswer(practice_id=record.id, question_index=0, section_name="Situation", answer_text="I clarified the task first.", analyzed_at=dt.datetime.now(dt.timezone.utc)))
+        await s.commit()
+        mine_id, theirs_id = mine.id, theirs.id
+    url = f"/v2/coaching-assignments/me/{aid}/drill-session"
+    assert (await c.post(url, headers=as_("bilal"), json={"session_id": theirs_id})).status_code == 409
+    done = await c.post(url, headers=as_("bilal"), json={"session_id": mine_id})
+    assert done.status_code == 200 and done.json()["status"] == "completed"
+    again = await c.post(url, headers=as_("bilal"), json={"session_id": mine_id})
+    assert again.status_code == 200 and again.json()["status"] == "completed"
+    finished = (await c.get("/v2/coaching-hub/learners?card=done", headers=as_("admin"))).json()
+    assert finished["counts"]["done"] == 1
 
 
 async def test_practice_board_numbers_and_signals(ctx):

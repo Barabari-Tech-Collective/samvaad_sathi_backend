@@ -19,6 +19,7 @@ from src.models.schemas.summary_report_v2 import SummaryReportResponseLite
 from src.repository.crud.interview import InterviewCRUDRepository
 from src.repository.crud.question import QuestionAttemptCRUDRepository
 from src.repository.crud.summary_report import SummaryReportCRUDRepository
+from src.services import notifications
 from src.services.analysis import analysis_service
 from src.services.analytics_events import track_analytics_event
 from src.services.result_release import held_report, withheld
@@ -175,6 +176,11 @@ async def generate_summary_report_v2(
     try:
         save_start = time.perf_counter()
         await sr_repo.upsert(interview_id=interview.id, report_json=result)
+        if not withheld(interview):
+            notifications.notify(
+                session, interview.user_id, "feedback_ready", "Your interview feedback is ready", None,
+                f"/report-summary?interviewId={interview.id}", ("interview", interview.id),
+            )
         await session.commit()
         logger.info(
             "Summary report persisted | Interview=%s | Time=%.2fs",

@@ -49,25 +49,25 @@ class _FocusDefinition:
 _FOCUS_DEFINITIONS = (
     _FocusDefinition(
         "structure",
-        "Structure your answers",
+        "Plan your answers",
         "/structure-your-answer",
         ("structure", "star", "prep", "organis", "order", "example", "concise"),
     ),
     _FocusDefinition(
         "pronunciation",
-        "Make key words easier to understand",
+        "Pronunciation",
         "/pronunciation-practice",
         ("pronunciation", "pronounce", "intelligib", "mispronoun"),
     ),
     _FocusDefinition(
         "pace",
-        "Control your pace",
+        "Speak at a good speed",
         "/control-your-pace",
         ("pace", "filler", "pause", "too fast", "too slow", "wpm", "fluency"),
     ),
     _FocusDefinition(
         "warm_up",
-        "Practise your first two minutes",
+        "Warm-up chat",
         "/warm-up-chat",
         ("introduc", "tell me about yourself", "motivation", "confidence", "opening"),
     ),

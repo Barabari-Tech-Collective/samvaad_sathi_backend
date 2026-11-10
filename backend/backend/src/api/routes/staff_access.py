@@ -14,6 +14,7 @@ from src.models.db.team import Team
 from src.models.db.team_member import TeamMember
 from src.models.db.user import User
 from src.models.db.practice_governance import PracticeDashboardAuditEvent
+from src.services.feature_access import CATALOGUE
 from src.services.staff_roles import ROLE_CATALOGUE, canonical_role, relationship_rows
 
 router = fastapi.APIRouter(prefix="/v2/staff-access", tags=["staff-access"])
@@ -92,6 +93,81 @@ async def memberships(
         "page": page,
         "has_more": len(rows) > 50,
         "responsibilities": ROLE_CATALOGUE,
+    }
+
+
+@router.get("/people")
+async def people(
+    q: str = fastapi.Query("", max_length=120),
+    page: int = fastapi.Query(1, ge=1),
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Everyone on the staff side on one list, each with every team they work in."""
+    administrator(user)
+    active = (
+        sa.select(TeamMember.user_id)
+        .join(Team, Team.id == TeamMember.team_id)
+        .where(TeamMember.status == "active", Team.status == "active")
+    )
+    query = sa.select(User).where(User.id.in_(active))
+    term = q.strip().lower()
+    if term:
+        like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        query = query.where(
+            sa.or_(
+                sa.func.lower(sa.func.coalesce(User.name, "")).like(like, escape="\\"),
+                sa.func.lower(User.email).like(like, escape="\\"),
+            )
+        )
+    total = (
+        await session.execute(sa.select(sa.func.count()).select_from(query.subquery()))
+    ).scalar_one()
+    rows = (
+        (
+            await session.execute(
+                query.order_by(sa.func.lower(sa.func.coalesce(User.name, User.email)), User.id)
+                .offset((page - 1) * 25)
+                .limit(25)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    teams: dict[int, list] = {}
+    if rows:
+        found = await session.execute(
+            sa.select(TeamMember, Team)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(
+                TeamMember.user_id.in_([row.id for row in rows]),
+                TeamMember.status == "active",
+                Team.status == "active",
+            )
+            .order_by(TeamMember.id)
+        )
+        for member, team in found.all():
+            item = relationship_rows([(member, team)])[0]
+            item["version"] = assignment_version(member)
+            teams.setdefault(member.user_id, []).append(item)
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "name": row.name or row.email,
+                "email": row.email,
+                "administrator": is_admin_user(row),
+                "permissions": row.feature_permissions,
+                "version": row.feature_permissions_version,
+                "memberships": teams.get(row.id, []),
+            }
+            for row in rows
+        ],
+        "total": total,
+        "page": page,
+        "has_more": page * 25 < total,
+        "responsibilities": ROLE_CATALOGUE,
+        "catalogue": CATALOGUE,
     }
 
 

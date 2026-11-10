@@ -68,7 +68,11 @@ async def roster(course_id: str, response: fastapi.Response, page: int = fastapi
 async def mine(response: fastapi.Response, user=fastapi.Depends(get_current_user), session=fastapi.Depends(get_async_session)):
     response.headers['Cache-Control'] = 'no-store'
     rows = (await session.execute(sa.select(Graduation).where(Graduation.student_id == user.id).order_by(Graduation.course_id))).scalars().all()
-    return {"items": [service.project(row) for row in rows]}
+    # A learner should read their course's name, never its internal id.
+    from src.api.routes.opportunities import _course_names
+
+    names = await _course_names(session, {row.course_id for row in rows})
+    return {"items": [service.project(row) | {"course_name": names.get(row.course_id)} for row in rows]}
 
 
 @router.get("/courses/{course_id}/students/{student_id}")

@@ -26,8 +26,8 @@ DRILL_LABELS = {
     "warm_up": "Warm-up chat",
     "think_fast": "Think fast",
     "pronunciation": "Pronunciation",
-    "structure": "Structure your answer",
-    "pace": "Control your pace",
+    "structure": "Plan your answers",
+    "pace": "Speak at a good speed",
 }
 
 

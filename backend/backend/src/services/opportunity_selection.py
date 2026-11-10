@@ -144,6 +144,154 @@ async def candidates(session, opening, predicate):
     )
 
 
+async def board_counts(session, openings, predicates, now=None):
+    """The Openings list numbers in a fixed number of queries, however many openings exist.
+
+    Gives the same counts as detail(), which stays the single source for one opening.
+    """
+    if not openings:
+        return {}
+    now = now or dt.datetime.now(UTC)
+    ids = [o.id for o in openings]
+    newest = (
+        sa.select(
+            OpportunitySelection.opportunity_id,
+            sa.func.max(OpportunitySelection.revision).label("revision"),
+        )
+        .where(OpportunitySelection.opportunity_id.in_(ids))
+        .group_by(OpportunitySelection.opportunity_id)
+        .subquery()
+    )
+    latest_rows = {
+        r.opportunity_id: r
+        for r in (
+            await session.execute(
+                sa.select(OpportunitySelection).join(
+                    newest,
+                    sa.and_(
+                        OpportunitySelection.opportunity_id == newest.c.opportunity_id,
+                        OpportunitySelection.revision == newest.c.revision,
+                    ),
+                )
+            )
+        ).scalars()
+    }
+    decided = {}
+    if latest_rows:
+        found = await session.execute(
+            sa.select(
+                OpportunitySelectionEntry.selection_id,
+                OpportunitySelectionEntry.student_id,
+                OpportunitySelectionEntry.decision,
+            ).where(
+                OpportunitySelectionEntry.selection_id.in_([r.id for r in latest_rows.values()])
+            )
+        )
+        decided = {(a, b): c for a, b, c in found.all()}
+    by_course = {}
+    for opening in openings:
+        by_course.setdefault(opening.course_id, []).append(opening)
+    people = {i: [] for i in ids}
+    allowed = {}
+    for course_id, group in by_course.items():
+        predicate = predicates[course_id]
+        rows = await session.execute(
+            sa.select(OpportunityCandidate.opportunity_id, User.id)
+            .join(User, OpportunityCandidate.student_id == User.id)
+            .where(OpportunityCandidate.opportunity_id.in_([o.id for o in group]), predicate)
+        )
+        for opportunity_id, student in rows.all():
+            people[opportunity_id].append(student)
+        frozen = {
+            item["student_id"]
+            for o in group
+            if o.id in latest_rows and latest_rows[o.id].snapshot
+            for item in latest_rows[o.id].snapshot["items"]
+        }
+        if frozen:
+            allowed[course_id] = set(
+                (
+                    await session.execute(
+                        sa.select(User.id).where(User.id.in_(frozen), predicate)
+                    )
+                ).scalars()
+            )
+    students = {s for group in people.values() for s in group}
+    oldest = now - dt.timedelta(days=max(o.max_evidence_age_days for o in openings))
+    assessed, interviewed = {}, {}
+    if students:
+        found = await session.execute(
+            sa.select(Interview.user_id, Interview.course_id, Interview.completed_at).where(
+                Interview.user_id.in_(students),
+                Interview.course_id.in_(list(by_course)),
+                Interview.interview_mode == "assessment",
+                Interview.status == "completed",
+                Interview.completed_at.between(oldest, now),
+            )
+        )
+        for student, course, at in found.all():
+            assessed.setdefault((student, course), []).append(at)
+        found = await session.execute(
+            sa.select(
+                HumanInterview.student_id,
+                HumanInterview.opportunity_id,
+                HumanInterview.course_id,
+                HumanInterview.closed_at,
+            ).where(
+                HumanInterview.student_id.in_(students),
+                HumanInterview.opportunity_id.in_(ids),
+                HumanInterview.status == "completed",
+                HumanInterview.closed_at.between(oldest, now),
+                HumanInterview.result.is_not(None),
+            )
+        )
+        for student, opportunity_id, course, at in found.all():
+            interviewed.setdefault((student, opportunity_id, course), []).append(at)
+    out = {}
+    for opening in openings:
+        row = latest_rows.get(opening.id)
+        need = todo = include = exclude = 0
+        if row and row.snapshot:
+            items = [
+                i for i in row.snapshot["items"] if i["student_id"] in allowed.get(opening.course_id, ())
+            ]
+            total = len(items)
+            for item in items:
+                got = item.get("decision")
+                state = (got.get("decision") if isinstance(got, dict) else got) if got else None
+                if state:
+                    include += state == "include"
+                    exclude += state == "exclude"
+                elif item["evidence"]["state"] != "ready":
+                    need += 1
+                else:
+                    todo += 1
+        else:
+            since = now - dt.timedelta(days=opening.max_evidence_age_days)
+            total = len(people[opening.id])
+            for student in people[opening.id]:
+                state = decided.get((row.id, student)) if row else None
+                if state:
+                    include += state == "include"
+                    exclude += state == "exclude"
+                    continue
+                count = sum(a >= since for a in assessed.get((student, opening.course_id), []))
+                count += sum(a >= since for a in interviewed.get((student, opening.id, opening.course_id), []))
+                if count >= opening.min_assessments:
+                    todo += 1
+                else:
+                    need += 1
+        out[opening.id] = {
+            "people": total,
+            "need": need,
+            "todo": todo,
+            "included": include,
+            "excluded": exclude,
+            "selection": metadata(row, opening)["status"] if row else "draft",
+        }
+    return out
+
+
 def audit(session, user, opening, row, action, reason, details=None):
     session.add(
         PracticeDashboardAuditEvent(

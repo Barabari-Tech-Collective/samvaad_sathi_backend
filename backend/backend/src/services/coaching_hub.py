@@ -22,8 +22,8 @@ DRILLS = {
     "warm_up": ("Warm-up chat", "A short, easy chat to get speaking", "A short warm-up will get you comfortable speaking again."),
     "think_fast": ("Think fast", "Quick answers to surprise questions", "This will help you answer quickly when a question surprises you."),
     "pronunciation": ("Pronunciation", "Say difficult words clearly", "This will help your words come through clearly."),
-    "structure": ("Structure your answer", "Give every answer a clear shape", "This will help you give answers a clear start, middle and end."),
-    "pace": ("Control your pace", "Speak at a steady speed, with pauses", "This will help you slow down and speak at a steady pace."),
+    "structure": ("Plan your answers", "Give every answer a clear shape", "This will help you give answers a clear start, middle and end."),
+    "pace": ("Speak at a good speed", "Speak at a steady speed, with pauses", "This will help you slow down and speak at a steady pace."),
 }
 REMIND_GAP_DAYS = 3
 SIGNALS = {
