@@ -53,10 +53,7 @@ router = fastapi.APIRouter(prefix="/v2/assessment-records", tags=["assessment-re
 
 NOT_FOUND = "Assessment not found within your access."
 
-RELEASE_RULES = {
-    "immediate": "Shown to the student as soon as scoring finishes.",
-    "review": "Held until someone with permission to publish assessments releases it.",
-}
+RELEASE_NOTE = "Shared with the learner as soon as it is scored."
 
 
 class Reasoned(BaseModel):
@@ -105,10 +102,6 @@ async def corrections(session, interview_id):
     ]
 
 
-class ReleaseRule(Reasoned):
-    result_release: Literal["immediate", "review"]
-
-
 def may_release(user):
     """Releasing a held AI result belongs to people who may publish assessments."""
     return is_admin_user(user) or (
@@ -148,24 +141,6 @@ async def ai_history(session, interview_id):
         for e, name in rows
     ]
 
-
-async def next_held(session, after_id):
-    """The oldest other result still waiting, so a reviewer can move straight on."""
-    return (
-        await session.execute(
-            sa.select(Interview.id)
-            .where(
-                Interview.interview_mode == "assessment",
-                Interview.result_release == "review",
-                Interview.result_released_at.is_(None),
-                Interview.status == "completed",
-                Interview.id != after_id,
-                student_interview(),
-            )
-            .order_by(Interview.completed_at.asc().nullslast(), Interview.id)
-            .limit(1)
-        )
-    ).scalar_one_or_none()
 
 # Truthful, small statuses (pack sec 12).
 AI_STATUS = {
@@ -321,7 +296,7 @@ async def ai_record(
             "released": scored and not withheld(interview),
             "released_at": interview.result_released_at,
             "held": interview.status == "completed" and withheld(interview),
-            "release_rule": RELEASE_RULES[interview.result_release],
+            "release_rule": RELEASE_NOTE,
         },
         "student_feedback": None,
         "integrity": await integrity(user, interview, session),
@@ -330,10 +305,6 @@ async def ai_record(
         # Only confirmed condition labels, so whoever runs or reviews this sitting knows them.
         "accommodations": await confirmed_conditions(session, interview.user_id),
         "can_correct": scored and may_release(user),
-        "can_release": interview.status == "completed"
-        and withheld(interview)
-        and may_release(user),
-        "next_held": await next_held(session, interview.id) if may_release(user) else None,
         "links": {"scores": f"/dashboard/samvaad/interviews/{interview.id}"},
     }
 
@@ -464,102 +435,6 @@ async def human_record(
         "links": {
             "manage": f"/dashboard/samvaad/human-interviews?course={row.course_id}",
         },
-    }
-
-
-@router.post("/ai/{interview_id}/release")
-async def release_ai_result(
-    interview_id: int,
-    body: Reasoned,
-    user=fastapi.Depends(get_current_admin_user),
-    session=fastapi.Depends(get_async_session),
-):
-    row = (
-        await session.execute(
-            sa.select(Interview, User)
-            .join(User, User.id == Interview.user_id)
-            .where(
-                Interview.id == interview_id,
-                Interview.interview_mode == "assessment",
-                student_interview(),
-            )
-            .with_for_update(of=Interview)
-        )
-    ).first()
-    if row is None or not await ai_reachable(user, row[0], row[1], session):
-        raise fastapi.HTTPException(404, NOT_FOUND)
-    interview = row[0]
-    if not may_release(user):
-        raise fastapi.HTTPException(
-            403, "Releasing results needs permission to publish assessments."
-        )
-    if interview.status != "completed" or not withheld(interview):
-        raise fastapi.HTTPException(409, "This result is not waiting to be released.")
-    now = dt.datetime.now(dt.timezone.utc)
-    interview.result_released_at, interview.result_released_by = now, user.id
-    audit(
-        session, user, "interview", interview.id, "assessment_result_released",
-        body.reason, {"student_id": interview.user_id, "course_id": interview.course_id},
-    )
-    notifications.notify(
-        session, interview.user_id, "assessment_result_released", "Your assessment result is ready",
-        "Your feedback has been reviewed and released.", "/assessments", ("interview", interview.id),
-    )
-    await session.commit()
-    return {"id": interview.id, "released_at": now}
-
-
-@router.put("/templates/{job_profile_id}/release-rule")
-async def set_release_rule(
-    job_profile_id: int,
-    body: ReleaseRule,
-    user=fastapi.Depends(get_current_admin_user),
-    session=fastapi.Depends(get_async_session),
-):
-    if not (
-        is_admin_user(user)
-        or (
-            isinstance(user.feature_permissions, dict)
-            and permits(user.feature_permissions, "interview_authoring", "update")
-        )
-    ):
-        raise fastapi.HTTPException(403, "Changing this needs permission to edit templates.")
-    profile = (
-        await session.execute(
-            sa.select(JobProfile).where(JobProfile.id == job_profile_id).with_for_update()
-        )
-    ).scalar_one_or_none()
-    if profile is None or profile.interview_mode != "assessment":
-        raise fastapi.HTTPException(404, "Assessment template not found.")
-    previous = profile.result_release
-    profile.result_release = body.result_release
-    # Applies to sittings that start from now on; started ones keep the rule they began with.
-    audit(
-        session, user, "job_profile", profile.id, "assessment_release_rule_changed",
-        body.reason, {"from": previous, "to": body.result_release},
-    )
-    await session.commit()
-    return {"id": profile.id, "result_release": profile.result_release}
-
-
-@router.get("/templates/{job_profile_id}/release-rule")
-async def get_release_rule(
-    job_profile_id: int,
-    user=fastapi.Depends(get_current_admin_user),
-    session=fastapi.Depends(get_async_session),
-):
-    profile = await session.get(JobProfile, job_profile_id)
-    if profile is None or profile.interview_mode != "assessment":
-        raise fastapi.HTTPException(404, "Assessment template not found.")
-    return {
-        "id": profile.id,
-        "result_release": profile.result_release,
-        "explanation": RELEASE_RULES[profile.result_release],
-        "can_change": is_admin_user(user)
-        or (
-            isinstance(user.feature_permissions, dict)
-            and permits(user.feature_permissions, "interview_authoring", "update")
-        ),
     }
 
 

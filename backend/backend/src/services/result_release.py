@@ -1,10 +1,9 @@
-"""Whether a student may see an AI assessment result yet (architecture pack F16).
+"""AI assessment results reach the student as soon as they are scored.
 
-A template can ask for results to be reviewed before release. That rule is frozen onto each
-sitting when it starts. Until someone releases a held result, the student's own report
-endpoints answer with a "needs review" envelope that carries no scores or feedback. The
-student app already shows that status as "Feedback needs review". Scoring itself is not
-delayed; staff see the full result on the assessment record.
+Decided 2026-11-10: an AI report is never held and needs nobody's permission. This replaces
+the per-template "review before release" rule from architecture pack F16. The old column stays
+on past rows, but nothing reads it any more. Human interview results are separate and are
+still shared by a person. Staff can still correct a score afterwards.
 """
 
 HELD_NOTICE = (
@@ -15,11 +14,7 @@ HELD_DETAIL = "This assessment result is being reviewed and has not been release
 
 
 def withheld(interview) -> bool:
-    return (
-        getattr(interview, "interview_mode", None) == "assessment"
-        and getattr(interview, "result_release", "immediate") == "review"
-        and getattr(interview, "result_released_at", None) is None
-    )
+    return False
 
 
 def held_report(report: dict) -> dict:

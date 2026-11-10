@@ -136,6 +136,7 @@ class Context:
     assignments: list[tuple[int, bool]]  # (student_id, finished) for windows closed in the period
     coaching: list[tuple[int, bool]]  # (student_id, finished) for drills due in the period
     active_ids: set[int]
+    interviewed_ids: set[int]
     assessed_ids: set[int]
 
 
@@ -590,6 +591,7 @@ async def load_context(user: User, session, days: int, course_id: str | None = N
         if (value := _extract_overall_score(reports.get(iid), summaries.get(iid))) is not None
     }
     in_period = lambda at: start <= _ist_day(at) <= today  # noqa: E731
+    interviewed_ids = {i.user_id for i in interviews if in_period(i.created_at)}
     active_ids = {i.user_id for i in interviews if in_period(i.created_at)} | {
         d.user_id for d in drills if in_period(d.completed_at)
     }
@@ -599,7 +601,7 @@ async def load_context(user: User, session, days: int, course_id: str | None = N
     }
     context = Context(
         viewer, days, list(learners.values()), interviews, scores, today, start, previous_start,
-        course_names, candidates_at, drills, assigned, coached, active_ids, assessed_ids,
+        course_names, candidates_at, drills, assigned, coached, active_ids, interviewed_ids, assessed_ids,
     )
     _cache[key] = (time.monotonic(), context)
     while len(_cache) > CACHE_ENTRIES:
@@ -896,6 +898,10 @@ def status_filters(context: Context) -> dict:
         "active": lambda p: p.id in context.active_ids,
         "inactive": lambda p: p.id not in context.active_ids,
         "assessed": lambda p: p.id in context.assessed_ids,
+        # The two lists behind the Overview's first two numbers.
+        "signed_up": lambda p: p.created_at is not None
+        and context.start <= _ist_day(p.created_at) <= context.today,
+        "interviewed": lambda p: p.id in context.interviewed_ids,
         "started": lambda p: p.last_at is not None,
         "scored": lambda p: p.last_score is not None,
         "reached_ready": lambda p: p.status == "ready" or p.put_forward,

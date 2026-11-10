@@ -137,67 +137,26 @@ def as_(who):
     return {"x-test-actor": who}
 
 
-async def test_student_sees_review_notice_until_release(held):
+async def test_ai_report_reaches_the_student_at_once_with_no_permission_needed(held):
+    """Even a sitting that started under the old "hold for review" rule is not held."""
     c, _, _, ids = held
-    url = f"/v2/summary-report/{ids['interview']}"
-    r = await c.get(url, headers=as_("student"))
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["reportStatus"] == "needs_review"
-    assert "being reviewed" in body["uncertaintyNotice"]
-    assert "finalTip" not in body and "scoreSummary" not in body
-    assert "Lead with the result" not in r.text
-
-    record = (await c.get(f"/v2/assessment-records/ai/{ids['interview']}", headers=as_("publisher"))).json()
-    assert record["result"]["held"] is True and record["can_release"] is True
-    viewer = (await c.get(f"/v2/assessment-records/ai/{ids['interview']}", headers=as_("viewer"))).json()
-    assert viewer["can_release"] is False
-
-    reason = {"reason": "Checked the answers against the rubric."}
-    release = f"/v2/assessment-records/ai/{ids['interview']}/release"
-    assert (await c.post(release, json=reason, headers=as_("viewer"))).status_code == 403
-    r = await c.post(release, json=reason, headers=as_("publisher"))
-    assert r.status_code == 200, r.text
-    assert (await c.post(release, json=reason, headers=as_("publisher"))).status_code == 409
-
-    body = (await c.get(url, headers=as_("student"))).json()
+    body = (await c.get(f"/v2/summary-report/{ids['interview']}", headers=as_("student"))).json()
     assert body["reportStatus"] == "ready"
     assert body["finalTip"]["title"] == "Lead with the result"
-    record = (await c.get(f"/v2/assessment-records/ai/{ids['interview']}", headers=as_("viewer"))).json()
-    assert [e["action"] for e in record["history"]] == ["assessment_result_released"]
+    record = (await c.get(f"/v2/assessment-records/ai/{ids['interview']}", headers=as_("publisher"))).json()
+    assert record["result"]["held"] is False and record["result"]["released"] is True
+    assert "can_release" not in record and "next_held" not in record
 
 
-async def test_overview_lists_held_results_for_releasers_only(held):
+async def test_nothing_is_left_to_release_or_configure(held):
     c, _, _, ids = held
     tasks = (await c.get("/v2/staff/tasks", headers=as_("publisher"))).json()["tasks"]
-    task = next(t for t in tasks if t["id"] == "assessment_results_to_release")
-    assert task["count"] == 1
-    assert task["action"]["href"] == f"/dashboard/samvaad/assessments/ai/{ids['interview']}"
-    tasks = (await c.get("/v2/staff/tasks", headers=as_("viewer"))).json()["tasks"]
     assert all(t["id"] != "assessment_results_to_release" for t in tasks)
-
-
-async def test_template_rule_needs_template_editing_and_is_frozen_per_sitting(held):
-    c, factory, users, ids = held
+    reason = {"reason": "Checked the answers against the rubric."}
+    gone = await c.post(f"/v2/assessment-records/ai/{ids['interview']}/release", json=reason, headers=as_("publisher"))
+    assert gone.status_code == 404
     url = f"/v2/assessment-records/templates/{ids['profile']}/release-rule"
-    body = {"result_release": "immediate", "reason": "Pilot cohort: share results straight away."}
-    assert (await c.put(url, json=body, headers=as_("viewer"))).status_code == 403
-    r = await c.put(url, json=body, headers=as_("publisher"))
-    assert r.status_code == 200 and r.json()["result_release"] == "immediate"
-    # The sitting already taken keeps the rule it started with.
-    async with factory() as s:
-        assert (await s.get(Interview, ids["interview"])).result_release == "review"
-        # A sitting started now takes the new rule; flip it back to prove the copy.
-        (await s.get(JobProfile, ids["profile"])).result_release = "review"
-        await s.commit()
-        fresh = await InterviewCRUDRepository(async_session=s).create_interview(
-            user_id=users["student"],
-            track="Analyst",
-            difficulty="easy",
-            job_profile_id=ids["profile"],
-            course_id="course-a",
-        )
-        assert fresh.result_release == "review"
+    assert (await c.get(url, headers=as_("publisher"))).status_code == 404
 
 
 async def test_corrections_keep_every_version_and_reach_the_student(held):

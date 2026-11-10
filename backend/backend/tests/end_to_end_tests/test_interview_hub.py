@@ -217,7 +217,7 @@ async def test_status_tabs_add_up_and_filters_narrow(hc):
     data = await get(c, "attempts", days=7)
     n = data["counts"]
     assert n["all"] == 4 and n["held"] + n["released"] + n["delayed"] + n["integrity"] == n["all"]
-    assert (n["held"], n["released"], n["delayed"], n["integrity"]) == (1, 1, 1, 1)
+    assert (n["held"], n["released"], n["delayed"], n["integrity"]) == (0, 2, 1, 1)
     row = next(x for x in data["items"] if x["id"] == made["held"])
     assert (row["knowledge"], row["speech"], row["score"] is not None, row["batch"]) == (70, 60, True, "Batch A")
     assert (await get(c, "attempts", days=7, status="integrity"))["total"] == 1
@@ -234,7 +234,8 @@ async def test_summary_agrees_with_learners_and_lists_work(hc):
     assert data["metrics"]["assessments"]["value"] == 4
     assert data["metrics"]["mock"]["value"] == 1
     ids = {q["id"] for q in data["queue"]}
-    assert {"attendance", "review", "held", "integrity", "delayed", "invites"} <= ids
+    assert {"attendance", "review", "integrity", "delayed", "invites"} <= ids
+    assert "held" not in ids
     assert any(i.startswith("closing-") for i in ids)
     ages = [q["oldest_days"] for q in data["queue"] if not q["id"].startswith("join-")]
     assert ages == sorted(ages, reverse=True)
@@ -254,17 +255,6 @@ async def test_human_stages_and_invitation_resend(hc):
     await post(c, f"invitations/{by['bilal']['invite_delivery_id']}/resend", code=409)
 
 
-async def test_release_needs_reason_and_skips_integrity_cases(hc):
-    c, users, made, factory = hc
-    await post(c, "attempts/release", ids=[made["held"]], reason="short", code=422)
-    done = await post(c, "attempts/release", ids=[made["held"], made["flagged"], made["shared"]], reason="Reviewed and accurate.")
-    assert done["done"] == [made["held"]] and set(done["skipped"]) == {made["flagged"], made["shared"]}
-    async with factory() as s:
-        assert (await s.get(Interview, made["held"])).result_released_at is not None
-        assert (await s.get(Interview, made["flagged"])).result_released_at is None
-    await post(c, "attempts/release", "writer", ids=[made["held"]], reason="Reviewed and accurate.", code=403)
-
-
 async def test_versions_collapse_into_one_interview(hc):
     c, users, made, _ = hc
     data = await get(c, "templates", days=30)
@@ -272,11 +262,11 @@ async def test_versions_collapse_into_one_interview(hc):
     assert names.count("Data Analyst") == 1
     assert names[0] == "Business Analyst"  # not yet live comes first
     da = next(x for x in data["items"] if x["title"] == "Data Analyst")
-    assert da["live"]["version"] == 2 and da["stats"]["finished"] == 5 and da["stats"]["held"] == 2
+    assert da["live"]["version"] == 2 and da["stats"]["finished"] == 5 and da["stats"]["held"] == 0
     detail = await get(c, f"templates/{made['v1']}")
     assert detail["id"] == made["v1"] and [v["version"] for v in detail["versions"]] == [2, 1]
     assert detail["versions"][0]["attempts"] == 4 and detail["versions"][1]["attempts"] == 1
-    assert detail["results"]["held"] == 2 and detail["results"]["assignments"][0]["not_started"] == 2
+    assert detail["results"]["held"] == 0 and detail["results"]["assignments"][0]["not_started"] == 2
 
 
 async def test_editing_a_live_interview_makes_a_draft_and_publish_replaces_it(hc):

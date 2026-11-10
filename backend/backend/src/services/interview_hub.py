@@ -469,6 +469,13 @@ async def attempts(
         "counts": counts,
         "options": {k: [{"value": a, "label": b} for a, b in v] if k != "difficulties" else v for k, v in options.items()},
         "can": viewer.can(),
+        # What the list shows, so "average score" and its rows can never disagree.
+        "average": (
+            round(sum(x["score"] for x in shown if x["score"] is not None)
+                  / sum(1 for x in shown if x["score"] is not None), 1)
+            if any(x["score"] is not None for x in shown)
+            else None
+        ),
         "items": shown[start: start + size],
     }
 
@@ -1029,18 +1036,6 @@ async def _queue_results(viewer, session, context, course, now) -> tuple[list[di
     where = [Interview.user_id.in_(ids), Interview.status == "completed", Interview.interview_mode == "assessment"]
     if course:
         where.append(Interview.course_id == course)
-    if viewer.publish:
-        rows = (
-            await session.execute(
-                sa.select(Interview.created_at)
-                .where(*where, Interview.result_release == "review", Interview.result_released_at.is_(None))
-            )
-        ).scalars().all()
-        if rows:
-            out.append(_item(
-                "held", "AI results held for review", "Learners cannot see these yet", len(rows),
-                _days_since(min(rows), now), "You", f"{BASE}/attempts?of=assessment&status=held&all=1", "send",
-            ))
     if viewer.integrity:
         cases = (
             await session.execute(

@@ -500,7 +500,7 @@ async def test_staff_queue_changes_with_selection_owner_and_state(selection):
     async def task(actor):
         async with factory() as s:
             user = await s.get(User, users[actor])
-            return await staff_tasks._selection_tasks(user, s)
+            return await staff_tasks._selection_tasks(user, s, [])
 
     assert (await task("member"))[0]["title"] == "Opportunity recommendations pending"
     assert (await task("lead"))[0]["title"] == "Opportunity decisions awaiting review"

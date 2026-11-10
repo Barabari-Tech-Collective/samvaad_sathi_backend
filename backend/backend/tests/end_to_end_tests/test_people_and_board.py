@@ -109,3 +109,22 @@ async def test_a_brand_new_learner_is_told_one_thing_to_do(api):
     action = today.json()["action"]
     assert action["href"].startswith("/")
     assert action["title"]
+
+
+async def test_every_queue_item_says_which_team_and_who(api):
+    c, factory, oid, users = api
+    from src.api.routes import staff_tasks
+
+    async with factory() as s:
+        directory = await staff_tasks._directory(s)
+    assert {d.id for d in directory} >= {users["lead"], users["member"]}
+    placement = [staff_tasks.Staff(i, n, staff_tasks.PLACEMENT, frozenset({"a"})) for i, n in [(1, "Asha"), (2, "Ravi"), (3, "Bilal"), (4, "Zoya")]]
+    task = staff_tasks._owned(staff_tasks._task("x", "T", 1, "d", "o", "go", "/", True), staff_tasks.PLACEMENT, placement)
+    assert task["team"] == "Placement team" and task["area"] == "team"
+    assert task["people"] == ["Asha", "Bilal", "Ravi"] and task["more"] == 1
+    admin = staff_tasks._owned(staff_tasks._task("y", "T", 1, "d", "o", "go", "/", True), staff_tasks.ADMIN)
+    assert admin["area"] == "admin" and admin["people"] == []
+    other = staff_tasks.Staff(9, "Neha", staff_tasks.PROGRAM, frozenset({"b"}))
+    assert staff_tasks._crew([*placement, other], staff_tasks.PROGRAM, {"b"}) == [other]
+    # Nobody on the course yet: still name the team rather than nobody at all.
+    assert staff_tasks._crew([*placement, other], staff_tasks.PROGRAM, {"zzz"}) == [other]

@@ -199,46 +199,6 @@ class Release(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
-@router.post("/attempts/release")
-async def release_many(
-    body: Release,
-    user=fastapi.Depends(get_current_admin_user),
-    session=fastapi.Depends(get_async_session),
-):
-    if not may_release(user):
-        raise fastapi.HTTPException(403, "Releasing results needs permission to publish assessments.")
-    rows = (
-        await session.execute(
-            sa.select(Interview, User)
-            .join(User, User.id == Interview.user_id)
-            .where(Interview.id.in_(body.ids), Interview.interview_mode == "assessment", student_interview())
-            .with_for_update(of=Interview)
-        )
-    ).all()
-    blocked = await hub._open_cases(session, [r[0].id for r in rows])
-    now = dt.datetime.now(UTC)
-    done, skipped = [], []
-    for interview, student in rows:
-        reachable = await ai_reachable(user, interview, student, session)
-        if not reachable or interview.status != "completed" or not withheld(interview) or interview.id in blocked:
-            skipped.append(interview.id)
-            continue
-        interview.result_released_at, interview.result_released_by = now, user.id
-        release_audit(
-            session, user, "interview", interview.id, "assessment_result_released", body.reason,
-            {"student_id": interview.user_id, "course_id": interview.course_id},
-        )
-        notifications.notify(
-            session, interview.user_id, "assessment_result_released", "Your assessment result is ready",
-            "Your feedback has been reviewed and released.", "/assessments", ("interview", interview.id),
-        )
-        done.append(interview.id)
-    await session.commit()
-    lh.forget(user.id)
-    found = {r[0].id for r in rows}
-    return {"done": done, "skipped": skipped + [i for i in body.ids if i not in found]}
-
-
 @router.get("/attempts")
 async def attempts(
     response: fastapi.Response,

@@ -3,9 +3,11 @@
 Architecture pack sec 13 (task-oriented Overview), sec 10 (clear next owner) and sec 12
 (truthful status). Every task is filtered by the same rules as the page it links to, carries
 its next action, and is omitted when nothing is pending, so the Overview never shows a wall
-of zeros. Counts only; no student answers, feedback or names leave this endpoint.
+of zeros. Counts only; no student answers or feedback leave this endpoint. Each task says
+which team it is waiting on and names the staff on it.
 """
 
+import dataclasses
 import datetime as dt
 
 import fastapi
@@ -15,9 +17,12 @@ from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.session import get_async_session
 from src.models.db.human_interview import HumanInterview
 from src.models.db.job_profile import JobProfile
+from src.models.db.team import Team
+from src.models.db.team_member import TeamMember
 from src.models.db.user import User
 from src.services import human_interviews as interviews
 from src.services.analytics import AnalyticsService
+from src.services.staff_roles import canonical_role
 
 router = fastapi.APIRouter(prefix="/v2/staff", tags=["staff-tasks"])
 
@@ -26,6 +31,64 @@ HUMAN = "/dashboard/samvaad/human-interviews"
 
 # Staff are in India: "today" is an Indian day.
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+
+
+PROGRAM, PLACEMENT, ADMIN = "Program team", "Placement team", "Admin"
+FACILITATORS = {"facilitator", "senior facilitator", "junior facilitator", "program manager"}
+PLACEMENT_ROLES = {"placement staff", "recruiter", "partnership staff"}
+SHOWN_NAMES = 3
+
+
+@dataclasses.dataclass(frozen=True)
+class Staff:
+    id: int
+    name: str
+    group: str | None
+    courses: frozenset
+
+
+async def _directory(session) -> list[Staff]:
+    """Everyone active on a team, and which side of the programme they work on."""
+    rows = await session.execute(
+        sa.select(TeamMember.user_id, TeamMember.access_role, TeamMember.course_ids,
+                  Team.name, User.name, User.email)
+        .join(Team, Team.id == TeamMember.team_id)
+        .join(User, User.id == TeamMember.user_id)
+        .where(TeamMember.status == "active", Team.status == "active")
+    )
+    out = []
+    for uid, role, courses, team, name, email in rows.all():
+        try:
+            duty = canonical_role(role or "")
+        except ValueError:
+            duty = ""
+        label = (team or "").casefold()
+        group = (
+            PLACEMENT if "placement" in label or duty in PLACEMENT_ROLES
+            else PROGRAM if "program" in label or duty in FACILITATORS
+            else None
+        )
+        out.append(Staff(uid, name or email, group,
+                         frozenset(courses if isinstance(courses, list) else [])))
+    return out
+
+
+def _crew(directory, group, courses=None):
+    """The people on a team, narrowed to the courses concerned when that leaves anyone."""
+    team = [s for s in directory if s.group == group]
+    if courses:
+        on_course = [s for s in team if s.courses & set(courses)]
+        team = on_course or team
+    return team
+
+
+def _owned(task, team, people=(), viewer=None):
+    """Say which team a task is waiting on and name the people on it."""
+    names = sorted({"You" if viewer and p.id == viewer.id else p.name for p in people},
+                   key=lambda n: (n != "You", n.casefold()))
+    task.update(team=team, people=names[:SHOWN_NAMES], more=max(0, len(names) - SHOWN_NAMES),
+                area="admin" if team == ADMIN else "team")
+    return task
 
 
 def _task(id, title, count, detail, owner, action, href, attention, oldest_at=None):
@@ -56,7 +119,7 @@ def _day_bounds(now):
     return start, start + dt.timedelta(days=1)
 
 
-async def _human_tasks(user, session, now):
+async def _human_tasks(user, session, now, directory):
     """Interviews this person runs: admins see all, others only the ones they host."""
     if not interviews.permitted(user, "read"):
         return []
@@ -69,6 +132,27 @@ async def _human_tasks(user, session, now):
     async def stats(*where):
         n, oldest = (await session.execute(base.where(*where))).one()
         return int(n or 0), oldest
+
+    async def hosts(*where):
+        """The interviewers these rows are waiting on, under their own team when they have one."""
+        ids = set(
+            (
+                await session.execute(
+                    sa.select(sa.func.coalesce(HumanInterview.interviewer_id, HumanInterview.host_id))
+                    .join(User, User.id == HumanInterview.student_id)
+                    .where(*_interview_scope(user), *where)
+                    .distinct()
+                )
+            ).scalars()
+        )
+        known = {s.id: s for s in directory if s.id in ids and s.group}
+        missing = ids - known.keys()
+        named = dict(
+            (await session.execute(sa.select(User.id, User.name).where(User.id.in_(missing)))).all()
+        ) if missing else {}
+        people = [*known.values(), *(Staff(i, n or "Interviewer", None, frozenset()) for i, n in named.items())]
+        groups = {p.group for p in known.values()}
+        return (groups.pop() if len(groups) == 1 and not missing else "Interviewers"), people
 
     day_start, day_end = _day_bounds(now)
     scheduled = HumanInterview.status == "scheduled"
@@ -91,29 +175,31 @@ async def _human_tasks(user, session, now):
     owner = "You" if not is_admin_user(user) else "The interviewer"
     tasks = []
     if overdue:
-        tasks.append(_task(
+        team, people = await hosts(scheduled, HumanInterview.ends_at < now)
+        tasks.append(_owned(_task(
             "interviews_awaiting_attendance", "Awaiting attendance update", overdue,
             "The meeting time has passed but nobody recorded whether it happened.",
             owner, "Record what happened", HUMAN, True, overdue_since,
-        ))
+        ), team, people, user))
     if no_feedback:
-        tasks.append(_task(
+        team, people = await hosts(HumanInterview.status == "completed", HumanInterview.result.is_(None))
+        tasks.append(_owned(_task(
             "interviews_awaiting_feedback", "Feedback awaiting submission", no_feedback,
             "The interview took place; the result and feedback are not in yet.",
             owner, "Add the result", HUMAN, True, feedback_since,
-        ))
+        ), team, people, user))
     if unreleased:
-        tasks.append(_task(
+        tasks.append(_owned(_task(
             "interviews_release_pending", "Result not shared yet", unreleased,
             "A result is recorded but the student cannot see it until it is shared.",
             "Placement lead", "Review and share", HUMAN, True, unreleased_since,
-        ))
+        ), PLACEMENT, _crew(directory, PLACEMENT), user))
     if upcoming:
-        tasks.append(_task(
+        tasks.append(_owned(_task(
             "interviews_upcoming", "Human interviews in the next 7 days", upcoming,
             f"{today} today." if today else "None today.",
             owner, "See the schedule", HUMAN, False,
-        ))
+        ), "Interviewers"))
     return tasks
 
 
@@ -156,7 +242,7 @@ async def _today(user, session, now):
     ]
 
 
-async def _support_tasks(user, session, now):
+async def _support_tasks(user, session, now, directory):
     """Learners whose practice needs a look (pack F23), summed across every course where this
     person may open the support queue, under that queue's own consent and scope rules."""
     from src.api.routes.course_workspace import _shared_student_predicate
@@ -181,6 +267,7 @@ async def _support_tasks(user, session, now):
     else:
         courses = sorted({c for g in await grants_for(user, session) for c in g.course_ids})
     waiting, oldest_course, oldest = 0, None, None
+    affected = set()
     for course_id in courses:
         if not await course_support.can_open(user, course_id, session):
             continue
@@ -200,19 +287,20 @@ async def _support_tasks(user, session, now):
         ).one()
         if n:
             waiting += int(n)
+            affected.add(course_id)
             if oldest is None or first < oldest:
                 oldest, oldest_course = first, course_id
     if not waiting:
         return []
-    return [_task(
+    return [_owned(_task(
         "support_follow_ups", "Learners whose practice needs a look", waiting,
         "Blocked sessions, delayed feedback or failed answers. Saved work is kept.",
         "Facilitator", "Open support",
         f"/dashboard/samvaad/courses/{oldest_course}/support", True, oldest,
-    )]
+    ), PROGRAM, _crew(directory, PROGRAM, affected), user)]
 
 
-async def _scorecard_tasks(user, session):
+async def _scorecard_tasks(user, session, directory):
     """Human interview scorecards submitted and waiting for a reviewer (pack F20)."""
     from src.api.routes.human_scorecards import can_review
     from src.models.db.human_scorecard import HumanScorecard
@@ -235,15 +323,15 @@ async def _scorecard_tasks(user, session):
     if not submitted:
         return []
     first = submitted[0]
-    return [_task(
+    return [_owned(_task(
         "scorecards_to_review", "Interview scorecards to review", len(submitted),
         "Approve or return each one; only an approved scorecard can be shared with the student.",
         "Reviewer", "Review scorecards",
         f"/dashboard/samvaad/assessments/human/{first.id}", True, first.submitted_at,
-    )]
+    ), PLACEMENT, _crew(directory, PLACEMENT, {r.course_id for r in submitted}), user)]
 
 
-async def _issue_tasks(user, session):
+async def _issue_tasks(user, session, directory):
     """Transcript or feedback problems students reported (pack F11), for content reviewers."""
     from src.api.routes.feedback_issues import reviewer
     from src.models.db.feedback_issue import FeedbackIssue
@@ -259,44 +347,11 @@ async def _issue_tasks(user, session):
     ).one()
     if not n:
         return []
-    return [_task(
+    return [_owned(_task(
         "feedback_issues_open", "Reported transcript or feedback issues", int(n),
         "A student says something looks wrong. Their saved answer is unchanged until you decide.",
         "Content reviewer", "Review issues", "/dashboard/samvaad/issues", True, oldest,
-    )]
-
-
-async def _release_tasks(user, session):
-    """AI assessment results held for review (pack F16), for people who may release them."""
-    from src.api.routes.assessment_records import may_release
-    from src.models.db.interview import Interview
-    from src.services.people import student_interview
-
-    if not may_release(user):
-        return []
-    n, oldest, first = (
-        await session.execute(
-            sa.select(
-                sa.func.count(Interview.id),
-                sa.func.min(Interview.completed_at),
-                sa.func.min(Interview.id),
-            ).where(
-                Interview.interview_mode == "assessment",
-                Interview.result_release == "review",
-                Interview.result_released_at.is_(None),
-                Interview.status == "completed",
-                student_interview(),
-            )
-        )
-    ).one()
-    if not n:
-        return []
-    return [_task(
-        "assessment_results_to_release", "Assessment results to release", int(n),
-        "Students see “Feedback needs review” until a result is released.",
-        "Reviewer", "Review and release",
-        f"/dashboard/samvaad/assessments/ai/{first}", True, oldest,
-    )]
+    ), PROGRAM, _crew(directory, PROGRAM), user)]
 
 
 async def _review_tasks(user, session):
@@ -318,21 +373,21 @@ async def _review_tasks(user, session):
     since = {mode: oldest for mode, _, oldest in rows}
     tasks = []
     if counts.get("assessment"):
-        tasks.append(_task(
+        tasks.append(_owned(_task(
             "templates_review_assessment", "Assessment templates to review",
             counts["assessment"],
             "Students cannot take these until someone approves and publishes them.",
-            "Reviewer", "Review and publish", "/dashboard/samvaad/roles", True,
+            "Admin", "Review and publish", "/dashboard/samvaad/roles", True,
             since["assessment"],
-        ))
+        ), ADMIN))
     if counts.get("practice"):
-        tasks.append(_task(
+        tasks.append(_owned(_task(
             "templates_review_mock", "Mock interview templates to review",
             counts["practice"],
             "Students cannot practise with these until they are published.",
-            "Reviewer", "Review and publish", "/dashboard/samvaad/practice-templates",
+            "Admin", "Review and publish", "/dashboard/samvaad/practice-templates",
             True, since["practice"],
-        ))
+        ), ADMIN))
     return tasks
 
 
@@ -348,15 +403,15 @@ async def _operations_tasks(user, session, now):
         return []
     failed = sum(a["count"] for a in alerts if a["severity"] == "high")
     oldest = now - dt.timedelta(minutes=max(a["oldest_age_minutes"] for a in alerts))
-    return [_task(
+    return [_owned(_task(
         "processing_failures", "Answers waiting on processing", stuck,
         f"{failed} failed, {stuck - failed} stalled for over 10 minutes. "
         "Answers are saved; feedback needs recovery.",
-        "Operations", "Open failures", "/dashboard/samvaad/alerts", True, oldest,
-    )]
+        "Admin", "Open failures", "/dashboard/samvaad/alerts", True, oldest,
+    ), ADMIN)]
 
 
-async def _selection_tasks(user, session):
+async def _selection_tasks(user, session, directory):
     from src.models.db.opportunity import Opportunity
     from src.services import course_shortlists, opportunity_selection, opportunities
 
@@ -404,15 +459,20 @@ async def _selection_tasks(user, session):
             continue
         if count:
             tasks.append(
-                _task(
-                    f"selection_{opening.id}",
-                    title,
-                    count,
-                    opening.title,
-                    "You",
-                    action,
-                    f"/dashboard/samvaad/opportunities/{opening.id}#selection",
-                    True,
+                _owned(
+                    _task(
+                        f"selection_{opening.id}",
+                        title,
+                        count,
+                        opening.title,
+                        "Placement team",
+                        action,
+                        f"/dashboard/samvaad/opportunities/{opening.id}#selection",
+                        True,
+                    ),
+                    PLACEMENT,
+                    _crew(directory, PLACEMENT, {opening.course_id}),
+                    user,
                 )
             )
     return tasks
@@ -425,13 +485,13 @@ async def my_tasks(
     session=fastapi.Depends(get_async_session),
 ):
     now = dt.datetime.now(dt.timezone.utc)
+    directory = await _directory(session)
     tasks = [
-        *await _human_tasks(user, session, now),
-        *await _selection_tasks(user, session),
-        *await _support_tasks(user, session, now),
-        *await _scorecard_tasks(user, session),
-        *await _issue_tasks(user, session),
-        *await _release_tasks(user, session),
+        *await _human_tasks(user, session, now, directory),
+        *await _selection_tasks(user, session, directory),
+        *await _support_tasks(user, session, now, directory),
+        *await _scorecard_tasks(user, session, directory),
+        *await _issue_tasks(user, session, directory),
         *await _review_tasks(user, session),
         *await _operations_tasks(user, session, now),
     ]
