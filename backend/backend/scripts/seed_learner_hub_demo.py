@@ -56,6 +56,7 @@ def refuse_unless_staging(url) -> None:
 
 
 async def remove(factory) -> int:
+    from src.models.db.assessment_assignment import AssessmentAssignment
     from src.models.db.human_interview import HumanInterview
     from src.models.db.integrity_case import IntegrityCase
     from src.models.db.job_profile import JobProfile
@@ -67,6 +68,11 @@ async def remove(factory) -> int:
         # These point at people or templates in a way that blocks a simple delete.
         await s.execute(sa.delete(IntegrityCase).where(IntegrityCase.student_id.in_(demo_users)))
         await s.execute(sa.delete(HumanInterview).where(HumanInterview.student_id.in_(demo_users)))
+        await s.execute(
+            sa.delete(AssessmentAssignment).where(
+                AssessmentAssignment.student_id.in_(demo_users) | AssessmentAssignment.assigned_by.in_(demo_users)
+            )
+        )
         result = await s.execute(sa.delete(User).where(User.email.like(f"%@{DOMAIN}")))
         # Published templates are locked by database triggers. The triggers are switched off
         # only inside this transaction, so nothing else ever sees them off.
