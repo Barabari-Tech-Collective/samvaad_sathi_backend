@@ -398,6 +398,34 @@ async def update_job_profile_review(
     return JobProfileResponse.model_validate(updated_profile)
 
 
+@router.post(
+    path="/job-profiles/{job_profile_id}/revise",
+    name="job-profiles:revise",
+    response_model=JobProfileResponse,
+    status_code=fastapi.status.HTTP_201_CREATED,
+    summary="Start the next version of a published interview role as a draft copy, or return the open one",
+)
+async def revise_job_profile(
+    job_profile_id: int,
+    current_admin=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+) -> JobProfileResponse:
+    if not is_admin_user(current_admin):
+        raise fastapi.HTTPException(
+            403,
+            "Administrator review access is required to revise a published role.",
+        )
+    draft_copy = await job_profile_repo.create_revision(job_profile_id)
+    if not draft_copy:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+    return JobProfileResponse.model_validate(draft_copy)
+
+
 @router.get(
     path="/job-profiles/{job_profile_id}/review",
     name="job-profiles:get-review",
