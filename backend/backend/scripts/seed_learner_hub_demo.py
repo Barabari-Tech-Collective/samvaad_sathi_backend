@@ -23,7 +23,7 @@ sys.path.insert(0, os.getcwd())
 import sqlalchemy as sa  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
-STAGING_DATABASE = "a4c195ef3ae1185626ea094b6efacd9a13ef0a40baee8c0d9406b11e2c669bb0"
+STAGING_DATABASE = "90e4ddde0ec04cb461be052445686f374e1fa118d3e0f9699501b9c42a60fbc1"
 DOMAIN = "demo.samvaad.invalid"
 PLACES = [
     ("Ranchi College", "demo-ds"), ("Ranchi College", "demo-web"), ("ranchi clg", "demo-ds"),
@@ -68,7 +68,17 @@ async def remove(factory) -> int:
         await s.execute(sa.delete(IntegrityCase).where(IntegrityCase.student_id.in_(demo_users)))
         await s.execute(sa.delete(HumanInterview).where(HumanInterview.student_id.in_(demo_users)))
         result = await s.execute(sa.delete(User).where(User.email.like(f"%@{DOMAIN}")))
+        # Published templates are locked by database triggers. The triggers are switched off
+        # only inside this transaction, so nothing else ever sees them off.
+        for trigger in ("job_profile ss_guard_publication", "job_profile_question ss_guard_published_question"):
+            table, name = trigger.split()
+            await s.execute(sa.text(f"ALTER TABLE {table} DISABLE TRIGGER {name}"))
+        demo_templates = sa.select(JobProfile.id).where(JobProfile.job_name.like(f"%{TEMPLATE_MARK}"))
+        await s.execute(sa.update(JobProfile).where(JobProfile.parent_profile_id.in_(demo_templates)).values(parent_profile_id=None))
         await s.execute(sa.delete(JobProfile).where(JobProfile.job_name.like(f"%{TEMPLATE_MARK}")))
+        for trigger in ("job_profile ss_guard_publication", "job_profile_question ss_guard_published_question"):
+            table, name = trigger.split()
+            await s.execute(sa.text(f"ALTER TABLE {table} ENABLE TRIGGER {name}"))
         await s.execute(sa.delete(Team).where(Team.name == DEMO_TEAM))
         await s.commit()
     return result.rowcount
@@ -193,14 +203,20 @@ async def seed_interviews(factory, now) -> None:
         await s.flush()
         s.add(TeamMember(team_id=team.id, user_id=host.id, access_role="Team Member", purposes=[]))
 
+        # Questions cannot be added to a published template, so every template starts as a
+        # draft and is published afterwards, the same order the app uses.
+        to_publish = []
+
         def template(name, course, skills, status, mode="assessment", per=5, parent=None, age=None, comment=None, rule="immediate"):
-            return JobProfile(
+            profile = JobProfile(
                 job_name=f"{name}{TEMPLATE_MARK}", job_description=f"Demo {name} role. The learner explains their own work clearly.",
                 company_name=None, category="IT", experience_level="Fresher", employment_type="Full-time", skills=skills,
-                course_ids=[course], status=status, interview_mode=mode, questions_per_interview=per,
+                course_ids=[course], status="draft" if status == "published" else status, interview_mode=mode, questions_per_interview=per,
                 authoring_mode="manual", parent_profile_id=parent, result_release=rule, admin_comment=comment,
-                published_at=now - age * day if age else None,
             )
+            if status == "published":
+                to_publish.append((profile, now - (age or 1) * day))
+            return profile
 
         analyst_v1 = template("Data Analyst", "demo-ds", ["SQL joins", "data cleaning", "dashboards"], "published", age=40, rule="review")
         s.add(analyst_v1)
@@ -229,6 +245,19 @@ async def seed_interviews(factory, now) -> None:
             s.add_all(demo_questions(profile.id, profile.skills, (6, 6, 6, 6)))
         for profile, counts in extras:
             s.add_all(demo_questions(profile.id, profile.skills, counts))
+        await s.flush()
+        for profile, published_at in to_publish:
+            # Same published copy the app keeps: the template and its questions as they were.
+            await s.execute(
+                sa.text(
+                    """UPDATE job_profile p SET status='published', published_at=:at,
+                    publication_snapshot=jsonb_build_object('version',1,'publishedAt',CAST(:iso AS text),
+                    'profile',to_jsonb(p)-'publication_snapshot'-'status'-'published_at',
+                    'questions',COALESCE((SELECT jsonb_agg(to_jsonb(q) ORDER BY q.id) FROM job_profile_question q WHERE q.job_profile_id=p.id),'[]'::jsonb))
+                    WHERE p.id=:id"""
+                ),
+                {"id": profile.id, "at": published_at, "iso": published_at.isoformat()},
+            )
 
         rows = (
             await s.execute(
