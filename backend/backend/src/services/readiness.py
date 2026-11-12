@@ -70,6 +70,64 @@ def judge(rule, scores, mocks, drills):
     return status, checks
 
 
+async def ready_students(session, by_course: dict[str, list[int]], now=None) -> set[int]:
+    """Students who are ready in at least one of their courses.
+
+    Same rule as ``assess`` for every course, in three queries instead of four per
+    course. Staff pages build this for every learner on each load.
+    """
+    now = now or dt.datetime.now(UTC)
+    courses = [c for c, ids in by_course.items() if ids]
+    if not courses:
+        return set()
+    rows = (
+        await session.execute(sa.select(ReadinessRule).where(ReadinessRule.course_id.in_(courses)))
+    ).scalars().all()
+    rules = {c: rule_view(None) for c in courses} | {r.course_id: rule_view(r) for r in rows}
+    since = {c: now - dt.timedelta(days=rules[c]["window_days"]) for c in courses}
+    earliest = min(since.values())
+    ids = sorted({sid for c in courses for sid in by_course[c]})
+    scores = {(sid, c): [] for c in courses for sid in by_course[c]}
+    mocks = {key: 0 for key in scores}
+    for uid, course, at, report in (
+        await session.execute(
+            sa.select(Interview.user_id, Interview.course_id, Interview.completed_at, SummaryReport.report_json)
+            .outerjoin(SummaryReport, SummaryReport.interview_id == Interview.id)
+            .where(
+                Interview.user_id.in_(ids),
+                Interview.course_id.in_(courses),
+                Interview.interview_mode == "practice",
+                Interview.status == "completed",
+                Interview.completed_at >= earliest,
+            )
+            .order_by(Interview.completed_at)
+        )
+    ).all():
+        key = (uid, course)
+        if key not in scores or at < since[course]:
+            continue
+        mocks[key] += 1
+        value = score_of(report)
+        if value is not None:
+            scores[key].append(value)
+    drill_times: dict[int, list] = {}
+    for uid, at in (
+        await session.execute(
+            sa.select(PracticeDrillCompletion.user_id, PracticeDrillCompletion.completed_at).where(
+                PracticeDrillCompletion.user_id.in_(ids),
+                PracticeDrillCompletion.completed_at >= earliest,
+            )
+        )
+    ).all():
+        drill_times.setdefault(uid, []).append(at)
+    ready = set()
+    for (sid, c) in scores:
+        drills = sum(1 for at in drill_times.get(sid, []) if at >= since[c])
+        if judge(rules[c], scores[(sid, c)], mocks[(sid, c)], drills)[0] == "ready":
+            ready.add(sid)
+    return ready
+
+
 async def assess(session, course_id, student_ids, rule, now=None):
     """Readiness for each student id, keyed by id."""
     now = now or dt.datetime.now(UTC)

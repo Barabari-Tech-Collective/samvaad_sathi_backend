@@ -642,13 +642,14 @@ async def templates(user, session, mode, days, course) -> dict:
     )
     stats: dict[int, dict] = {}
     if viewer.people is not None:
-        context = await lh.load_context(user, session, days)
-        ids = [p.id for p in context.learners]
+        # Only the learners in the viewer's scope count. Filtering them inside this query
+        # replaces building the whole learner context (about 30 database trips) just for ids.
+        in_scope = sa.select(User.id).where(student_only(), lh._scope_clause(viewer.people))
         owner = {pid: f.root for f in found for pid in f.ids}
         rows = (
             await session.execute(
                 sa.select(Interview).where(
-                    Interview.user_id.in_(ids) if ids else sa.false(),
+                    Interview.user_id.in_(in_scope),
                     Interview.job_profile_id.in_(owner) if owner else sa.false(),
                     Interview.status == "completed",
                     Interview.interview_mode == mode,
