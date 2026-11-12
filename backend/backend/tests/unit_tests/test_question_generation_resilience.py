@@ -222,3 +222,35 @@ def test_shape_errors_are_not_reported_as_an_outage():
     )
     assert "unexpected format" in safe_generation_failure_message(error)
     assert "unavailable" in safe_generation_failure_message(RuntimeError("503 Service Unavailable"))
+
+
+async def test_repeats_are_replaced_so_a_level_fills_up(monkeypatch):
+    """Staging 2026-11-12: 149 of 200 were saved because repeats were dropped and never replaced."""
+    from src.services import question_generation as qg
+
+    calls = []
+
+    async def fake_batch(**kwargs):
+        calls.append(kwargs)
+        n = len(calls)
+        if n == 1:  # 10 asked for; half are repeats of each other or of the draft
+            texts = ["Q1", "q1", "Q2", "  q2 ", "Q3", "Existing one", "Q4", "Q4", "Q5", ""]
+        else:
+            texts = [f"Fresh {n}-{i}" for i in range(kwargs["count"])]
+        return None, None, 0, "m", [{"text": t} for t in texts]
+
+    monkeypatch.setattr(qg, "generate_question_batch_with_retry", fake_batch)
+    monkeypatch.setattr(qg, "BATCH_SIZE", 10)
+    out = await qg.generate_questions_for_level(
+        level=1,
+        count=10,
+        track="Dev",
+        context_text="Build web apps",
+        skills_list=["SQL"],
+        experience_level="fresher",
+        existing_questions=["existing ONE"],
+    )
+    texts = [item["text"] for _, _, item in out]
+    assert len(texts) == 10 and len({t.casefold() for t in texts}) == 10
+    assert "Existing one" not in texts
+    assert "Existing one" in calls[-1]["influence"]["exclude_questions"] or "existing ONE" in calls[-1]["influence"]["exclude_questions"]
