@@ -185,3 +185,40 @@ async def test_first_failed_poll_is_sanitized_before_it_reaches_the_staff_ui(mon
     assert result.status == "failed"
     assert result.error == "Question generation could not be completed. Your draft is safe; retry."
     assert "secret" not in result.error
+
+
+def test_comma_separated_lists_from_the_model_are_accepted():
+    """Staging 2026-11-12: DeepSeek sent concepts_covered as one string and every batch failed."""
+    from src.services.llm import QuestionsResponseLLM
+
+    parsed = QuestionsResponseLLM.model_validate(
+        {
+            "items": [
+                {
+                    "text": "How would you isolate a failing micro-frontend after a deployment?",
+                    "keywords": "error boundary; rollback",
+                    "concepts_covered": "Error boundaries, micro-frontend isolation, graceful degradation",
+                    "expected_answer": ["Isolate the module.", "Roll back."],
+                }
+            ]
+        }
+    )
+    item = parsed.items[0]
+    assert item.concepts_covered == [
+        "Error boundaries",
+        "micro-frontend isolation",
+        "graceful degradation",
+    ]
+    assert item.keywords == ["error boundary", "rollback"]
+    assert item.expected_answer == "Isolate the module.\nRoll back."
+
+
+def test_shape_errors_are_not_reported_as_an_outage():
+    from src.services.question_generation_failures import safe_generation_failure_message
+
+    error = RuntimeError(
+        "LLM batch 3 failed for level 3 (hard): 15 validation errors for QuestionsResponseLLM "
+        "Input should be a valid list [input_value='database connection pooling, timeout handling']"
+    )
+    assert "unexpected format" in safe_generation_failure_message(error)
+    assert "unavailable" in safe_generation_failure_message(RuntimeError("503 Service Unavailable"))

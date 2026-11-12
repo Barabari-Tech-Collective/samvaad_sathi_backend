@@ -1,5 +1,6 @@
 import json
 import random
+import re
 import time
 from typing import Any, Type, List, Dict, Literal, TypeVar, Optional, Union
 import logging
@@ -1116,6 +1117,23 @@ class QuestionsItemLLM(BaseItemLLM):
     concepts_covered: list[str] | None = None
     expected_answer: str | None = None
     example_output: str | None = None
+
+    @pydantic.field_validator("keywords", "concepts_covered", mode="before")
+    @classmethod
+    def _split_text_lists(cls, value):
+        # Models sometimes send "a, b, c" instead of ["a", "b", "c"]. One such field used to
+        # reject the whole batch of questions, so accept both shapes.
+        if isinstance(value, str):
+            parts = [p.strip() for p in re.split(r"[,;\n]", value)]
+            return [p for p in parts if p]
+        return value
+
+    @pydantic.field_validator("expected_answer", "example_output", mode="before")
+    @classmethod
+    def _join_text(cls, value):
+        if isinstance(value, list):
+            return "\n".join(str(v).strip() for v in value if str(v).strip())
+        return value
 
 
 class QuestionsResponseLLM(pydantic.BaseModel):
