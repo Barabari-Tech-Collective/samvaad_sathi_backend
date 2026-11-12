@@ -263,6 +263,11 @@ async def test_versions_collapse_into_one_interview(hc):
     assert names[0] == "Business Analyst"  # not yet live comes first
     da = next(x for x in data["items"] if x["title"] == "Data Analyst")
     assert da["live"]["version"] == 2 and da["stats"]["finished"] == 5 and da["stats"]["held"] == 0
+    # The list carries what the old Roles cards showed: counts per level, dates and who made it.
+    assert len(da["counts"]) == 4 and all(isinstance(n, int) for n in da["counts"])
+    assert da["created_at"] and da["updated_at"] and "category" in da and "author" in da
+    ba = next(x for x in data["items"] if x["title"] == "Business Analyst")
+    assert ba["counts"] == ba["draft"]["readiness"]["counts"]
     detail = await get(c, f"templates/{made['v1']}")
     assert detail["id"] == made["v1"] and [v["version"] for v in detail["versions"]] == [2, 1]
     assert detail["versions"][0]["attempts"] == 4 and detail["versions"][1]["attempts"] == 1
