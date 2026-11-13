@@ -18,6 +18,8 @@ from src.services.interview_session_lease import (
 )
 
 PRACTICE_SESSION_TTL = datetime.timedelta(days=7)
+# Track prefix the role (non-tech) flow gives every interview it creates.
+ROLE_TRACK_PREFIX = "Non-Tech:"
 
 
 class InterviewCRUDRepository(BaseCRUDRepository):
@@ -137,6 +139,29 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         query = await self.async_session.execute(statement=stmt)
         return query.scalar()  # type: ignore
 
+    async def _resolve_role_track(self, track: str, job_profile_model):
+        """(job_profile_id, interview_mode) for a "Non-Tech: <role>" track.
+
+        Falls back to assessment, not practice, when the role cannot be found:
+        the prefix exists only on role-created interviews, which were assessments
+        before the two modes were split.
+        """
+        role_name = " ".join(track[len(ROLE_TRACK_PREFIX):].split()).lower()
+        stmt = (
+            sqlalchemy.select(job_profile_model)
+            .where(
+                sqlalchemy.func.lower(sqlalchemy.func.trim(job_profile_model.job_name))
+                == role_name
+            )
+            .order_by(job_profile_model.id.desc())
+        )
+        profiles = (await self.async_session.execute(stmt)).scalars().all()
+        # Several roles can share a name (clones, practice + assessment twins);
+        # only an unambiguous match may decide the mode.
+        if len({profile.interview_mode for profile in profiles}) == 1:
+            return profiles[0].id, profiles[0].interview_mode
+        return None, "assessment"
+
     async def create_interview(
         self,
         *,
@@ -177,14 +202,23 @@ class InterviewCRUDRepository(BaseCRUDRepository):
         )
 
         configured_count(question_count)
-        if job_profile_id is not None:
-            from src.models.db.job_profile import JobProfile
+        from src.models.db.job_profile import JobProfile
 
+        id_given = job_profile_id is not None
+        if job_profile_id is None and track.startswith(ROLE_TRACK_PREFIX):
+            # A role interview started by track name alone (the generic create
+            # endpoints take no job_profile_id) is still a role interview. It
+            # used to snapshot "practice" here, which is how roles created by
+            # staff ended up in the Practice feature.
+            job_profile_id, interview_mode = await self._resolve_role_track(
+                track, JobProfile
+            )
+        if job_profile_id is not None:
             profile = await self.async_session.get(JobProfile, job_profile_id)
             if profile is not None:
                 interview_mode = profile.interview_mode
                 result_release = getattr(profile, "result_release", "immediate")
-                if question_count is not None:
+                if question_count is not None and id_given:
                     raise ValueError("The creator controls a curated interview's count")
                 if (
                     getattr(profile, "questions_per_interview", None) is not None
