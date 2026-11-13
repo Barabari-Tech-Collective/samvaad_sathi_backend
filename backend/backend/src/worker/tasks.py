@@ -272,6 +272,9 @@ async def generate_questions_task(
         # every profile value the worker needs before releasing the transaction.
         experience_level = profile.experience_level
         category = profile.category
+        existing: dict[int, list[str]] = {}
+        for question in await repo.get_job_profile_questions(job_profile_id):
+            existing.setdefault(question.level, []).append(question.question_text)
 
         await session.rollback()
         results = await generate_question_levels(
@@ -282,6 +285,7 @@ async def generate_questions_task(
             experience_level=experience_level,
             category=category,
             knowledge_reference_context=knowledge_reference_context,
+            existing_questions=existing,
         )
 
         generated_questions_data = []
@@ -302,13 +306,18 @@ async def generate_questions_task(
                     }
                 )
 
+        # Every requested level must get questions. A level a few short of the request is
+        # saved as it is (staff can add or regenerate); failing the whole bank wasted the work.
         for level in levels:
-            if (
-                sum(1 for q in generated_questions_data if q["level"] == level["level"])
-                != level["count"]
-            ):
+            got = sum(1 for q in generated_questions_data if q["level"] == level["level"])
+            if level["count"] and got == 0:
                 raise ValueError(
                     "AI returned a short question bank; existing draft was preserved."
+                )
+            if got < level["count"]:
+                logger.warning(
+                    "generate_questions_task: level %s got %d of %d for job profile %d",
+                    level["level"], got, level["count"], job_profile_id,
                 )
         db_questions = await repo.create_job_profile_questions(
             generated_questions_data,

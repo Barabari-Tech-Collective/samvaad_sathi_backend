@@ -39,6 +39,9 @@ def is_transient_generation_error(error: object) -> bool:
     )
 
 
+MAX_TOP_UP_ROUNDS = 3
+
+
 async def generate_question_batch_with_retry(**kwargs):
     """Call the provider with bounded retry/backoff for transient failures."""
     last_result = None
@@ -71,6 +74,7 @@ async def generate_questions_for_level(
     experience_level: str | None,
     category: str | None = None,
     knowledge_reference_context: str | None = None,
+    existing_questions: list[str] | None = None,
 ) -> list[tuple[int, str, dict]]:
     """Generate all questions for one difficulty level.
 
@@ -105,78 +109,75 @@ async def generate_questions_for_level(
     if knowledge_reference_context:
         influence["knowledge_reference_context"] = knowledge_reference_context
 
+    # Repeats are dropped as batches arrive, so the spare questions asked for in each batch
+    # fill the gaps, and short levels are topped up. Saving 149 of 200 because the model
+    # repeated itself is what this prevents.
+    def norm(text: str) -> str:
+        return " ".join(str(text or "").split()).casefold()
+
+    seen = {norm(t) for t in (existing_questions or []) if norm(t)}
+    all_raw: list[dict] = []
+
+    def take(items: list[dict] | None, room: int) -> int:
+        added = 0
+        for item in items or []:
+            key = norm(item.get("text"))
+            if added >= room or not key or key in seen:
+                continue
+            seen.add(key)
+            all_raw.append(item)
+            added += 1
+        return added
+
+    async def ask(n: int) -> list[dict] | None:
+        batch_influence = dict(influence)
+        avoid = [q["text"] for q in all_raw] + list(existing_questions or [])
+        if avoid:
+            batch_influence["exclude_questions"] = avoid[-200:]
+        _, error, _, _, items = await generate_question_batch_with_retry(
+            track=track,
+            context_text=context_text,
+            count=n + BATCH_OVERAGE,
+            difficulty=difficulty,
+            syllabus_topics=topics,
+            ratio=ratio,
+            influence=batch_influence,
+        )
+        if error:
+            logger.warning("Level %d (%s): batch error %s", level, difficulty, error)
+            return None
+        return items
+
     remaining = count
     batches: list[int] = []
     while remaining > 0:
         batches.append(min(remaining, BATCH_SIZE))
         remaining -= batches[-1]
 
-    # Run batches sequentially so each batch can exclude all questions already
-    # generated in this level, preventing near-duplicate questions across batches.
-    # Cross-level parallelism is preserved (the four levels run concurrently in
-    # tasks.py via asyncio.gather — only within-level batches are serialised here).
-    all_raw: list[dict] = []
-
     for batch_idx, b_count in enumerate(batches):
-        batch_influence = dict(influence)
-        if all_raw:
-            batch_influence["exclude_questions"] = [q["text"] for q in all_raw]
-
-        ask_count = b_count + BATCH_OVERAGE
         logger.info(
-            "Batch %d/%d — level %d (%s): asking for %d (need %d, buffer %d, excluding %d)",
-            batch_idx + 1, len(batches), level, difficulty,
-            ask_count, b_count, BATCH_OVERAGE, len(batch_influence.get("exclude_questions", [])),
+            "Batch %d/%d — level %d (%s): need %d, have %d",
+            batch_idx + 1, len(batches), level, difficulty, b_count, len(all_raw),
         )
-        _, error, _, _, items = await generate_question_batch_with_retry(
-            track=track,
-            context_text=context_text,
-            count=ask_count,
-            difficulty=difficulty,
-            syllabus_topics=topics,
-            ratio=ratio,
-            influence=batch_influence,
-        )
-        if error or not items:
+        items = await ask(b_count)
+        if items is None and not all_raw and batch_idx == 0:
             raise RuntimeError(
-                f"LLM batch {batch_idx + 1} failed for level {level} ({difficulty}): "
-                f"{error or 'no items returned'}"
+                f"LLM batch {batch_idx + 1} failed for level {level} ({difficulty}): no items returned"
             )
+        take(items, b_count)
 
-        # Trim excess (happy path — we got enough)
-        if len(items) >= b_count:
-            all_raw.extend(items[:b_count])
-            continue
-
-        # Fallback: LLM still came up short despite the buffer — retry for the gap
-        shortfall = b_count - len(items)
+    for attempt in range(MAX_TOP_UP_ROUNDS):
+        short = count - len(all_raw)
+        if short <= 0:
+            break
         logger.warning(
-            "Batch %d/%d: got %d/%d (asked %d) — retrying for %d shortfall",
-            batch_idx + 1, len(batches), len(items), b_count, ask_count, shortfall,
+            "Level %d (%s): %d/%d after removing repeats — top-up %d/%d",
+            level, difficulty, len(all_raw), count, attempt + 1, MAX_TOP_UP_ROUNDS,
         )
-        retry_influence = dict(batch_influence)
-        if items:
-            retry_influence["exclude_questions"] = (
-                retry_influence.get("exclude_questions", []) + [q["text"] for q in items]
-            )
-        _, retry_error, _, _, extra = await generate_question_batch_with_retry(
-            track=track,
-            context_text=context_text,
-            count=shortfall + BATCH_OVERAGE,
-            difficulty=difficulty,
-            syllabus_topics=topics,
-            ratio=ratio,
-            influence=retry_influence,
-        )
-        batch_items = items + (extra or []) if not retry_error else items
-        final = batch_items[:b_count]
-        if len(final) < b_count:
-            logger.warning(
-                "Batch %d/%d: delivered %d/%d after retry — proceeding with partial",
-                batch_idx + 1, len(batches), len(final), b_count,
-            )
-        all_raw.extend(final)
+        take(await ask(min(short, BATCH_SIZE)), short)
 
+    if not all_raw:
+        raise RuntimeError(f"LLM returned no usable questions for level {level} ({difficulty})")
     if len(all_raw) != count:
         logger.warning(
             "Level %d (%s): final count %d does not match requested %d",
@@ -195,6 +196,7 @@ async def generate_question_levels(
     experience_level: str | None,
     category: str | None = None,
     knowledge_reference_context: str | None = None,
+    existing_questions: dict[int, list[str]] | None = None,
 ) -> list[list[tuple[int, str, dict]]]:
     """Generate selected levels with a small global provider-concurrency cap.
 
@@ -216,6 +218,7 @@ async def generate_question_levels(
                 experience_level=experience_level,
                 category=category,
                 knowledge_reference_context=knowledge_reference_context,
+                existing_questions=(existing_questions or {}).get(level_config["level"]),
             )
 
     tasks = [asyncio.create_task(generate_level(level)) for level in levels]

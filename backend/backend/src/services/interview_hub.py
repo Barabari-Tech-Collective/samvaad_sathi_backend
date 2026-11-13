@@ -587,9 +587,15 @@ def _version_of(family: Family, profile: JobProfile) -> int:
     return len(family.versions) + 1
 
 
-def _family_out(family: Family, names: dict[str, str], ready: dict[int, dict]) -> dict:
+def _family_out(
+    family: Family,
+    names: dict[str, str],
+    ready: dict[int, dict],
+    authors: dict[int, str] | None = None,
+) -> dict:
     live, draft = family.live, family.draft
     head = family.head
+    first = family.versions[0] if family.versions else head
     return {
         "id": family.root,
         "head_id": head.id,
@@ -609,6 +615,13 @@ def _family_out(family: Family, names: dict[str, str], ready: dict[int, dict]) -
         }
         if draft
         else None,
+        # What a list of interviews shows at a glance, like the old Roles cards.
+        "category": head.category,
+        "created_at": first.created_at,
+        "updated_at": head.updated_at,
+        "submitted_at": draft.submitted_at if draft else None,
+        "author": (authors or {}).get(first.created_by) if first.created_by else None,
+        "counts": (ready.get(head.id) or {}).get("counts"),
     }
 
 
@@ -620,16 +633,23 @@ async def templates(user, session, mode, days, course) -> dict:
     if course:
         found = [f for f in found if not f.head.course_ids or course in f.head.course_ids]
     names = await _course_names(session)
-    ready = await _readiness(session, [f.draft for f in found if f.draft])
+    ready = await _readiness(session, [f.head for f in found])
+    creator_ids = {(f.versions[0] if f.versions else f.head).created_by for f in found} - {None}
+    authors = (
+        dict((await session.execute(sa.select(User.id, User.name).where(User.id.in_(creator_ids)))).all())
+        if creator_ids
+        else {}
+    )
     stats: dict[int, dict] = {}
     if viewer.people is not None:
-        context = await lh.load_context(user, session, days)
-        ids = [p.id for p in context.learners]
+        # Only the learners in the viewer's scope count. Filtering them inside this query
+        # replaces building the whole learner context (about 30 database trips) just for ids.
+        in_scope = sa.select(User.id).where(student_only(), lh._scope_clause(viewer.people))
         owner = {pid: f.root for f in found for pid in f.ids}
         rows = (
             await session.execute(
                 sa.select(Interview).where(
-                    Interview.user_id.in_(ids) if ids else sa.false(),
+                    Interview.user_id.in_(in_scope),
                     Interview.job_profile_id.in_(owner) if owner else sa.false(),
                     Interview.status == "completed",
                     Interview.interview_mode == mode,
@@ -648,7 +668,7 @@ async def templates(user, session, mode, days, course) -> dict:
                 "average": round(sum(values) / len(values), 1) if values else None,
                 "held": sum(1 for r in rows if owner[r.job_profile_id] == f.root and withheld(r)),
             }
-    items = [_family_out(f, names, ready) | {"stats": stats.get(f.root)} for f in found]
+    items = [_family_out(f, names, ready, authors) | {"stats": stats.get(f.root)} for f in found]
     items.sort(key=lambda x: (x["live"] is not None, x["title"].casefold()))
     return {"items": items, "can": viewer.can()}
 

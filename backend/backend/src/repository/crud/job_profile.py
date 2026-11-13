@@ -841,6 +841,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
             for profile in parents
             for q in profile.questions
         }
+        kept = []
         for item in questions:
             text = item.get("question_text", "")
             key = (
@@ -849,11 +850,21 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
                 " ".join(text.split()).casefold(),
             )
             if not text.strip() or key in known:
+                # AI output: one repeat must not throw away the whole set, so skip it.
+                if generation_token is not None:
+                    continue
                 raise fastapi.HTTPException(
                     409,
                     "AI returned blank or duplicate questions. Existing draft content was preserved; try another request.",
                 )
             known.add(key)
+            kept.append(item)
+        if not kept:
+            raise fastapi.HTTPException(
+                409,
+                "AI returned only blank or duplicate questions. Existing draft content was preserved; try another request.",
+            )
+        questions = kept
         for profile in parents:
             for level in (1, 2, 3, 4):
                 incoming = sum(

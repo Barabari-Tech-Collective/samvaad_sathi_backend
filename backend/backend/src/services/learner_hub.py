@@ -532,12 +532,8 @@ async def load_context(user: User, session, days: int, course_id: str | None = N
             for c in person.courses:
                 if course_id in (None, "", NO_COURSE) or c == course_id:
                     by_course[c].append(person.id)
-        for c, ids in by_course.items():
-            rule = readiness.rule_view(await readiness.rule_for(session, c))
-            found = await readiness.assess(session, c, ids, rule, now)
-            for sid, result in found.items():
-                if result["status"] == "ready":
-                    learners[sid].ready = True
+        for sid in await readiness.ready_students(session, by_course, now):
+            learners[sid].ready = True
 
     candidates_at: dict[int, dt.datetime] = {}
     if learners:
