@@ -314,15 +314,17 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
                     newer.status == JobProfileStatus.PUBLISHED,
                 )
             )
-        if status is not None:
+        if status is not None and not hasattr(status, "default"):
             query = query.where(JobProfile.status == status)
-        if interview_mode is not None:
-            query = query.where(JobProfile.interview_mode == interview_mode)
+        if interview_mode is not None and not hasattr(interview_mode, "default"):
+            mode_val = getattr(interview_mode, "value", interview_mode)
+            if mode_val:
+                query = query.where(JobProfile.interview_mode == str(mode_val))
         if not is_admin:
             query = query.where(JobProfile.status == JobProfileStatus.PUBLISHED)
-        if category and category.strip():
+        if category and not hasattr(category, "default") and category.strip():
             query = query.where(func.lower(JobProfile.category) == category.strip().lower())
-        if search and search.strip():
+        if search and not hasattr(search, "default") and search.strip():
             query = query.where(
                 JobProfile.job_name.ilike(cls._like_pattern(search), escape="\\")
             )
@@ -695,24 +697,6 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         profile = await self.lock_profile(profile_id)
         if profile is None:
             return None
-
-        is_published = profile.status == JobProfileStatus.PUBLISHED or isinstance(
-            getattr(profile, "published_at", None), datetime.datetime
-        )
-        status_val = status.value if hasattr(status, "value") else str(status or "")
-
-        # When changes are requested on a published role, fork a new draft revision (e.g. v2.0)
-        # instead of modifying the sealed publication row directly.
-        if is_published:
-            if status in (JobProfileStatus.CHANGES_REQUESTED, JobProfileStatus.DRAFT) or status_val in ("changes_requested", "draft"):
-                return await self.create_revision(
-                    profile_id=profile.id,
-                    admin_comment=admin_comment,
-                    status=status_val or "changes_requested",
-                )
-            if status == JobProfileStatus.PUBLISHED or status_val == "published":
-                return profile
-            self.require_unpublished(profile)
 
         self.require_unpublished(profile)
         if (

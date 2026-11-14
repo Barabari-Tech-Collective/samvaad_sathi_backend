@@ -160,6 +160,9 @@ async def get_recent_activity(
     Returns the latest 5 activities related to job profiles.
     Derived from the job_profile table records.
     """
+    if hasattr(category, "default"):
+        category = None
+
     effective_category = await resolve_effective_category(
         current_user=current_user,
         session=job_profile_repo.async_session,
@@ -188,6 +191,9 @@ async def get_job_profiles_summary(
     - Approved (default 0)
     - Rejected (default 0)
     """
+    if hasattr(category, "default"):
+        category = None
+
     effective_category = await resolve_effective_category(
         current_user=current_user,
         session=job_profile_repo.async_session,
@@ -216,6 +222,15 @@ async def list_job_profiles(
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileListResponse:
+    if hasattr(category, "default"):
+        category = None
+    if hasattr(limit, "default"):
+        limit = None
+    if hasattr(interview_mode, "default"):
+        interview_mode = None
+    if hasattr(interview_mode, "value"):
+        interview_mode = interview_mode.value
+
     effective_category = await resolve_effective_category(
         current_user=current_user,
         session=job_profile_repo.async_session,
