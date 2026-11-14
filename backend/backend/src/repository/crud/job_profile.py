@@ -314,15 +314,17 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
                     newer.status == JobProfileStatus.PUBLISHED,
                 )
             )
-        if status is not None:
+        if status is not None and not hasattr(status, "default"):
             query = query.where(JobProfile.status == status)
-        if interview_mode is not None:
-            query = query.where(JobProfile.interview_mode == interview_mode)
+        if interview_mode is not None and not hasattr(interview_mode, "default"):
+            mode_val = getattr(interview_mode, "value", interview_mode)
+            if mode_val:
+                query = query.where(JobProfile.interview_mode == str(mode_val))
         if not is_admin:
             query = query.where(JobProfile.status == JobProfileStatus.PUBLISHED)
-        if category and category.strip():
+        if category and not hasattr(category, "default") and category.strip():
             query = query.where(func.lower(JobProfile.category) == category.strip().lower())
-        if search and search.strip():
+        if search and not hasattr(search, "default") and search.strip():
             query = query.where(
                 JobProfile.job_name.ilike(cls._like_pattern(search), escape="\\")
             )
@@ -598,6 +600,90 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         query = await self.async_session.execute(statement=stmt)
         return query.scalar_one_or_none()
 
+    async def create_revision(
+        self,
+        profile_id: int,
+        admin_comment: str | None = None,
+        status: str = "draft",
+    ) -> JobProfile | None:
+        import datetime
+        import fastapi
+        from sqlalchemy.orm import selectinload
+        from src.models.db.job_profile_question import JobProfileQuestion
+
+        profile = await self.lock_profile(profile_id)
+        if profile is None:
+            return None
+        if profile.status != JobProfileStatus.PUBLISHED and not isinstance(
+            getattr(profile, "published_at", None), datetime.datetime
+        ):
+            raise fastapi.HTTPException(409, "Only a published role can be revised.")
+
+        # Check if an open draft revision already exists for this published parent
+        existing_draft = (
+            await self.async_session.execute(
+                select(JobProfile)
+                .options(selectinload(JobProfile.questions))
+                .where(
+                    JobProfile.parent_profile_id == profile.id,
+                    JobProfile.status.in_(["draft", "changes_requested", "under_review"]),
+                )
+                .order_by(JobProfile.id.desc())
+            )
+        ).scalar_one_or_none()
+
+        if existing_draft:
+            if admin_comment is not None:
+                existing_draft.admin_comment = admin_comment
+            if status:
+                existing_draft.status = status
+            await self.async_session.commit()
+            await self.async_session.refresh(existing_draft)
+            return existing_draft
+
+        new_revision_profile = JobProfile(
+            job_name=profile.job_name,
+            job_description=profile.job_description,
+            company_name=profile.company_name,
+            experience_level=profile.experience_level,
+            skills=list(profile.skills or []) if profile.skills else [],
+            additional_context=profile.additional_context,
+            category=profile.category,
+            employment_type=profile.employment_type,
+            interview_mode=profile.interview_mode,
+            questions_per_interview=profile.questions_per_interview,
+            authoring_mode=profile.authoring_mode,
+            course_ids=list(profile.course_ids or []) if getattr(profile, "course_ids", None) else None,
+            status=status or "draft",
+            admin_comment=admin_comment,
+            created_by=profile.created_by,
+            parent_profile_id=profile.id,
+            content_revision=(getattr(profile, "content_revision", 0) or 0) + 1,
+        )
+        self.async_session.add(new_revision_profile)
+        await self.async_session.flush()
+
+        for q in profile.questions:
+            new_q = JobProfileQuestion(
+                job_profile_id=new_revision_profile.id,
+                question_text=q.question_text,
+                level=q.level,
+                difficulty=q.difficulty,
+                question_type=q.question_type,
+                is_ai_generated=q.is_ai_generated,
+                keywords=list(q.keywords or []) if q.keywords else [],
+                concepts_covered=list(q.concepts_covered or []) if q.concepts_covered else [],
+                expected_answer=q.expected_answer,
+                example_output=q.example_output,
+                audio_url=getattr(q, "audio_url", None),
+            )
+            self.async_session.add(new_q)
+
+        await self.async_session.commit()
+        stmt_new = select(JobProfile).options(selectinload(JobProfile.questions)).where(JobProfile.id == new_revision_profile.id)
+        res_new = await self.async_session.execute(stmt_new)
+        return res_new.scalar_one_or_none()
+
     async def update_review_status(
         self,
         profile_id: int,
@@ -611,6 +697,7 @@ class JobProfileCRUDRepository(BaseCRUDRepository):
         profile = await self.lock_profile(profile_id)
         if profile is None:
             return None
+
         self.require_unpublished(profile)
         if (
             expected_revision is not None

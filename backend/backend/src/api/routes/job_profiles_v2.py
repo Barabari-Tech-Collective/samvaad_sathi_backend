@@ -160,6 +160,9 @@ async def get_recent_activity(
     Returns the latest 5 activities related to job profiles.
     Derived from the job_profile table records.
     """
+    if hasattr(category, "default"):
+        category = None
+
     effective_category = await resolve_effective_category(
         current_user=current_user,
         session=job_profile_repo.async_session,
@@ -188,6 +191,9 @@ async def get_job_profiles_summary(
     - Approved (default 0)
     - Rejected (default 0)
     """
+    if hasattr(category, "default"):
+        category = None
+
     effective_category = await resolve_effective_category(
         current_user=current_user,
         session=job_profile_repo.async_session,
@@ -216,6 +222,15 @@ async def list_job_profiles(
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
 ) -> JobProfileListResponse:
+    if hasattr(category, "default"):
+        category = None
+    if hasattr(limit, "default"):
+        limit = None
+    if hasattr(interview_mode, "default"):
+        interview_mode = None
+    if hasattr(interview_mode, "value"):
+        interview_mode = interview_mode.value
+
     effective_category = await resolve_effective_category(
         current_user=current_user,
         session=job_profile_repo.async_session,
@@ -406,6 +421,34 @@ async def update_job_profile_review(
             detail=f"Job profile with ID {job_profile_id} not found",
         )
     return JobProfileResponse.model_validate(updated_profile)
+
+
+@router.post(
+    path="/job-profiles/{job_profile_id}/revise",
+    name="job-profiles:revise",
+    response_model=JobProfileResponse,
+    status_code=fastapi.status.HTTP_201_CREATED,
+    summary="Start the next version of a published interview role as a draft copy, or return the open one",
+)
+async def revise_job_profile(
+    job_profile_id: int,
+    current_admin=fastapi.Depends(get_current_creator_user),
+    job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(
+        get_repository(repo_type=JobProfileCRUDRepository)
+    ),
+) -> JobProfileResponse:
+    if not is_admin_user(current_admin):
+        raise fastapi.HTTPException(
+            403,
+            "Administrator review access is required to revise a published role.",
+        )
+    draft_copy = await job_profile_repo.create_revision(job_profile_id)
+    if not draft_copy:
+        raise fastapi.HTTPException(
+            status_code=fastapi.status.HTTP_404_NOT_FOUND,
+            detail=f"Job profile with ID {job_profile_id} not found",
+        )
+    return JobProfileResponse.model_validate(draft_copy)
 
 
 @router.get(

@@ -155,6 +155,8 @@ elif name == 'python':
 
 
 def run_release(tmp_path, scenario, health_url=None):
+    if sys.platform == "win32" or not shutil.which("bash"):
+        pytest.skip("Bash shell tests require a Unix shell environment")
     app = tmp_path / "app"
     (app / ".git").mkdir(parents=True)
     (app / "backend/backend").mkdir(parents=True)

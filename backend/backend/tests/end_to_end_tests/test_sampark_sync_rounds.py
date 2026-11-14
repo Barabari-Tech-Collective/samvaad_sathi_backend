@@ -1,12 +1,18 @@
 """Reuse the explicitly isolated PostgreSQL fixture; HTTP source is mocked."""
 
 import datetime
+import os
 import httpx
 import pytest
 import sqlalchemy as sa
 from src.models.db.user import User
 from src.services import sampark_enrollment_sync as sync
 from .test_fixed_question_rounds import db  # noqa: F401
+
+URL = os.environ.get("FIXED_ROUND_TEST_DATABASE_URL", "")
+pytestmark = pytest.mark.skipif(
+    not URL, reason="Requires an explicitly isolated local PostgreSQL test database"
+)
 
 
 @pytest.fixture

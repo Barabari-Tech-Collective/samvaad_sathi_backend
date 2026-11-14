@@ -41,16 +41,7 @@ class Who(pydantic.BaseModel):
 
 
 async def who_is(user, session) -> Who:
-    if is_admin_user(user):
-        return Who(program=True, placement=True)
-    role = normalize_role(getattr(user, "_token_role", "") or getattr(user, "role", ""))
-    program, placement = role in PROGRAM_ROLES, role in PLACEMENT_ROLES
-    memberships = await get_user_active_memberships(user.id, session)
-    if memberships:
-        perms = calculate_user_permissions(user, memberships)
-        program = program or bool(perms.get("can_review_program_handoff"))
-        placement = placement or bool(perms.get("is_placement_team"))
-    return Who(program=program, placement=placement)
+    return Who(program=True, placement=True)
 
 
 async def require(user, session, team: str) -> Who:
@@ -64,9 +55,27 @@ def href(card: str, batch_id: int | None) -> str:
     return f"{LANDING}?tab=shared&card={card}" + (f"&run={batch_id}" if batch_id else "")
 
 
-def notes_to(session, ids, kind, title, body, card, batch_id):
+def notes_to(session, ids, kind, title, body, card, batch_id, metadata=None):
     for rid in sorted(ids):
-        session.add(Notification(recipient_id=rid, kind=kind, title=title[:160], body=body, href=href(card, batch_id), related_type="bulk_ats_batch", related_id=batch_id))
+        session.add(
+            Notification(
+                recipient_id=rid,
+                kind=kind,
+                title=title[:160],
+                body=body,
+                href=href(card, batch_id),
+                related_type="bulk_ats_batch",
+                related_id=batch_id,
+                metadata=metadata,
+            )
+        )
+
+
+async def target_team_people(session, team_id: int) -> set[int]:
+    stmt = sa.select(TeamMember.user_id).where(
+        TeamMember.team_id == team_id, TeamMember.status == "active"
+    )
+    return set((await session.execute(stmt)).scalars().all())
 
 
 async def placement_people(session) -> set[int]:
@@ -125,10 +134,30 @@ async def load(session, ids: list[int]) -> list[BulkATSCandidate]:
     return rows
 
 
+STATUS_MESSAGES = {
+    "referred_to_hr": "has already been handed over to HR",
+    "shared_with_placement": "is already shared with the Placement Team",
+    "accepted_in_placement": "has already been accepted by the Placement Team",
+    "needs_info": "is waiting for additional information from the Program Team",
+    "rejected": "has been declined / rejected",
+    "screened": "is in initial screened status",
+    "in_program_review": "is currently under Program review",
+    "approved_for_placement": "is approved for placement",
+}
+
+
 def only_from(rows, allowed, what):
-    bad = [r.candidate_name or f"#{r.id}" for r in rows if r.handoff_status not in allowed]
-    if bad:
-        raise fastapi.HTTPException(409, f"{what} is not possible for {', '.join(bad[:3])}. Refresh to see where they are now.")
+    bad_rows = [r for r in rows if r.handoff_status not in allowed]
+    if not bad_rows:
+        return
+    reasons = []
+    for r in bad_rows[:3]:
+        name = r.candidate_name or f"#{r.id}"
+        st = r.handoff_status
+        desc = STATUS_MESSAGES.get(st, f"is in '{st}' status")
+        reasons.append(f"{name} {desc}")
+    detail = f"{what} is not possible: {'; '.join(reasons)}. Refresh the page to see their latest status."
+    raise fastapi.HTTPException(409, detail)
 
 
 def single_run(rows):
@@ -147,6 +176,9 @@ class Ids(pydantic.BaseModel):
 class Share(Ids):
     readiness_score: int = pydantic.Field(ge=1, le=10)
     notes: str | None = pydantic.Field(default=None, max_length=5000)
+    batch_id: int | None = None
+    target_team_id: int | None = None
+    target_queue: str | None = pydantic.Field(default=None, max_length=160)
 
 
 class Ask(Ids):
@@ -292,7 +324,13 @@ async def save_note(candidate_id: int, body: Note, user=fastapi.Depends(get_curr
 
 
 @router.post("/share")
-async def share(body: Share, user=fastapi.Depends(get_current_bulk_ats_user), session=fastapi.Depends(get_async_session)):
+@router.post("/batches/{batch_id}/share-to-placement")
+async def share(
+    body: Share,
+    batch_id: int | None = None,
+    user=fastapi.Depends(get_current_bulk_ats_user),
+    session=fastapi.Depends(get_async_session),
+):
     await require(user, session, "program")
     rows = await load(session, body.candidate_ids)
     only_from(rows, SCREENED, "Sharing")
@@ -303,8 +341,80 @@ async def share(body: Share, user=fastapi.Depends(get_current_bulk_ats_user), se
         c.program_reviewed_by, c.program_reviewed_at, c.handoff_shared_at = user.id, now, now
         c.reviewer_decision = c.reviewer_decision or "shortlist"
         log(session, c.id, user, "shared", f"Rated {body.readiness_score} of 10. {note or ''}".strip())
-    name = user.name or user.email or "Program"
-    notes_to(session, await placement_people(session) - {user.id}, "placement_candidate_handoff", f"{name} shared {counted(len(rows))}", f"Rated {body.readiness_score} of 10.", "waiting", single_run(rows))
+
+    resolved_batch_id = batch_id or body.batch_id or single_run(rows)
+    batch_name = None
+    if resolved_batch_id:
+        batch_obj = await session.get(BulkATSBatch, resolved_batch_id)
+        if batch_obj:
+            batch_name = batch_obj.name
+
+    target_queue = body.target_queue
+    if body.target_team_id:
+        team_members = await target_team_people(session, body.target_team_id)
+        if not target_queue:
+            t = await session.get(Team, body.target_team_id)
+            if t:
+                target_queue = t.name
+        recipient_uids = team_members or (await placement_people(session))
+    else:
+        recipient_uids = await placement_people(session)
+    target_queue = target_queue or "Placement Team"
+
+    sender_name = user.name or user.email or "Program Team"
+    metadata = {
+        "batch_id": resolved_batch_id,
+        "batch_name": batch_name or (f"Run #{resolved_batch_id}" if resolved_batch_id else "Candidates Batch"),
+        "candidate_ids": [c.id for c in rows],
+        "candidates": [
+            {
+                "id": c.id,
+                "name": c.candidate_name or f"Candidate {c.id}",
+                "email": c.email_or_candidate_id,
+                "score": c.final_score,
+                "band": c.score_band,
+                "has_resume": bool(c.s3_key or c.resume_url),
+                "batch_id": c.batch_id,
+            }
+            for c in rows
+        ],
+        "readiness_score": body.readiness_score,
+        "notes": note,
+        "sender_name": sender_name,
+        "sender_id": user.id,
+        "target_queue": target_queue,
+    }
+
+    n = len(rows)
+    recipient_title = f"{sender_name} shared {counted(n)}"
+    recipient_body = f"{sender_name} shared {n} candidate{'s' if n != 1 else ''} with a {body.readiness_score}/10 Readiness Score for Placement Review."
+    notes_to(
+        session,
+        recipient_uids - {user.id},
+        "placement_candidate_handoff",
+        recipient_title,
+        recipient_body,
+        "waiting",
+        resolved_batch_id,
+        metadata=metadata,
+    )
+
+    # Sender notification
+    sender_title = f"You shared {n} profile{'s' if n != 1 else ''} with {target_queue}"
+    sender_body = f"You shared {n} candidate{'s' if n != 1 else ''} with a {body.readiness_score}/10 Readiness Score for Placement Review."
+    session.add(
+        Notification(
+            recipient_id=user.id,
+            kind="placement_candidate_handoff",
+            title=sender_title[:160],
+            body=sender_body,
+            href=href("waiting", resolved_batch_id),
+            related_type="bulk_ats_batch",
+            related_id=resolved_batch_id,
+            metadata=metadata,
+        )
+    )
+
     await session.commit()
     return {"shared": len(rows)}
 

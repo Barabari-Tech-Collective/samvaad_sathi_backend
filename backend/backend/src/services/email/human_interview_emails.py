@@ -34,8 +34,9 @@ RESULT_WORDS = {
 def when(starts_at: dt.datetime, ends_at: dt.datetime) -> tuple[str, str]:
     start, end = starts_at.astimezone(IST), ends_at.astimezone(IST)
     minutes = round((end - start).total_seconds() / 60)
-    day = start.strftime("%A, %-d %B %Y")
-    time = f"{start.strftime('%-I:%M %p')} IST · {minutes} minutes"
+    day = f"{start.strftime('%A')}, {start.day} {start.strftime('%B %Y')}"
+    hour = start.hour % 12 or 12
+    time = f"{hour}:{start.strftime('%M %p')} IST · {minutes} minutes"
     return day, time
 
 

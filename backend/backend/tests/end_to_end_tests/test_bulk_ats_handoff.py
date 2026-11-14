@@ -115,7 +115,7 @@ async def test_full_journey_tells_each_team(ctx):
     await share(c, [a])
     assert await status(factory, a) == "shared_with_placement"
     n = await kinds(factory)
-    assert {x[0] for x in n} == {users["place"], users["admin"]} and "card=waiting" in n[0][2]
+    assert {x[0] for x in n} == {users["place"], users["admin"], users["prog"]} and "card=waiting" in n[0][2]
     assert (await c.post(f"{P}/ask", headers=H("place"), json={"candidate_ids": [a], "question": "Can they relocate?"})).status_code == 200
     assert await status(factory, a) == "needs_info"
     n = await kinds(factory)
@@ -183,3 +183,29 @@ async def test_failed_email_is_recorded_and_can_be_resent(ctx):
     assert (await c.post(f"{P}/pitches/{row['pitch']['id']}/resend", headers=H("place"))).status_code == 409
     async with factory() as s:
         assert (await s.execute(sa.select(sa.func.count()).select_from(BulkATSPitch))).scalar_one() == 2
+
+
+async def test_share_with_target_team_and_metadata(ctx):
+    c, users, ids, factory, _ = ctx
+    a = ids["aman"]
+    res = await c.post(
+        f"{P}/share",
+        headers=H("prog"),
+        json={
+            "candidate_ids": [a],
+            "readiness_score": 9,
+            "notes": "Shortlisted candidates with strong skills.",
+            "target_queue": "Placement Team",
+        },
+    )
+    assert res.status_code == 200
+    assert res.json() == {"shared": 1}
+
+    async with factory() as session:
+        notes = list((await session.execute(sa.select(Notification).order_by(Notification.id))).scalars())
+        sender_note = next(n for n in notes if n.recipient_id == users["prog"])
+        assert "You shared 1 profile with Placement Team" in sender_note.title
+        assert sender_note.notification_metadata["readiness_score"] == 9
+        assert sender_note.notification_metadata["notes"] == "Shortlisted candidates with strong skills."
+        assert sender_note.notification_metadata["candidate_ids"] == [a]
+        assert sender_note.notification_metadata["target_queue"] == "Placement Team"

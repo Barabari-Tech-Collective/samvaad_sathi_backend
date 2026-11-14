@@ -264,6 +264,18 @@ class JobProfileResponse(JobProfileBase):
         validation_alias=pydantic.AliasChoices("submittedAt", "submitted_at"),
         serialization_alias="submittedAt",
     )
+    parentProfileId: Optional[int] = pydantic.Field(
+        default=None,
+        alias="parentProfileId",
+        validation_alias=pydantic.AliasChoices("parentProfileId", "parent_profile_id"),
+        serialization_alias="parentProfileId",
+    )
+    contentRevision: Optional[int] = pydantic.Field(
+        default=0,
+        alias="contentRevision",
+        validation_alias=pydantic.AliasChoices("contentRevision", "content_revision"),
+        serialization_alias="contentRevision",
+    )
 
     @pydantic.computed_field(  # type: ignore[prop-decorator]
         alias="created_at",
