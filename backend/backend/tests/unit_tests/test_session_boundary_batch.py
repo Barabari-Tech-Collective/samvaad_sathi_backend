@@ -120,7 +120,7 @@ def test_keyring_rejects_duplicates_and_unbounded_history():
         with pytest.raises(ValueError): ProductSessions(AsyncMock(),keys)
 
 
-@pytest.mark.parametrize('raw',[b'x'*100001,123,[],{}])
+@pytest.mark.parametrize('raw',[b'x'*100001,123,[],{}], ids=['oversized_bytes', 'int', 'list', 'dict'])
 def test_oversized_and_wrong_type_records_fail_closed(raw):
     store=ProductSessions(AsyncMock(),[Fernet.generate_key()])
     assert store.decode(raw) is None

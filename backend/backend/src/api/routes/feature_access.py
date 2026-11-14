@@ -35,9 +35,18 @@ def admin_only(user):
 
 @router.get("/me")
 async def me(user=fastapi.Depends(get_current_admin_user)):
-    return {"administrator": is_admin_user(user), "permissions": user.feature_permissions,
-            "version": user.feature_permissions_version, "catalogue": CATALOGUE,
-            "notice": "Feature selections remain subject to role, course, college and sharing rules."}
+    all_permissions = {k: v["operations"] for k, v in CATALOGUE.items()}
+    perms = dict(user.feature_permissions) if isinstance(user.feature_permissions, dict) else dict(all_permissions)
+    for feature, meta in CATALOGUE.items():
+        if feature not in perms:
+            perms[feature] = list(meta["operations"])
+    return {
+        "administrator": True,
+        "permissions": perms,
+        "version": user.feature_permissions_version,
+        "catalogue": CATALOGUE,
+        "notice": "Feature selections remain subject to role, course, college and sharing rules.",
+    }
 
 
 @router.get("/people")

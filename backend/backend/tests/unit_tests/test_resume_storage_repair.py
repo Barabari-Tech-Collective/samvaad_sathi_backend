@@ -26,7 +26,7 @@ def test_unconfirmed_extractions_cannot_repair(state,saved):
     assert error.value.status_code == 409
 
 
-@pytest.mark.parametrize("raw,mime,code", [(b"different","text/plain",409),(RAW,"text/html",409),(b"a"*(5*1024*1024+1),"text/plain",413)])
+@pytest.mark.parametrize("raw,mime,code", [(b"different","text/plain",409),(RAW,"text/html",409),(b"a"*(5*1024*1024+1),"text/plain",413)], ids=["different", "wrong-mime", "oversized"])
 def test_invalid_files_rejected(raw,mime,code):
     with pytest.raises(fastapi.HTTPException) as error:
         validate_storage_repair(row(),raw,mime)

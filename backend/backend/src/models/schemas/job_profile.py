@@ -270,7 +270,7 @@ class JobProfileResponse(JobProfileBase):
         validation_alias=pydantic.AliasChoices("parentProfileId", "parent_profile_id"),
         serialization_alias="parentProfileId",
     )
-    contentRevision: int = pydantic.Field(
+    contentRevision: Optional[int] = pydantic.Field(
         default=0,
         alias="contentRevision",
         validation_alias=pydantic.AliasChoices("contentRevision", "content_revision"),

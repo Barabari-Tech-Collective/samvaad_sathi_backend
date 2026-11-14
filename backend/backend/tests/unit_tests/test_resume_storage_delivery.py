@@ -31,7 +31,7 @@ async def test_staging_commits_bounded_original_bytes_and_preserves_pending_atte
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw",[b"",b"wrong",b"a"*(5*1024*1024+1)])
+@pytest.mark.parametrize("raw",[b"",b"wrong",b"a"*(5*1024*1024+1)], ids=["empty", "wrong", "oversized"])
 async def test_invalid_staging_never_writes(monkeypatch,raw):
     session=setup(monkeypatch)
     with pytest.raises(ValueError):

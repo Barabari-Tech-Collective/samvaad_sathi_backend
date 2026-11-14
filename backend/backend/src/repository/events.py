@@ -1,3 +1,4 @@
+import asyncio
 import fastapi
 import loguru
 import sqlalchemy
@@ -190,8 +191,6 @@ async def initialize_db_tables(connection: AsyncConnection) -> None:
             await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_analytics_event_event_type ON analytics_event (event_type)"))
             await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_analytics_event_created_at ON analytics_event (created_at)"))
 
-        await report_schema_drift(connection)
-
     except Exception as e:
         loguru.logger.error(f"Database initialization error: {e}")
         raise
@@ -257,8 +256,31 @@ async def initialize_db_connection(backend_app: fastapi.FastAPI) -> None:
 
     backend_app.state.db = async_db
 
-    async with backend_app.state.db.async_engine.begin() as connection:
-        await initialize_db_tables(connection=connection)
+    max_retries = 6
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with backend_app.state.db.async_engine.begin() as connection:
+                await initialize_db_tables(connection=connection)
+            break
+        except Exception as conn_err:
+            if attempt == max_retries:
+                loguru.logger.error(
+                    f"Failed to connect to database after {max_retries} attempts: {conn_err}"
+                )
+                raise
+            sleep_sec = min(2 * attempt, 6)
+            loguru.logger.warning(
+                f"Database connection attempt {attempt}/{max_retries} failed ({conn_err}). Retrying in {sleep_sec}s..."
+            )
+            await asyncio.sleep(sleep_sec)
+
+    # Advisory schema drift check runs in a separate read-only connection
+    # so a transient pooler disconnect/timeout never poisons the DDL transaction.
+    try:
+        async with backend_app.state.db.async_engine.connect() as connection:
+            await report_schema_drift(connection)
+    except Exception as drift_err:
+        loguru.logger.warning(f"Could not check schema drift: {drift_err}")
 
     loguru.logger.info("Database Connection --- Successfully Established!")
 

@@ -197,3 +197,21 @@ async def test_my_notifications_endpoint_includes_metadata():
     assert item["metadata"]["target_queue"] == "Placement Drive Queue"
 
 
+def test_only_from_informative_error_messages():
+    from src.api.routes.bulk_ats_handoff import only_from, SCREENED
+    from types import SimpleNamespace
+
+    cand1 = SimpleNamespace(id=101, candidate_name="Davina", handoff_status="referred_to_hr")
+    with pytest.raises(HTTPException) as exc1:
+        only_from([cand1], SCREENED, "Sharing")
+    assert exc1.value.status_code == 409
+    assert "Davina has already been handed over to HR" in exc1.value.detail
+
+    cand2 = SimpleNamespace(id=102, candidate_name="Chippe Vinay Kumar", handoff_status="shared_with_placement")
+    with pytest.raises(HTTPException) as exc2:
+        only_from([cand2], SCREENED, "Sharing")
+    assert exc2.value.status_code == 409
+    assert "Chippe Vinay Kumar is already shared with the Placement Team" in exc2.value.detail
+
+
+
