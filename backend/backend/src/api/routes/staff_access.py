@@ -96,6 +96,27 @@ async def memberships(
     }
 
 
+def sign_in_preview(person: User, pairs: list) -> dict:
+    """What this person's own sign-in would send, so the dashboard previews the real menu.
+
+    Uses the same function as /me, not a second copy of the role rules. The access preview
+    used to rebuild the rules in the browser and showed program managers a lead menu and
+    plain facilitators a senior one, neither of which they get when they sign in.
+    """
+    from src.api.dependencies.admin import is_bulk_ats_user
+    from src.api.routes.users import _extract_primary_membership_and_claims
+
+    claims = _extract_primary_membership_and_claims(person, pairs)
+    keys = (
+        "is_admin", "is_super_admin", "access_role", "role", "is_team_lead", "colleges",
+        "domain", "purposes", "can_create_roles", "can_access_ats", "can_edit",
+        "is_view_only", "can_access_dashboard", "can_access_students",
+        "can_access_colleges", "can_access_interviews", "can_access_practice_interview",
+        "course_limited", "team_name", "membership_roles",
+    )
+    return {k: claims.get(k) for k in keys} | {"can_use_bulk_ats": is_bulk_ats_user(person)}
+
+
 @router.get("/people")
 async def people(
     q: str = fastapi.Query("", max_length=120),
@@ -135,6 +156,7 @@ async def people(
         .all()
     )
     teams: dict[int, list] = {}
+    pairs: dict[int, list] = {}
     if rows:
         found = await session.execute(
             sa.select(TeamMember, Team)
@@ -150,6 +172,7 @@ async def people(
             item = relationship_rows([(member, team)])[0]
             item["version"] = assignment_version(member)
             teams.setdefault(member.user_id, []).append(item)
+            pairs.setdefault(member.user_id, []).append((member, team))
     return {
         "items": [
             {
@@ -160,6 +183,7 @@ async def people(
                 "permissions": row.feature_permissions,
                 "version": row.feature_permissions_version,
                 "memberships": teams.get(row.id, []),
+                "sign_in_preview": sign_in_preview(row, pairs.get(row.id, [])),
             }
             for row in rows
         ],

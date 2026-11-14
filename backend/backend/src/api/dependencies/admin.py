@@ -148,6 +148,17 @@ CREATOR_ROLES = {
     "senior facilitator",
 }
 JUNIOR_ROLES = {"jr facilitator", "junior facilitator"}
+# Roles that read reports without editing anything. Production let every active staff member
+# read all analytics; these five fell through every branch below and lost it. Administrators
+# approved restoring it for them on 2026-11-13.
+VIEW_ANALYST_ROLES = {
+    "facilitator",
+    "program manager",
+    "placement staff",
+    "placement com",
+    "recruiter",
+    "partnership staff",
+}
 TEAM_MEMBER_ROLES = {"team member", "member", "staff"}
 UNRESTRICTED_COLLEGE_ROLES = CREATOR_ROLES | TEAM_MEMBER_ROLES
 LEAD_ROLES = {"lead", "team lead", "manager", "admin", "super admin", "creator"}
@@ -238,6 +249,7 @@ def calculate_user_permissions(
     is_sr_facilitator = False
     is_junior_facilitator = False
     is_team_member = False
+    is_view_analyst = False
     is_placement_member = False
     is_program_member = False
     junior_colleges: list[str] = []
@@ -281,6 +293,8 @@ def calculate_user_permissions(
 
         if m_role in {"recruiter", "placement staff", "placement com", "partnership staff"}:
             is_placement_staff = True
+        if m_role in VIEW_ANALYST_ROLES:
+            is_view_analyst = True
         if m_role in {"lead", "team lead", "manager"}:
             if is_placement:
                 is_placement_lead = True
@@ -402,6 +416,7 @@ def calculate_user_permissions(
         or (is_placement_creator and (placement_creator_unrestricted or has_create_interview or has_batch_progress))
         or (is_program_creator and (program_creator_unrestricted or has_create_interview or has_batch_progress))
         or (is_team_member and (has_create_interview or has_batch_progress))
+        or is_view_analyst
     )
 
     # Practice Interview: Leads, Senior Facilitators, and Creators (unrestricted or with interview/batch tag)
@@ -422,6 +437,7 @@ def calculate_user_permissions(
         or (is_placement_creator and (placement_creator_unrestricted or has_batch_progress))
         or (is_program_creator and (program_creator_unrestricted or has_batch_progress))
         or (is_team_member and has_batch_progress)
+        or is_view_analyst
     )
 
     # Students: Leads, Facilitators, or members/creators with batch/student progress tag (or unrestricted placement creators)
@@ -433,6 +449,7 @@ def calculate_user_permissions(
         or (is_placement_creator and (placement_creator_unrestricted or has_batch_progress or has_student_progress))
         or (is_program_creator and (program_creator_unrestricted or has_batch_progress or has_student_progress))
         or (is_team_member and (has_batch_progress or has_student_progress))
+        or is_view_analyst
     )
 
     # Colleges: Leads, Facilitators, or members/creators with college progress tag (or unrestricted placement creators)
@@ -444,6 +461,7 @@ def calculate_user_permissions(
         or (is_placement_creator and (placement_creator_unrestricted or has_college_progress))
         or (is_program_creator and (program_creator_unrestricted or has_college_progress))
         or (is_team_member and has_college_progress)
+        or is_view_analyst
     )
 
     # 3. College Scoping:
@@ -825,7 +843,7 @@ async def get_current_bulk_ats_user(
 
     raise fastapi.HTTPException(
         status_code=fastapi.status.HTTP_403_FORBIDDEN,
-        detail="Bulk ATS access is restricted to Placement/Partnership team creators, recruiters, and administrators. Regular team members do not have access.",
+        detail="Resume screening is for members of the Program and Placement teams and for administrators. Ask an administrator to add you to a team.",
     )
 
 

@@ -22,6 +22,7 @@ from src.models.schemas.job_profile import (
     PracticeTemplateUpdate,
     AssessmentRoleCreate,
     AssessmentRoleUpdate,
+    InterviewMode,
     JobProfileSummaryResponse,
     JobProfileResponse,
     JobProfileCreateV2,
@@ -206,6 +207,11 @@ async def get_job_profiles_summary(
 async def list_job_profiles(
     category: Optional[str] = fastapi.Query(None),
     limit: Optional[int] = fastapi.Query(None),
+    interview_mode: Optional[InterviewMode] = fastapi.Query(
+        None,
+        alias="interviewMode",
+        description="Only roles of this kind. The Practice feature asks for 'practice', assessments for 'assessment'.",
+    ),
     is_admin: bool = fastapi.Depends(check_is_admin_dep),
     current_user=fastapi.Depends(get_current_user),
     job_profile_repo: JobProfileCRUDRepository = fastapi.Depends(get_repository(repo_type=JobProfileCRUDRepository)),
@@ -228,7 +234,11 @@ async def list_job_profiles(
         else None
     )
     profiles = await job_profile_repo.list_profiles(
-        category=effective_category, limit=limit, is_admin=is_admin, visible_to=visible_to
+        category=effective_category,
+        limit=limit,
+        is_admin=is_admin,
+        visible_to=visible_to,
+        interview_mode=interview_mode,
     )
     if is_admin:
         return JobProfileListResponse(items=profiles, total=len(profiles))
