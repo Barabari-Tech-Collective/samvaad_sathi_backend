@@ -200,6 +200,8 @@ class JevClient(JevProvider):
     ):
         self._api_key = api_key
         self._base_url = base_url
+        if not model or model.strip().lower() in ("typesafe-1", "typesafe", ""):
+            model = "jev-1.14.0"
         self._model = model
         self._timeout = timeout
         self._cohort_key = cohort_key
@@ -250,7 +252,7 @@ class JevClient(JevProvider):
         except Exception as error:  # SDK transport errors may not be TypeSafeError.
             # SDK exception strings/bodies can contain provider request data.
             logger.warning(
-                "Jev unavailable (%s); manual review required", type(error).__name__
+                "Jev unavailable (%s: %s); manual review required", type(error).__name__, error
             )
             return await StubJevProvider().evaluate()
 
