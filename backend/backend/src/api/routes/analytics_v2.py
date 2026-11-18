@@ -252,6 +252,20 @@ def _metric_or_zero(value: Any, *, digits: int | None = None) -> int | float:
     return 0
 
 
+def _metric_or_none(value: Any, *, digits: int | None = None) -> int | float | None:
+    """Like `_metric_or_zero`, but "no data yet" stays None.
+
+    A KPI card for an average or a score must not show 0 for a learner who has
+    no scored interview: 0 reads as a failing learner. The dashboard renders None
+    as an em dash. Counts keep `_metric_or_zero`, where 0 is the true answer.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return _metric_or_zero(value, digits=digits)
+
+
 def _zero_fill_metric_nulls(payload: Any) -> Any:
     metric_hints = (
         "score",
@@ -1185,18 +1199,18 @@ async def get_student_summary(
     speech_scores = [item["speech_score"] for item in score_history if item.get("speech_score") is not None]
     knowledge_scores = [item["knowledge_score"] for item in score_history if item.get("knowledge_score") is not None]
 
-    true_avg_score = round(sum(overall_scores) / len(overall_scores), 2) if overall_scores else 0
-    true_avg_speech = round(sum(speech_scores) / len(speech_scores), 2) if speech_scores else 0
-    true_avg_knowledge = round(sum(knowledge_scores) / len(knowledge_scores), 2) if knowledge_scores else 0
+    true_avg_score = round(sum(overall_scores) / len(overall_scores), 2) if overall_scores else None
+    true_avg_speech = round(sum(speech_scores) / len(speech_scores), 2) if speech_scores else None
+    true_avg_knowledge = round(sum(knowledge_scores) / len(knowledge_scores), 2) if knowledge_scores else None
 
     kpis = [
         KpiCard(key="total_interviews", label="Total Interviews", value=attempts.get("interviews_attempted", 0)),
-        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(true_avg_score, digits=2)),
-        KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_zero(performance.get("improvement_rate"), digits=2), unit="percent"),
+        KpiCard(key="average_score", label="Average Score", value=_metric_or_none(true_avg_score, digits=2)),
+        KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_none(performance.get("improvement_rate"), digits=2), unit="percent"),
         KpiCard(key="last_active_date", label="Last Active Date", value=(score_history[-1].get("created_at").isoformat().replace("+00:00", "Z") if score_history and score_history[-1].get("created_at") else None)),
         KpiCard(key="practice_completion_rate", label="Practice Completion Rate", value=_metric_or_zero(practice.get("completion_ratio"), digits=2), unit="ratio"),
-        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero(true_avg_speech, digits=2)),
-        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero(true_avg_knowledge, digits=2)),
+        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_none(true_avg_speech, digits=2)),
+        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_none(true_avg_knowledge, digits=2)),
     ]
     return StudentSummaryResponse(student_id=student_id, kpis=kpis)
 
@@ -1661,9 +1675,9 @@ async def get_interviews_summary(
 
     kpis = [
         KpiCard(key="total_interviews", label="Total Interviews", value=total_interviews),
-        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(average_score, digits=2)),
+        KpiCard(key="average_score", label="Average Score", value=_metric_or_none(average_score, digits=2)),
         KpiCard(key="completion_rate", label="Completion Rate", value=_safe_percent(completed_interviews, total_interviews), unit="percent"),
-        KpiCard(key="average_duration", label="Typical duration", value=int(_metric_or_zero(average_duration)), unit="seconds"),
+        KpiCard(key="average_duration", label="Typical duration", value=(None if average_duration is None else int(_metric_or_zero(average_duration))), unit="seconds"),
         KpiCard(key="most_popular_role", label="Most Popular Role", value=popular_role[0] if popular_role else None),
         KpiCard(key="most_popular_difficulty", label="Most Popular Difficulty", value=popular_difficulty[0] if popular_difficulty else None),
     ]
@@ -1876,8 +1890,8 @@ async def get_college_detail_summary(
     kpis = [
         KpiCard(key="total_students_enrolled", label="Total Students Enrolled", value=students_count),
         KpiCard(key="students_with_interviews", label="Students Who Have Given Interviews", value=students_with_interviews),
-        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(summary.get("avg_score"), digits=2)),
-        KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_zero(summary.get("improvement_rate"), digits=2), unit="percent"),
+        KpiCard(key="average_score", label="Average Score", value=_metric_or_none(summary.get("avg_score"), digits=2)),
+        KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_none(summary.get("improvement_rate"), digits=2), unit="percent"),
         KpiCard(key="active_users_last_30_days", label="Active Users (Last 30 Days)", value=summary.get("usage_frequency")),
         KpiCard(key="completion_rate", label="Completion Rate", value=completion_rate, unit="percent"),
     ]
@@ -2159,12 +2173,12 @@ async def get_interview_detail_summary(
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
     question_level = metrics.get("question_level", [])
     kpis = [
-        KpiCard(key="overall_score", label="Overall Score", value=_metric_or_zero(metrics.get("total_score"), digits=2)),
+        KpiCard(key="overall_score", label="Overall Score", value=_metric_or_none(metrics.get("total_score"), digits=2)),
         KpiCard(key="duration", label="Duration", value=_metric_or_zero(metrics.get("duration_seconds")), unit="seconds"),
         KpiCard(key="difficulty_level", label="Difficulty Level", value=metrics.get("difficulty")),
         KpiCard(key="questions_count", label="Number of Questions", value=len(question_level)),
-        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero(metrics.get("speech_score"), digits=2)),
-        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero(metrics.get("knowledge_score"), digits=2)),
+        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_none(metrics.get("speech_score"), digits=2)),
+        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_none(metrics.get("knowledge_score"), digits=2)),
         KpiCard(key="completion_status", label="Completion Status", value=metrics.get("status")),
         # Scored identically to Assessment - this is the only card that tells a
         # reviewer whether this sitting is a scouting signal or a formal record.

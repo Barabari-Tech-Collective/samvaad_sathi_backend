@@ -13,3 +13,13 @@ def test_decimal_average_is_kept():
 def test_missing_values_are_zero():
     assert _metric_or_zero(None) == 0
     assert _metric_or_zero(float("nan")) == 0
+
+
+def test_metric_or_none_keeps_no_data_distinct_from_zero():
+    # A learner with no scored interview must not show "Average score 0".
+    from src.api.routes.analytics_v2 import _metric_or_none
+
+    assert _metric_or_none(None) is None
+    assert _metric_or_none(float("nan")) is None
+    assert _metric_or_none(0) == 0
+    assert _metric_or_none(decimal.Decimal("61.456"), digits=2) == 61.46
