@@ -53,6 +53,7 @@ def build_category_evidence(
     preferred_skills: list[str],
     link_report: dict,
     jev_report: dict,
+    deterministic_report: dict | None = None,
 ) -> dict[str, list[dict]]:
     parsed = parsed_resume_json or {}
     resume_skills = parsed.get("skills") or []
@@ -103,26 +104,66 @@ def build_category_evidence(
         entries = parsed.get(key) or []
         for entry in entries[:3] if isinstance(entries, list) else []:
             if isinstance(entry, dict):
-                preferred_fields = {
-                    "education": ("degree", "institution", "field"),
-                    "experience": (
-                        "role",
-                        "company",
-                        "responsibilities",
-                        "description",
-                    ),
-                    "projects": ("name", "description", "technologies"),
-                }[key]
-                fragments = [
-                    _compact(entry.get(field), 100)
-                    for field in preferred_fields
-                    if entry.get(field)
-                ]
-                text = " — ".join(fragments)
+                if key == "education":
+                    edu_fragments = []
+                    for field in ("degree", "institution", "field"):
+                        val = entry.get(field)
+                        if val:
+                            edu_fragments.append(_compact(val, 100))
+
+                    grade_val = (
+                        entry.get("grade")
+                        or entry.get("cgpa")
+                        or entry.get("gpa")
+                        or entry.get("cpi")
+                        or entry.get("percentage")
+                        or entry.get("marks")
+                    )
+                    if grade_val:
+                        g_str = str(grade_val).strip()
+                        if not any(token in g_str.lower() for token in ("cgpa", "gpa", "grade", "%", "marks", "cpi")):
+                            g_str = f"CGPA: {g_str}"
+                        edu_fragments.append(_compact(g_str, 60))
+                    text = " — ".join(edu_fragments)
+                else:
+                    preferred_fields = {
+                        "experience": (
+                            "role",
+                            "company",
+                            "responsibilities",
+                            "description",
+                        ),
+                        "projects": ("name", "description", "technologies"),
+                    }[key]
+                    fragments = [
+                        _compact(entry.get(field), 100)
+                        for field in preferred_fields
+                        if entry.get(field)
+                    ]
+                    text = " — ".join(fragments)
             else:
                 text = _compact(entry)
             if text:
                 evidence[key].append(with_location({"source": source, "text": _compact(text)}))
+
+    # Surface detected CGPA / academic performance from deterministic analysis if not already visible
+    if deterministic_report:
+        edu_mod = (
+            deterministic_report.get("deterministicMetrics", {}).get("educationModule", {})
+            or deterministic_report.get("educationAnalysis", {})
+        )
+        grade_analysis = edu_mod.get("educationAnalysis", {}).get("grade", {})
+        detected_grade = grade_analysis.get("detectedValue")
+        if grade_analysis.get("present") and detected_grade and detected_grade != "Missing":
+            already_shown = any(
+                str(detected_grade).lower() in str(item.get("text", "")).lower()
+                for item in evidence["education"]
+            )
+            if not already_shown:
+                evidence["education"].append(with_location({
+                    "source": "resume.education",
+                    "text": f"Academic score: {detected_grade}",
+                }))
 
     missing_links = (link_report or {}).get("missing_required") or []
     if missing_links:
