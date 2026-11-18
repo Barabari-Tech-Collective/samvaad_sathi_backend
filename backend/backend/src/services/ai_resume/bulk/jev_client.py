@@ -334,7 +334,7 @@ def get_jev_provider(*, cohort_key: str = "") -> JevProvider:
         return JevClient(
             api_key=settings.JEV_API_KEY,
             base_url=settings.JEV_API_BASE_URL or None,
-            model=settings.JEV_MODEL or None,
+            model=settings.JEV_MODEL or "jev-1.14.0",
             timeout=settings.JEV_TIMEOUT_SECONDS,
             cohort_key=cohort_key,
         )
