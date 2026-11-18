@@ -116,6 +116,8 @@ from src.api.routes.coaching_hub import router as coaching_hub_router
 router.include_router(router=coaching_hub_router)
 router.include_router(router=interview_hub_router)
 router.include_router(router=learners_router)
+from src.api.routes.program_learners import router as program_learners_router
+router.include_router(router=program_learners_router)
 from src.api.routes.assessment_records import router as assessment_records_router
 router.include_router(router=assessment_records_router)
 
