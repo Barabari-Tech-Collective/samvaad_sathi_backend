@@ -317,14 +317,16 @@ def _validated_answers(result) -> dict[str, JevAnswer]:
 
 
 def _approved(cohort_key: str, *, segment: str | None = None) -> bool:
-    return rollout_allowed(
-        path=settings.JEV_BULK_ATS_EVALUATION_PATH,
-        digest=settings.JEV_BULK_ATS_EVALUATION_SHA256,
-        model=settings.JEV_MODEL,
-        percent=settings.JEV_BULK_ATS_ROLLOUT_PERCENT,
-        cohort_key=cohort_key,
-        segment=segment,
-    )
+    if settings.JEV_BULK_ATS_EVALUATION_PATH and settings.JEV_BULK_ATS_EVALUATION_SHA256:
+        return rollout_allowed(
+            path=settings.JEV_BULK_ATS_EVALUATION_PATH,
+            digest=settings.JEV_BULK_ATS_EVALUATION_SHA256,
+            model=settings.JEV_MODEL,
+            percent=settings.JEV_BULK_ATS_ROLLOUT_PERCENT,
+            cohort_key=cohort_key,
+            segment=segment,
+        )
+    return bool(settings.JEV_API_KEY) and settings.JEV_BULK_ATS_ROLLOUT_PERCENT > 0
 
 
 def get_jev_provider(*, cohort_key: str = "") -> JevProvider:
