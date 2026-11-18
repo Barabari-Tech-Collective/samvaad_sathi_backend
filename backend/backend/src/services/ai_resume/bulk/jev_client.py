@@ -201,7 +201,7 @@ class JevClient(JevProvider):
         self._api_key = api_key
         self._base_url = base_url
         if not model or model.strip().lower() in ("typesafe-1", "typesafe", ""):
-            model = "jev-1.14.0"
+            model = "jev-latest"
         self._model = model
         self._timeout = timeout
         self._cohort_key = cohort_key
@@ -336,7 +336,7 @@ def get_jev_provider(*, cohort_key: str = "") -> JevProvider:
         return JevClient(
             api_key=settings.JEV_API_KEY,
             base_url=settings.JEV_API_BASE_URL or None,
-            model=settings.JEV_MODEL or "jev-1.14.0",
+            model=settings.JEV_MODEL or "jev-latest",
             timeout=settings.JEV_TIMEOUT_SECONDS,
             cohort_key=cohort_key,
         )
