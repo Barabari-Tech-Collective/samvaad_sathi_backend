@@ -80,6 +80,8 @@ from src.api.routes.mock_assignments import router as mock_assignments_router
 router.include_router(router=mock_assignments_router)
 from src.api.routes.student_placement import router as student_placement_router
 router.include_router(router=student_placement_router)
+from src.api.routes.whatsapp_updates import router as whatsapp_updates_router
+router.include_router(router=whatsapp_updates_router)
 from src.api.routes.learning_plans import router as learning_plans_router
 router.include_router(router=learning_plans_router)
 from src.api.routes.student_home import router as student_home_router
