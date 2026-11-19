@@ -65,7 +65,9 @@ async def submit_resume_score_to_barabari(
     resume_score: int,
     request_id: str,
     target_role: str | None = None,
+    backfill: bool = False,
 ) -> None:
+    """Posts a resume score to Sampark. backfill=True asks Sampark to store it without messaging."""
     api_key = settings.SAMPARK_SAATHI_API_KEY
     base_url = settings.SAMPARK_SAATHI_BASE_URL
 
@@ -83,6 +85,7 @@ async def submit_resume_score_to_barabari(
                 headers={
                     "SAMVAAD-SAATHI-API-KEY": api_key,
                     "requestId": request_id,
+                    **({"X-Backfill": "true"} if backfill else {}),
                 },
                 json={
                     "studentUniqueId": student_id,
