@@ -11,6 +11,7 @@ from arq import cron
 from arq.worker import func
 
 from src.config.manager import settings
+from src.services.barabari_integration import verify_sampark_integration_configuration
 from src.worker.queue import SLOW_QUEUE
 from src.worker.settings import redis_settings
 from src.worker.tasks import (
@@ -29,11 +30,20 @@ from src.worker.tasks import (
 )
 
 
+async def verify_configuration(ctx: dict) -> None:
+    """Refuse to start the worker when a configured integration cannot work."""
+    verify_sampark_integration_configuration()
+
+
 class WorkerSettings:
+    on_startup = verify_configuration
     functions = [
         func(synchronize_sampark_enrollments_task,max_tries=1,timeout=300),
-        submit_resume_score_task,
-        submit_batch_choice_task,
+        # Callbacks to Sampark retry with a growing delay. Without their own max_tries the
+        # class-wide max_tries = 1 below refused every retry, so a short Sampark outage lost
+        # the resume score (platform audit F17).
+        func(submit_resume_score_task, max_tries=8),
+        func(submit_batch_choice_task, max_tries=8),
         generate_questions_task,
         func(generate_summary_report_task, max_tries=8, timeout=300),
         func(process_answer_transcription_task, max_tries=3, timeout=300),
@@ -73,8 +83,10 @@ class SlowWorkerSettings:
 
     queue_name = SLOW_QUEUE
     functions = [
-        submit_resume_score_task,
-        submit_batch_choice_task,
+        # Same retry budget as on the main worker: the class-wide max_tries = 1 would refuse
+        # every retry, and a short Sampark outage would lose the score (platform audit F17).
+        func(submit_resume_score_task, max_tries=8),
+        func(submit_batch_choice_task, max_tries=8),
         generate_questions_task,
         func(generate_summary_report_task, max_tries=8, timeout=300),
         process_bulk_ats_candidate_task,

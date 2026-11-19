@@ -451,6 +451,10 @@ class BackendBaseSettings(BaseSettings):
     SAMPARK_ENROLLMENT_MAX_AGE_SECONDS: int = decouple.config("SAMPARK_ENROLLMENT_MAX_AGE_SECONDS", cast=int, default=900)
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
+    # The resume-score and batch-choice callbacks to Sampark. When on (the default), the API and
+    # the worker refuse to start if SAMPARK_SAATHI_BASE_URL or SAMPARK_SAATHI_API_KEY is empty,
+    # instead of skipping every callback with only a log line. Turn off for local work and tests.
+    SAMPARK_INTEGRATION_ENABLED: bool = decouple.config("SAMPARK_INTEGRATION_ENABLED", cast=bool, default=True)  # type: ignore
     # Where Samvaad reads Sampark's open batches and reports a learner's batch choice. Optional:
     # when empty the SAMPARK_SAATHI_* pair above is used. Set these to point the batch list at
     # one Sampark while the resume-score callback stays on another.

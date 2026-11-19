@@ -17,6 +17,39 @@ logger = logging.getLogger(__name__)
 RESUME_SCORE_PATH = "/samvaad-saathi/v1/resume-score"
 
 
+class PermanentCallbackError(Exception):
+    """Sampark rejected the request in a way retrying cannot fix (for example 400 or 404)."""
+
+
+def verify_sampark_integration_configuration() -> None:
+    """Fail at startup, naming what is missing, when the Sampark callbacks cannot work.
+
+    Without this, a missing setting made every resume-score callback return early with a log
+    line, so scores never reached Sampark and nobody noticed (platform audit F18). Local work
+    and tests opt out with SAMPARK_INTEGRATION_ENABLED=False.
+    """
+    if not getattr(settings, "SAMPARK_INTEGRATION_ENABLED", True):
+        logger.warning("Sampark integration is off (SAMPARK_INTEGRATION_ENABLED=False): resume scores will not be sent")
+        return
+    missing = [
+        name
+        for name in ("SAMPARK_SAATHI_BASE_URL", "SAMPARK_SAATHI_API_KEY")
+        if not str(getattr(settings, name, "") or "").strip()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Sampark integration is on but not configured: set "
+            + ", ".join(missing)
+            + ". Without them no resume score reaches Sampark. For local work only, set "
+            "SAMPARK_INTEGRATION_ENABLED=False."
+        )
+
+
+def is_permanent_status(status_code: int) -> bool:
+    """4xx means the request itself is wrong; retrying will not help. 408 and 429 are the exceptions."""
+    return 400 <= status_code < 500 and status_code not in (408, 429)
+
+
 def batches_connection() -> tuple[str, str]:
     """(base URL, service key) for the batch list and batch-choice calls to Sampark.
 
@@ -37,11 +70,11 @@ async def submit_resume_score_to_barabari(
     base_url = settings.SAMPARK_SAATHI_BASE_URL
 
     if not api_key or not base_url:
-        logger.warning(
-            "RequestId: %s | SAMPARK_SAATHI_API_KEY/BASE_URL not configured, skipping resume-score callback",
-            request_id,
-        )
-        return
+        if not getattr(settings, "SAMPARK_INTEGRATION_ENABLED", True):
+            return
+        # Startup refuses this configuration; reaching here means settings changed at runtime.
+        # Raise so the job is retried and shows up as failed, instead of being skipped silently.
+        raise RuntimeError("SAMPARK_SAATHI_API_KEY/BASE_URL not configured")
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -62,6 +95,16 @@ async def submit_resume_score_to_barabari(
                 "RequestId: %s | Resume score submitted to Barabari for student: %s",
                 request_id, student_id,
             )
+    except httpx.HTTPStatusError as exc:
+        if is_permanent_status(exc.response.status_code):
+            raise PermanentCallbackError(
+                f"Sampark refused the resume score for student {student_id}: HTTP {exc.response.status_code}"
+            ) from exc
+        logger.warning(
+            "RequestId: %s | Resume score for student %s not accepted yet (HTTP %s); will retry",
+            request_id, student_id, exc.response.status_code,
+        )
+        raise
     except Exception:
         logger.exception(
             "RequestId: %s | Failed to submit resume score to Barabari for student: %s (will retry via arq if attempts remain)",
@@ -81,18 +124,17 @@ async def submit_batch_choice_to_sampark(email: str, batch_key: str, request_id:
     retried. Anything else (a network error, a non-2xx reply) raises so arq retries."""
     base_url, api_key = batches_connection()
     if not api_key or not base_url:
-        logger.warning(
-            "RequestId: %s | Sampark batches connection not configured (SAMPARK_BATCHES_* or SAMPARK_SAATHI_*), "
-            "skipping batch-choice callback",
-            request_id,
-        )
-        return
+        if not getattr(settings, "SAMPARK_INTEGRATION_ENABLED", True):
+            return
+        raise RuntimeError("Sampark batches connection not configured (SAMPARK_BATCHES_* or SAMPARK_SAATHI_*)")
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(
             f"{base_url}{BATCH_CHOICE_PATH}",
             headers={"SAMVAAD-SAATHI-API-KEY": api_key, "requestId": request_id},
             json={"email": email, "batchKey": batch_key},
         )
+    if is_permanent_status(response.status_code):
+        raise PermanentCallbackError(f"Sampark refused the batch choice: HTTP {response.status_code}")
     response.raise_for_status()
     outcome = (response.json() or {}).get("data") or {}
     logger.info(

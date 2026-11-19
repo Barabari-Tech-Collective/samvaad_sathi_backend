@@ -22,6 +22,7 @@ settings = {
     # the migration gate before it could execute a single statement.
     "DB_SSL_ENABLED": "False",
     "REQUIRE_CENTRAL_AUTH_CONFIG": "False",
+    "SAMPARK_INTEGRATION_ENABLED": "False",
 }
 os.environ.update(settings)
 sys.path.insert(0, str(ROOT / "backend/backend"))

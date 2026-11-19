@@ -5,6 +5,7 @@ import pytest
 
 # Tests build the app without a central auth service; production keeps the strict default.
 os.environ.setdefault("REQUIRE_CENTRAL_AUTH_CONFIG", "False")
+os.environ.setdefault("SAMPARK_INTEGRATION_ENABLED", "False")
 
 
 @pytest.fixture(autouse=True)
