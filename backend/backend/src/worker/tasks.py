@@ -693,6 +693,7 @@ async def submit_resume_score_task(
     resume_score: int,
     request_id: str,
     target_role: str | None = None,
+    event_id: str | None = None,
 ) -> None:
     """Wraps submit_resume_score_to_barabari for arq. Converts a plain
     exception into arq.worker.Retry with an escalating delay (2s, 4s, ...) so
@@ -705,6 +706,7 @@ async def submit_resume_score_task(
             resume_score=resume_score,
             request_id=request_id,
             target_role=target_role,
+            event_id=event_id,
         )
     except PermanentCallbackError:
         # Retrying cannot fix a 4xx; log it once and stop.

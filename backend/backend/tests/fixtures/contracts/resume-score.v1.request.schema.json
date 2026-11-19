@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "barabari/resume-score/v1.request",
+  "title": "Samvaad -> Sampark resume score",
+  "type": "object",
+  "required": [
+    "studentUniqueId",
+    "resumeScore"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "studentUniqueId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resumeScore": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "targetRole": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "eventId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Optional in v1; same value on every retry of one evaluation"
+    }
+  }
+}
