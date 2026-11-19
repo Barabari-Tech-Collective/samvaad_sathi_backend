@@ -59,6 +59,9 @@ class BackendBaseSettings(BaseSettings):
     # per request; with a far-away database turn it off and lower the recycle time.
     DB_POOL_PRE_PING: bool = decouple.config("DB_POOL_PRE_PING", cast=bool, default=True)  # type: ignore
     DB_POOL_RECYCLE_SECONDS: int = decouple.config("DB_POOL_RECYCLE_SECONDS", cast=int, default=3600)  # type: ignore
+    # Set when Postgres sits behind PgBouncer in transaction mode, the way past the
+    # 20-connection limit at 300 students. asyncpg's statement cache must be off there.
+    DB_BEHIND_PGBOUNCER: bool = decouple.config("DB_BEHIND_PGBOUNCER", cast=bool, default=False)
     # The arq worker keeps its own, smaller pool. It is sized for concurrent
     # jobs - a number we choose - rather than concurrent HTTP requests, and it
     # is spent from the same server-wide connection ceiling as the API pool
@@ -69,6 +72,25 @@ class BackendBaseSettings(BaseSettings):
     )  # type: ignore
     WORKER_DB_POOL_OVERFLOW: int = decouple.config(
         "WORKER_DB_POOL_OVERFLOW", cast=int, default=3
+    )  # type: ignore
+    # Concurrent jobs per worker process. Transcription and follow-ups run on the
+    # default queue; with WORKER_SLOW_QUEUE_ENABLED, reports, question writing and
+    # Bulk ATS move to a second queue served by samvaad-worker-slow.service, so a
+    # class finishing at once never delays the next student's transcript.
+    # Staff analytics requests allowed to run at once per API process; the rest
+    # wait (see api/bulkhead.py) so dashboards cannot take students' connections.
+    ANALYTICS_MAX_CONCURRENCY: int = decouple.config(
+        "ANALYTICS_MAX_CONCURRENCY", cast=int, default=4
+    )  # type: ignore
+    ANALYTICS_QUEUE_WAIT_SECONDS: float = decouple.config(
+        "ANALYTICS_QUEUE_WAIT_SECONDS", cast=float, default=20.0
+    )  # type: ignore
+    WORKER_MAX_JOBS: int = decouple.config("WORKER_MAX_JOBS", cast=int, default=10)  # type: ignore
+    WORKER_SLOW_MAX_JOBS: int = decouple.config(
+        "WORKER_SLOW_MAX_JOBS", cast=int, default=4
+    )  # type: ignore
+    WORKER_SLOW_QUEUE_ENABLED: bool = decouple.config(
+        "WORKER_SLOW_QUEUE_ENABLED", cast=bool, default=False
     )  # type: ignore
     DB_POSTGRES_PORT: int = decouple.config("POSTGRES_PORT", cast=int)  # type: ignore
     DB_POSTGRES_SCHEMA: str = decouple.config("POSTGRES_SCHEMA", cast=str)  # type: ignore

@@ -1,6 +1,6 @@
 """One learner record for staff (architecture pack sec 3, "One learner detail page").
 
-The page has Summary, Coaching, Mock Interviews, Assessments and Opportunities sections.
+The page has Summary, Coaching, mock interviews, Assessments and Opportunities sections.
 Each section keeps its own endpoint and rules; this endpoint only says who the learner is,
 which of the learner's courses this person may act in, which sections they may open, and
 lists the cross-course records (human rounds, openings) that have no other per-learner view.
