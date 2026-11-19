@@ -12,7 +12,9 @@ from src.config.json_logging import configure_root_logging
 from src.config.manager import settings as _settings
 from arq.worker import func
 
+from src.config.manager import settings
 from src.services.barabari_integration import verify_sampark_integration_configuration
+from src.worker.queue import SLOW_QUEUE
 from src.worker.settings import redis_settings
 from src.worker.tasks import (
     dispatch_notification_deliveries_task,
@@ -22,6 +24,7 @@ from src.worker.tasks import (
     generate_summary_report_task,
     process_bulk_ats_candidate_task,
     purge_expired_bulk_ats_batches_task,
+    refresh_dashboard_aggregate_task,
     sweep_stalled_answer_transcriptions_task,
     submit_batch_choice_task,
     submit_resume_score_task,
@@ -51,6 +54,7 @@ class WorkerSettings:
         process_bulk_ats_candidate_task,
         generate_bulk_ats_feedback_task,
         purge_expired_bulk_ats_batches_task,
+        func(refresh_dashboard_aggregate_task, max_tries=1, timeout=120),
     ]
     cron_jobs = [
         cron(dispatch_notification_deliveries_task, minute=set(range(60)), run_at_startup=False, timeout=120),
@@ -66,6 +70,33 @@ class WorkerSettings:
         ),
     ]
     redis_settings = redis_settings
+    max_jobs = settings.WORKER_MAX_JOBS
     max_tries = (
         1  # question generation must not auto-retry (would create duplicate questions)
     )
+
+
+class SlowWorkerSettings:
+    """Second process for long jobs, used when WORKER_SLOW_QUEUE_ENABLED is on:
+
+        arq src.worker.main.SlowWorkerSettings
+
+    See deploy/samvaad-worker-slow.service. No cron jobs run here; the default
+    worker keeps them.
+    """
+
+    queue_name = SLOW_QUEUE
+    functions = [
+        # Same retry budget as on the main worker: the class-wide max_tries = 1 would refuse
+        # every retry, and a short Sampark outage would lose the score (platform audit F17).
+        func(submit_resume_score_task, max_tries=8),
+        func(submit_batch_choice_task, max_tries=8),
+        generate_questions_task,
+        func(generate_summary_report_task, max_tries=8, timeout=300),
+        process_bulk_ats_candidate_task,
+        generate_bulk_ats_feedback_task,
+        func(refresh_dashboard_aggregate_task, max_tries=1, timeout=120),
+    ]
+    redis_settings = redis_settings
+    max_jobs = settings.WORKER_SLOW_MAX_JOBS
+    max_tries = 1

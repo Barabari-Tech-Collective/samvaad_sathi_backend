@@ -11,6 +11,7 @@ import logging
 from arq.connections import ArqRedis, create_pool
 from arq.jobs import Job as ArqJob
 
+from src.config.manager import settings
 from src.worker.settings import build_redis_settings
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,28 @@ logger = logging.getLogger(__name__)
 _enqueue_redis_settings = build_redis_settings(fail_fast=True)
 
 _pool: ArqRedis | None = None
+
+SLOW_QUEUE = "arq:slow"
+# Long model calls and batch work. They go to their own queue (when enabled) so
+# they cannot take the slots transcription and follow-ups need.
+SLOW_JOBS = frozenset(
+    {
+        "generate_summary_report_task",
+        "generate_questions_task",
+        "submit_resume_score_task",
+        "submit_batch_choice_task",
+        "process_bulk_ats_candidate_task",
+        "generate_bulk_ats_feedback_task",
+        "refresh_dashboard_aggregate_task",
+    }
+)
+
+
+def queue_for(function_name: str) -> str | None:
+    """The queue a job belongs on; None means arq's default queue."""
+    if settings.WORKER_SLOW_QUEUE_ENABLED and function_name in SLOW_JOBS:
+        return SLOW_QUEUE
+    return None
 
 
 async def _get_pool() -> ArqRedis | None:
@@ -44,6 +67,9 @@ async def enqueue_job(function_name: str, **kwargs) -> str | None:
     if pool is None:
         return None
     try:
+        queue_name = queue_for(function_name)
+        if queue_name is not None and "_queue_name" not in kwargs:
+            kwargs["_queue_name"] = queue_name
         job = await pool.enqueue_job(function_name, **kwargs)
         return job.job_id if job else None
     except Exception as exc:

@@ -40,12 +40,19 @@ class SuggestedProjectSchema(BaseModel):
     tags: List[str]
 
 class HygieneCheck(BaseModel):
-    grammarIssues: List[str]
-    hasLinkedIn: bool
-    hasGithub: bool
-    hasPortfolio: bool
-    hasPhone: bool
-    hasEmail: bool
+    grammarIssues: List[str] = []
+    hasLinkedIn: bool = False
+    hasGithub: bool = False
+    hasPortfolio: bool = False
+    hasPhone: bool = False
+    hasEmail: bool = False
+    hasInstitution: Optional[bool] = False
+    hasDuration: Optional[bool] = False
+    hasScore: Optional[bool] = False
+    hasCgpaOrPercentage: Optional[bool] = False
+    detectedScore: Optional[str] = None
+    detectedCgpaOrPercentage: Optional[str] = None
+    scoreMessage: Optional[str] = None
 
 class ResumeAnalysisResponse(BaseModel):
     analysisId: str

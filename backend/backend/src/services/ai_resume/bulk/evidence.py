@@ -5,6 +5,9 @@ from __future__ import annotations
 import copy
 import re
 from typing import Any
+from src.services.ai_resume.scoring.skill_normalizer import SkillNormalizer
+
+_normalizer = SkillNormalizer()
 
 _LABELS = {
     "skills": "Skills match",
@@ -18,6 +21,104 @@ _LABELS = {
 def _compact(value: Any, limit: int = 220) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _check_skill_match(
+    req: str,
+    parsed_skills: list[str],
+    candidate_canonicals: set[str],
+    candidate_clean_tokens: set[str],
+    resume_text: str,
+    normalizer: SkillNormalizer,
+) -> bool:
+    """
+    Universal multi-domain skill verification:
+    1. Canonical alias matching (SkillNormalizer)
+    2. Parsed skills direct & qualifier stripping (e.g., 'Microsoft Excel (advanced)')
+    3. Word-level subphrase matching in compound skills (e.g., 'Programming & Data Analysis')
+    4. Raw résumé text scanning with symbol-safe word boundaries across all domains
+    """
+    if not req or not isinstance(req, str):
+        return False
+
+    req_clean = req.strip().casefold()
+    if not req_clean:
+        return False
+
+    # 1. Canonical normalization check
+    req_canon = normalizer.normalize(req_clean)
+    if req_canon and req_canon in candidate_canonicals:
+        return True
+
+    # 2. Direct casefolded token or candidate match
+    if req_clean in candidate_clean_tokens:
+        return True
+
+    # Stripped parenthetical check: e.g. "exploratory data analysis (eda)" -> "exploratory data analysis"
+    req_no_paren = re.sub(r"\(.*?\)", "", req_clean).strip()
+    if req_no_paren and req_no_paren in candidate_clean_tokens:
+        return True
+
+    # 3. Check parsed skill entries for word-level subphrases or qualifiers
+    for cand in parsed_skills:
+        cand_clean = cand.strip().casefold()
+        if not cand_clean:
+            continue
+
+        cand_no_paren = re.sub(r"\(.*?\)", "", cand_clean).strip()
+        if req_clean == cand_clean or req_clean == cand_no_paren:
+            return True
+
+        # Check if req is a whole subphrase in cand (e.g. "data analysis" in "programming & data analysis")
+        escaped_req = re.escape(req_no_paren if req_no_paren else req_clean)
+        if re.search(r'(?i)(?:^|(?<=[^a-zA-Z0-9_]))' + escaped_req + r'(?:$|(?=[^a-zA-Z0-9_]))', cand_clean):
+            return True
+
+        # Check qualifiers (e.g. req="Advanced Excel" and cand has "advanced" + "excel")
+        if "advanced" in req_clean and "excel" in req_clean:
+            if "advanced" in cand_clean and "excel" in cand_clean:
+                return True
+        if "basic" in req_clean and "excel" in req_clean:
+            if "excel" in cand_clean:
+                return True
+
+    # 4. Raw resume text search (Universal fallback across all roles and domains)
+    if resume_text:
+        text_lower = resume_text.lower()
+
+        # If canonical is known, check canonical aliases in raw text
+        if req_canon and req_canon in normalizer.alias_matrix.values():
+            matching_aliases = [
+                alias for alias, canon in normalizer.alias_matrix.items() if canon == req_canon
+            ]
+            for alias in matching_aliases:
+                escaped = re.escape(alias)
+                pat = r"(?:^|(?<=[^a-zA-Z0-9_]))" + escaped + r"(?:$|(?=[^a-zA-Z0-9_]))"
+                if re.search(pat, text_lower):
+                    return True
+
+        # Special domain combinations:
+        # e.g., "Advanced Excel": match "advanced excel", "excel (advanced)", "microsoft excel (advanced)"
+        if "advanced" in req_clean and "excel" in req_clean:
+            if re.search(r'(?i)\b(?:advanced\s+(?:ms\s+|microsoft\s+)?excel|(?:ms\s+|microsoft\s+)?excel\s*\(?advanced\)?)\b', resume_text):
+                return True
+
+        # e.g., "Microsoft Excel": match "microsoft excel" or "ms excel" or "excel"
+        if req_clean in {"microsoft excel", "excel", "ms excel"}:
+            if re.search(r'(?i)\b(?:microsoft\s+excel|ms\s+excel|excel)\b', resume_text):
+                return True
+
+        # Flexible phrase search in raw resume text for any skill (supporting spaces, hyphens, slashes)
+        search_target = req_no_paren if req_no_paren else req_clean
+        if len(search_target) >= 2:
+            escaped_words = [re.escape(w) for w in re.split(r'[\s\-_/]+', search_target) if w]
+            if escaped_words:
+                flex_pattern = r'[\s\-_/]+'.join(escaped_words)
+                pat = r"(?i)(?:^|(?<=[^a-zA-Z0-9_]))" + flex_pattern + r"(?:$|(?=[^a-zA-Z0-9_]))"
+                if re.search(pat, text_lower):
+                    return True
+
+    return False
 
 
 def redact_for_semantic_scoring(
@@ -53,6 +154,7 @@ def build_category_evidence(
     preferred_skills: list[str],
     link_report: dict,
     jev_report: dict,
+    deterministic_report: dict | None = None,
 ) -> dict[str, list[dict]]:
     parsed = parsed_resume_json or {}
     resume_skills = parsed.get("skills") or []
@@ -60,12 +162,42 @@ def build_category_evidence(
         str(item.get("name") if isinstance(item, dict) else item)
         for item in resume_skills
     ]
-    skill_lookup = {item.casefold(): item for item in skill_strings if item.strip()}
     requested = required_skills + preferred_skills
-    matched = [
-        skill_lookup[s.casefold()] for s in requested if s.casefold() in skill_lookup
-    ]
-    missing = [s for s in required_skills if s.casefold() not in skill_lookup]
+
+    candidate_canonicals: set[str] = set()
+    candidate_clean_tokens: set[str] = set()
+
+    for item in skill_strings:
+        c_str = item.strip()
+        if not c_str:
+            continue
+        candidate_clean_tokens.add(c_str.casefold())
+        c_no_paren = re.sub(r"\(.*?\)", "", c_str).strip().casefold()
+        if c_no_paren:
+            candidate_clean_tokens.add(c_no_paren)
+
+        for t in _normalizer.normalize_tokens(c_str):
+            candidate_canonicals.add(t)
+        direct_c = _normalizer.normalize(c_str)
+        if direct_c:
+            candidate_canonicals.add(direct_c)
+
+    matched: list[str] = []
+    missing: list[str] = []
+    for req in requested:
+        if _check_skill_match(
+            req=req,
+            parsed_skills=skill_strings,
+            candidate_canonicals=candidate_canonicals,
+            candidate_clean_tokens=candidate_clean_tokens,
+            resume_text=resume_text,
+            normalizer=_normalizer,
+        ):
+            if req not in matched:
+                matched.append(req)
+        else:
+            if req in required_skills and req not in missing:
+                missing.append(req)
 
     evidence: dict[str, list[dict]] = {key: [] for key in _LABELS}
 
@@ -82,12 +214,12 @@ def build_category_evidence(
         return item
     if matched:
         evidence["skills"].append(with_location(
-            {"source": "resume.skills", "text": f"Matched: {', '.join(matched[:12])}"}
+            {"source": "resume.skills", "text": f"Matched: {', '.join(matched[:30])}"}
         ))
     if missing:
         evidence["skills"].append(with_location({
                 "source": "role.requiredSkills",
-                "text": f"Not evidenced: {', '.join(missing[:12])}",
+                "text": f"Not evidenced: {', '.join(missing[:30])}",
             }))
     if skill_strings and not requested:
             evidence["skills"].append(with_location({
@@ -103,26 +235,66 @@ def build_category_evidence(
         entries = parsed.get(key) or []
         for entry in entries[:3] if isinstance(entries, list) else []:
             if isinstance(entry, dict):
-                preferred_fields = {
-                    "education": ("degree", "institution", "field"),
-                    "experience": (
-                        "role",
-                        "company",
-                        "responsibilities",
-                        "description",
-                    ),
-                    "projects": ("name", "description", "technologies"),
-                }[key]
-                fragments = [
-                    _compact(entry.get(field), 100)
-                    for field in preferred_fields
-                    if entry.get(field)
-                ]
-                text = " — ".join(fragments)
+                if key == "education":
+                    edu_fragments = []
+                    for field in ("degree", "institution", "field"):
+                        val = entry.get(field)
+                        if val:
+                            edu_fragments.append(_compact(val, 100))
+
+                    grade_val = (
+                        entry.get("grade")
+                        or entry.get("cgpa")
+                        or entry.get("gpa")
+                        or entry.get("cpi")
+                        or entry.get("percentage")
+                        or entry.get("marks")
+                    )
+                    if grade_val:
+                        g_str = str(grade_val).strip()
+                        if not any(token in g_str.lower() for token in ("cgpa", "gpa", "grade", "%", "marks", "cpi")):
+                            g_str = f"CGPA: {g_str}"
+                        edu_fragments.append(_compact(g_str, 60))
+                    text = " — ".join(edu_fragments)
+                else:
+                    preferred_fields = {
+                        "experience": (
+                            "role",
+                            "company",
+                            "responsibilities",
+                            "description",
+                        ),
+                        "projects": ("name", "description", "technologies"),
+                    }[key]
+                    fragments = [
+                        _compact(entry.get(field), 100)
+                        for field in preferred_fields
+                        if entry.get(field)
+                    ]
+                    text = " — ".join(fragments)
             else:
                 text = _compact(entry)
             if text:
                 evidence[key].append(with_location({"source": source, "text": _compact(text)}))
+
+    # Surface detected CGPA / academic performance from deterministic analysis if not already visible
+    if deterministic_report:
+        edu_mod = (
+            deterministic_report.get("deterministicMetrics", {}).get("educationModule", {})
+            or deterministic_report.get("educationAnalysis", {})
+        )
+        grade_analysis = edu_mod.get("educationAnalysis", {}).get("grade", {})
+        detected_grade = grade_analysis.get("detectedValue")
+        if grade_analysis.get("present") and detected_grade and detected_grade != "Missing":
+            already_shown = any(
+                str(detected_grade).lower() in str(item.get("text", "")).lower()
+                for item in evidence["education"]
+            )
+            if not already_shown:
+                evidence["education"].append(with_location({
+                    "source": "resume.education",
+                    "text": f"Academic score: {detected_grade}",
+                }))
 
     missing_links = (link_report or {}).get("missing_required") or []
     if missing_links:
