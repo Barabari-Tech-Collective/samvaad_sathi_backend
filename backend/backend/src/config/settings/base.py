@@ -59,6 +59,9 @@ class BackendBaseSettings(BaseSettings):
     # per request; with a far-away database turn it off and lower the recycle time.
     DB_POOL_PRE_PING: bool = decouple.config("DB_POOL_PRE_PING", cast=bool, default=True)  # type: ignore
     DB_POOL_RECYCLE_SECONDS: int = decouple.config("DB_POOL_RECYCLE_SECONDS", cast=int, default=3600)  # type: ignore
+    # Set when Postgres sits behind PgBouncer in transaction mode, the way past the
+    # 20-connection limit at 300 students. asyncpg's statement cache must be off there.
+    DB_BEHIND_PGBOUNCER: bool = decouple.config("DB_BEHIND_PGBOUNCER", cast=bool, default=False)
     # The arq worker keeps its own, smaller pool. It is sized for concurrent
     # jobs - a number we choose - rather than concurrent HTTP requests, and it
     # is spent from the same server-wide connection ceiling as the API pool

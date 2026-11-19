@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 class AsyncDatabase:
     def __init__(self):
         connect_args = {}
+        if getattr(settings, "DB_BEHIND_PGBOUNCER", False):
+            connect_args["statement_cache_size"] = 0
+            connect_args["prepared_statement_cache_size"] = 0
         if settings.DB_SSL_ENABLED:
             # Existing managed Postgres deployments require encrypted
             # connections. Local development can set DB_SSL_ENABLED=False.

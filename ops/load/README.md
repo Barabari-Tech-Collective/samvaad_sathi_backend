@@ -28,3 +28,15 @@ Overview (all of its requests in parallel), then think 15-45 s. AI providers are
 The p95 tail comes from the first minute, when 100 staff open the Overview at the same second
 on a cold cache, and from the 2 shared cores. Each request costs about 7 ms of CPU in this stack,
 so one core serves about 140 requests a second.
+
+## Results, 19 Nov 2026 evening: 300 students and 100 staff (same 2-core sandbox, 12 API connections)
+
+| Run | Staff Overview p50 / p95 | Student Home p50 / p95 | Transcript poll p50 / p95 | Errors |
+| --- | --- | --- | --- | --- |
+| Before the sign-in race fix | 0.48 s / 12.1 s | 0.50 s / 11.4 s | 0.35 s / 4.5 s | 77 x 500 (two first requests created the same user), ~1,800 x 503 |
+| After the fix | 0.77 s / 10.7 s | 0.73 s / 10.9 s | 0.24 s / 2.7 s | no 500s; ~1,400 x 503 (5% of 26,628 requests) |
+
+Every 503 is a request that waited 10 s for one of the 12 API connections. At 300 students
+the limit is Postgres's 20 connections, not the code: put PgBouncer (transaction mode) in
+front and set `DB_BEHIND_PGBOUNCER=true`, which turns off asyncpg's statement cache as that
+mode needs. Then raise the API pools and run this test again.
