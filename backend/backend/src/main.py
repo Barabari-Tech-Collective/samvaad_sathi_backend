@@ -163,6 +163,17 @@ def initialize_backend_application() -> fastapi.FastAPI:
                 detail = f"{detail} (detail: {traceback.format_exc(limit=0).strip()})"
             return fastapi.responses.JSONResponse(status_code=500, content={"detail": detail})
 
+    # Inside CORS, so a "busy" 503 still carries CORS headers the browser can read.
+    from src.api.bulkhead import AnalyticsBulkhead, analytics_prefixes, cached_dashboard_prefixes
+
+    app.add_middleware(
+        AnalyticsBulkhead,
+        prefixes=analytics_prefixes(),
+        limit=settings.ANALYTICS_MAX_CONCURRENCY,
+        wait_seconds=settings.ANALYTICS_QUEUE_WAIT_SECONDS,
+        exempt=cached_dashboard_prefixes(),
+    )
+
     # Add middleware BEFORE including routers (middleware is applied in reverse order)
     # CORS middleware should be added first to handle preflight requests
     app.add_middleware(

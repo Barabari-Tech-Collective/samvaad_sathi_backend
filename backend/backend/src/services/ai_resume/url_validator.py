@@ -6,10 +6,11 @@ from loguru import logger
 # Regex to find common URLs in resume text, including specific professional domains without http
 URL_PATTERN = re.compile(
     r'https?://[^\s<>"]+|www\.[^\s<>"]+|'
-    r"(?:github\.com|linkedin\.com/in|gitlab\.com|bitbucket\.org|vercel\.app|"
-    r"netlify\.app|onrender\.com|herokuapp\.com|kaggle\.com|public\.tableau\.com|"
-    r"app\.powerbi\.com|figma\.com|behance\.net|dribbble\.com|medium\.com|"
-    r'notion\.site|twitter\.com|x\.com|youtube\.com)/?[^\s<>"]*'
+    r"(?:github\.com|linkedin\.com/in|gitlab\.com|bitbucket\.org|leetcode\.com|"
+    r"hackerrank\.com|codechef\.com|codeforces\.com|geeksforgeeks\.org|lovable\.app|"
+    r"carrd\.co|bento\.me|vercel\.app|netlify\.app|onrender\.com|herokuapp\.com|"
+    r"kaggle\.com|public\.tableau\.com|app\.powerbi\.com|figma\.com|behance\.net|"
+    r'dribbble\.com|medium\.com|notion\.site|twitter\.com|x\.com|youtube\.com)/?[^\s<>"]*'
 )
 
 # We will focus validation primarily on professional profiles.
@@ -18,6 +19,14 @@ PROFESSIONAL_DOMAINS = [
     "linkedin.com",
     "gitlab.com",
     "bitbucket.org",
+    "leetcode.com",
+    "hackerrank.com",
+    "codechef.com",
+    "codeforces.com",
+    "geeksforgeeks.org",
+    "lovable.app",
+    "carrd.co",
+    "bento.me",
     "vercel.app",
     "netlify.app",
     "onrender.com",

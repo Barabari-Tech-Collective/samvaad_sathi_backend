@@ -162,7 +162,7 @@ REQUIREMENTS:
 3. Extract all skills into a flat array of strings.
 4. Extract work experience into an array of objects. Each must have: title, duration, company, and an array of bullet points (highlights).
 5. Extract projects into an array of objects. Each must have: title, duration, description, projectUrl (when explicitly associated with that project), and an array of bullet points (highlights). Do not invent a URL.
-6. Extract education into an array of objects. Each must have: degree, institution, duration, and grade (CGPA or percentage if available).
+6. Extract education into an array of objects. Each must have: degree, institution, duration, and grade (CGPA, GPA, percentage, CPI, or marks if available - always extract any academic score or grade mentioned in the resume).
 7. Return ONLY valid JSON matching the schema exactly. No markdown wrappers.
 
 JSON SCHEMA EXPECTED:

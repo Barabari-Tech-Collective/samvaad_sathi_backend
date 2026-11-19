@@ -1298,6 +1298,17 @@ async def structured_output(
                 latency_ms,
             )
 
+            # "{}" or JSON with none of the expected keys validates against an
+            # all-optional schema. That is a failed call, not an empty analysis:
+            # report it so callers show a retry instead of saving a blank score.
+            if not parsed.model_dump(exclude_none=True):
+                logger.warning(
+                    "[LLM] EMPTY STRUCTURED RESULT | model=%s | schema=%s",
+                    model,
+                    model_class.__name__,
+                )
+                return None, "The model returned no usable fields", latency_ms, model
+
             return parsed, None, latency_ms, model
 
         except pydantic.ValidationError as validation_error:
