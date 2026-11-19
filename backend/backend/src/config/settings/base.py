@@ -264,6 +264,11 @@ class BackendBaseSettings(BaseSettings):
     # matches Redis's own fail-open-at-startup behavior - a stopped consumer just means
     # revocation isn't enforced, not that the app fails to start.
     RABBITMQ_ENABLED: bool = decouple.config("RABBITMQ_ENABLED", cast=bool, default=False)  # type: ignore
+    # Interview updates on WhatsApp through the Barabari messaging hub (phase 9). Comma list of
+    # events to send: scheduled,rescheduled,cancelled,reminder,result. Empty = none (default).
+    WHATSAPP_EVENTS: str = decouple.config("WHATSAPP_EVENTS", cast=str, default="")  # type: ignore
+    WHATSAPP_HUB_EXCHANGE: str = decouple.config("WHATSAPP_HUB_EXCHANGE", cast=str, default="whatsapp.message-exchange")  # type: ignore
+    WHATSAPP_HUB_ROUTING_KEY: str = decouple.config("WHATSAPP_HUB_ROUTING_KEY", cast=str, default="whatsapp.message-routing-key")  # type: ignore
     RABBITMQ_HOST: str = decouple.config("RABBITMQ_HOST", cast=str, default="localhost")  # type: ignore
     RABBITMQ_PORT: int = decouple.config("RABBITMQ_PORT", cast=int, default=5672)  # type: ignore
     RABBITMQ_USERNAME: str = decouple.config("RABBITMQ_USERNAME", cast=str, default="guest")  # type: ignore

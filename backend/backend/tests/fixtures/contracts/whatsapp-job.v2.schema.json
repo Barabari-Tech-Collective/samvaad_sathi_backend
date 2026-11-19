@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "barabari/whatsapp-job/v2",
+  "title": "WhatsApp job v2",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "requestId",
+    "eventType",
+    "source",
+    "occurredAt",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "eventId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "requestId": {
+      "type": "string"
+    },
+    "eventType": {
+      "enum": [
+        "WELCOME_MESSAGE",
+        "RESUME_ROUND_STEP1_MESSAGE",
+        "RESUME_ROUND_STEP2_MESSAGE",
+        "INTERVIEW_RESULT_MESSAGE",
+        "BULK_CAMPAIGN",
+        "INTERVIEW_SCHEDULED",
+        "INTERVIEW_RESCHEDULED",
+        "INTERVIEW_CANCELLED",
+        "INTERVIEW_REMINDER",
+        "INTERVIEW_RESULT_RELEASED"
+      ]
+    },
+    "source": {
+      "enum": [
+        "sampark-saathi-service",
+        "samvaad",
+        "dashboard",
+        "code-guru"
+      ]
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "studentUniqueId",
+          "dispatchKey",
+          "variables"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "studentUniqueId": {
+            "type": "string"
+          },
+          "dispatchKey": {
+            "type": "string"
+          },
+          "templateKey": {
+            "type": "string",
+            "description": "Optional: when absent the hub picks the template from message_rule."
+          },
+          "variables": {
+            "type": "object",
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number"
+              ]
+            }
+          },
+          "phone": {
+            "type": "string",
+            "description": "Optional and discouraged: when absent the hub looks it up in Sampark at send time. Never logged."
+          },
+          "consent": {
+            "type": "boolean",
+            "description": "false records blocked_no_consent and sends nothing"
+          }
+        }
+      }
+    }
+  },
+  "description": "v2.1: phone and templateKey optional (no personal data on the queue); Samvaad interview events."
+}
