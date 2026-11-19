@@ -16,6 +16,7 @@ import sqlalchemy as sa
 from src.models.db.human_interview import HumanInterview
 from src.models.db.notification import Notification, NotificationDelivery
 from src.models.db.user import User
+from src.services import whatsapp_hub
 
 logger = logging.getLogger(__name__)
 UTC = dt.timezone.utc
@@ -63,6 +64,13 @@ async def human_event(session, row, event, *, now=None):
             recipient_id=row.student_id, event=event, related_id=row.id, scheduled_for=now,
         )
     )
+    whatsapp = whatsapp_hub.enabled_events()
+    if event in whatsapp:
+        session.add(
+            NotificationDelivery(
+                recipient_id=row.student_id, channel="whatsapp", event=event, related_id=row.id, scheduled_for=now,
+            )
+        )
     # Any reminder made for an older time or a cancelled interview must not go out.
     await session.execute(
         supersede_reminders(session).where(NotificationDelivery.related_id == row.id)
@@ -78,6 +86,13 @@ async def human_event(session, row, event, *, now=None):
                         expected_starts_at=row.starts_at, scheduled_for=when,
                     )
                 )
+                if "reminder" in whatsapp:
+                    session.add(
+                        NotificationDelivery(
+                            recipient_id=row.student_id, channel="whatsapp", event="reminder", related_id=row.id,
+                            expected_starts_at=row.starts_at, scheduled_for=when,
+                        )
+                    )
 
 
 async def payload_for(session, row):
@@ -142,6 +157,31 @@ async def _finish_simple(item, event, payload, send, now, counts) -> None:
     counts[item.status] = counts.get(item.status, 0) + 1
 
 
+async def _publish_whatsapp(session, item, row, now, counts, publish=None) -> None:
+    """One WhatsApp row: publish an envelope v2 job to the hub; retry with backoff."""
+    publish = publish or whatsapp_hub.publish
+    student = await session.get(User, item.recipient_id)
+    student_unique_id = getattr(student, "student_id", None)
+    if not student_unique_id:
+        item.status, item.last_error = "skipped", "Not a Barabari student (no Sampark id), so no WhatsApp."
+        counts["skipped"] = counts.get("skipped", 0) + 1
+        return
+    item.attempts += 1
+    try:
+        await publish(whatsapp_hub.envelope(item.id, item.event, student_unique_id, row, now))
+        item.status, item.sent_at, item.last_error = "sent", now, None
+        counts["sent"] = counts.get("sent", 0) + 1
+    except Exception as error:  # broker down: keep the row and try again
+        logger.warning("whatsapp_hub_publish_failed delivery_id=%s: %s", item.id, error)
+        item.last_error = f"Could not reach the messaging hub: {str(error)[:200]}"
+        if item.attempts < MAX_ATTEMPTS + 2:
+            item.scheduled_for = now + dt.timedelta(minutes=2 ** item.attempts)
+            counts["retry"] += 1
+        else:
+            item.status = "failed"
+            counts["failed"] = counts.get("failed", 0) + 1
+
+
 async def dispatch_due(session, *, now=None, limit=50, send=send_now):
     """Send what is due. Safe to run from several workers at once."""
     now = now or dt.datetime.now(UTC)
@@ -183,6 +223,9 @@ async def dispatch_due(session, *, now=None, limit=50, send=send_now):
             item.status, item.last_error = "superseded", "The interview changed or already started."
         elif item.event in ("scheduled", "rescheduled") and row.status == "cancelled":
             item.status, item.last_error = "superseded", "Cancelled before this was sent."
+        elif item.channel == "whatsapp":
+            await _publish_whatsapp(session, item, row, now, counts)
+            continue
         else:
             event = "scheduled" if item.event == "reminder" else item.event
             payload = await payload_for(session, row)
