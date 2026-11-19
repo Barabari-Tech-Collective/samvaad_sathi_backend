@@ -59,7 +59,29 @@ def _safe_link_records(verified_links: dict[str, Any]) -> list[dict[str, Any]]:
         platform = str(details.get("platform") or "").strip()
         if platform in {"system_link", "email"}:
             continue
-        human_platform = platform.replace("_", " ").strip().title()
+        platform_labels = {
+            "leetcode": "LeetCode",
+            "hackerrank": "HackerRank",
+            "codechef": "CodeChef",
+            "codeforces": "Codeforces",
+            "geeksforgeeks": "GeeksforGeeks",
+            "github": "GitHub",
+            "gitlab": "GitLab",
+            "bitbucket": "Bitbucket",
+            "linkedin": "LinkedIn",
+            "kaggle": "Kaggle",
+            "tableau": "Tableau",
+            "power_bi": "Power BI",
+            "lovable": "Lovable",
+            "notion": "Notion",
+            "medium": "Medium",
+            "figma": "Figma",
+            "behance": "Behance",
+            "dribbble": "Dribbble",
+        }
+        human_platform = platform_labels.get(
+            platform, platform.replace("_", " ").strip().title()
+        )
         if platform in {"custom_domain", "custom_deployment"}:
             human_platform = parsed.netloc
         records.append(
@@ -88,6 +110,25 @@ def _matches_requirement(link: dict[str, Any], requirement: str) -> bool:
             "behance",
             "dribbble",
             "figma",
+            "lovable",
+            "carrd",
+            "bento",
+            "readcv",
+            "polywork",
+        }
+    if requirement in {
+        "coding_profile",
+        "leetcode",
+        "hackerrank",
+        "competitive_programming",
+        "coding",
+    }:
+        return category == "coding_profile" or platform in {
+            "leetcode",
+            "hackerrank",
+            "codechef",
+            "codeforces",
+            "geeksforgeeks",
         }
     if requirement == "linkedin":
         return platform == "linkedin" or "linkedin.com/" in url
@@ -96,6 +137,7 @@ def _matches_requirement(link: dict[str, Any], requirement: str) -> bool:
             "repository",
             "deployment",
             "portfolio",
+            "coding_profile",
             "design",
             "blog",
             "project",
