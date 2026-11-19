@@ -1,4 +1,5 @@
 import logging
+from src.config.json_logging import configure_root_logging
 import traceback
 
 import fastapi
@@ -80,11 +81,8 @@ def verify_central_auth_configuration() -> None:
 
 def initialize_backend_application() -> fastapi.FastAPI:
 
-    logging.basicConfig(
-        level=settings.LOGGING_LEVEL,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        force=True,
-    )
+    # LOG_FORMAT=json for one JSON line per record; phone numbers are masked either way.
+    configure_root_logging(settings.LOGGING_LEVEL)
 
      # Configure application logging
     logging.getLogger().setLevel(settings.LOGGING_LEVEL)
