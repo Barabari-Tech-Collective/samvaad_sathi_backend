@@ -67,6 +67,8 @@ from src.models.schemas.analytics_v2 import (
 from src.services.analytics import LIGHT_INTERVIEW, LIGHT_USER, AnalyticsService, _extract_overall_score
 from src.services.people import student_interview, student_only
 from src.services.course_access import legacy_analytics_guard
+from src.services.legacy_analytics_usage import count_legacy_call
+from src.services.legacy_analytics_usage import usage as legacy_usage
 from src.repository.redis_client import async_redis
 
 
@@ -87,8 +89,25 @@ router = fastapi.APIRouter(
     prefix="/v2/analytics",
     tags=["analytics-v2"],
     responses=COMMON_ERROR_RESPONSES,
-    dependencies=[Depends(get_current_admin_user), Depends(legacy_analytics_guard)],
+    dependencies=[Depends(get_current_admin_user), Depends(legacy_analytics_guard), Depends(count_legacy_call)],
+    # ADR-3: superseded by the hub summaries; removed once a release shows no calls.
+    deprecated=True,
 )
+
+usage_router = fastapi.APIRouter(prefix="/v2/analytics-usage", tags=["analytics-v2"])
+
+
+@usage_router.get("")
+async def legacy_analytics_usage(
+    days: int = fastapi.Query(30, ge=1, le=40),
+    user=Depends(get_current_admin_user),
+):
+    """Calls per legacy analytics route per day, for deciding which routes to remove."""
+    from src.api.dependencies.admin import is_admin_user
+
+    if not is_admin_user(user):
+        raise fastapi.HTTPException(403, "Administrator access required.")
+    return {"days": await legacy_usage(days)}
 
 
 _logger = logging.getLogger(__name__)
