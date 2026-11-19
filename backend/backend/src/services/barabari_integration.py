@@ -66,6 +66,7 @@ async def submit_resume_score_to_barabari(
     request_id: str,
     target_role: str | None = None,
     backfill: bool = False,
+    event_id: str | None = None,
 ) -> None:
     """Posts a resume score to Sampark. backfill=True asks Sampark to store it without messaging."""
     api_key = settings.SAMPARK_SAATHI_API_KEY
@@ -91,6 +92,9 @@ async def submit_resume_score_to_barabari(
                     "studentUniqueId": student_id,
                     "resumeScore": resume_score,
                     "targetRole": target_role,
+                    # Same on every retry of this evaluation, so Sampark applies it once
+                    # (contracts/resume-score v1).
+                    **({"eventId": event_id} if event_id else {}),
                 },
             )
             response.raise_for_status()
