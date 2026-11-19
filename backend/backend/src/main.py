@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from src.services.barabari_integration import verify_sampark_integration_configuration
 from src.api.endpoints import router as api_endpoint_router
 from src.config.events import (
     execute_backend_server_event_handler,
@@ -94,6 +95,7 @@ def initialize_backend_application() -> fastapi.FastAPI:
     load_dotenv()
     verify_sso_configuration()
     verify_central_auth_configuration()
+    verify_sampark_integration_configuration()
     app = fastapi.FastAPI(**settings.set_backend_app_attributes)  # type: ignore
 
     # Tags metadata for Swagger grouping

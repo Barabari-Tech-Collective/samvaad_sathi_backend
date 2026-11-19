@@ -14,6 +14,7 @@ from arq.worker import Retry
 from sqlalchemy import select
 
 from src.services.barabari_integration import (
+    PermanentCallbackError,
     submit_batch_choice_to_sampark,
     submit_resume_score_to_barabari,
 )
@@ -655,6 +656,10 @@ async def submit_resume_score_task(
             request_id=request_id,
             target_role=target_role,
         )
+    except PermanentCallbackError:
+        # Retrying cannot fix a 4xx; log it once and stop.
+        logger.exception("RequestId: %s | resume-score callback refused permanently", request_id)
+        return
     except Exception as exc:
         job_try = ctx.get("job_try", 1)
         raise Retry(defer=2 * job_try) from exc
@@ -665,6 +670,9 @@ async def submit_batch_choice_task(ctx: dict, *, email: str, batch_key: str, req
     resume-score callback; WorkerSettings.max_tries caps the attempts."""
     try:
         await submit_batch_choice_to_sampark(email=email, batch_key=batch_key, request_id=request_id)
+    except PermanentCallbackError:
+        logger.exception("RequestId: %s | batch-choice callback refused permanently", request_id)
+        return
     except Exception as exc:
         raise Retry(defer=2 * ctx.get("job_try", 1)) from exc
 
