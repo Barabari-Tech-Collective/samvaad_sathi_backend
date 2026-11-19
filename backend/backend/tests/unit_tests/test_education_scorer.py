@@ -204,3 +204,28 @@ def test_candidate_detail_exposes_parsed_education():
     assert detail["parsedEducation"][0]["institution"] == "IIT Madras"
     assert detail["parsedEducation"][0]["grade"] == "8.8"
 
+
+def test_hygiene_check_includes_education_score():
+    from src.services.ai_resume.scoring.ats_calculator import ATSCalculator
+    calc = ATSCalculator()
+    education_report = {
+        "educationAnalysis": {
+            "institution": {"present": True},
+            "duration": {"present": True},
+            "grade": {"present": True, "detectedValue": "CGPA: 9.0"},
+        }
+    }
+    hygiene = calc._generate_hygiene_snapshot(
+        link_report={"categoryBreakdown": {}},
+        education_report=education_report,
+        raw_resume_text="Contact: test@example.com, +91 9876543210",
+    )
+    assert hygiene["hasEmail"] is True
+    assert hygiene["hasPhone"] is True
+    assert hygiene["hasDuration"] is True
+    assert hygiene["hasScore"] is True
+    assert hygiene["hasCgpaOrPercentage"] is True
+    assert hygiene["detectedScore"] == "CGPA: 9.0"
+    assert "CGPA: 9.0" in hygiene["scoreMessage"]
+
+
