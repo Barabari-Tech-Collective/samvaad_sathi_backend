@@ -27,6 +27,9 @@ APP_ROOT=${APP_ROOT:-/home/ubuntu/apps/samvaad_sathi_backend}
 VENV=${VENV:-$APP_ROOT/venv}
 API_SERVICE=${API_SERVICE:-samvaad_sathi_backend.service}
 WORKER_SERVICE=${WORKER_SERVICE:-samvaad-worker.service}
+# Optional second worker for long jobs (WORKER_SLOW_QUEUE_ENABLED=true); restarted only if installed.
+SLOW_WORKER_SERVICE=${SLOW_WORKER_SERVICE:-samvaad-worker-slow.service}
+restart_slow_worker() { systemctl cat "$SLOW_WORKER_SERVICE" >/dev/null 2>&1 && sudo systemctl restart "$SLOW_WORKER_SERVICE" || true; }
 HEALTH_URL=${HEALTH_URL:-http://127.0.0.1:8000/api/health}
 
 [[ $(id -un) == ubuntu ]] || { echo 'Run as the ubuntu user that owns the checkout'; exit 2; }
@@ -97,6 +100,7 @@ rollback() {
     || { echo 'URGENT: rollback dependency install failed'; rollback_ok=false; }
   sudo systemctl restart "$API_SERVICE" "$WORKER_SERVICE" \
     || { echo 'URGENT: rollback restart failed'; rollback_ok=false; }
+  restart_slow_worker
   if wait_until_ready && [[ $rollback_ok == true ]]; then
     echo 'Rolled back and healthy'
   else
@@ -131,7 +135,7 @@ cd "$APP_ROOT"
 "$VENV/bin/python" ops/check_schema_drift.py
 echo "Database migration verified at $current_revision"
 
-sudo systemctl restart "$API_SERVICE" "$WORKER_SERVICE"
+sudo systemctl restart "$API_SERVICE" "$WORKER_SERVICE"; restart_slow_worker
 
 wait_until_ready || { echo 'New release failed its health check'; false; }
 

@@ -70,6 +70,17 @@ class BackendBaseSettings(BaseSettings):
     WORKER_DB_POOL_OVERFLOW: int = decouple.config(
         "WORKER_DB_POOL_OVERFLOW", cast=int, default=3
     )  # type: ignore
+    # Concurrent jobs per worker process. Transcription and follow-ups run on the
+    # default queue; with WORKER_SLOW_QUEUE_ENABLED, reports, question writing and
+    # Bulk ATS move to a second queue served by samvaad-worker-slow.service, so a
+    # class finishing at once never delays the next student's transcript.
+    WORKER_MAX_JOBS: int = decouple.config("WORKER_MAX_JOBS", cast=int, default=10)  # type: ignore
+    WORKER_SLOW_MAX_JOBS: int = decouple.config(
+        "WORKER_SLOW_MAX_JOBS", cast=int, default=4
+    )  # type: ignore
+    WORKER_SLOW_QUEUE_ENABLED: bool = decouple.config(
+        "WORKER_SLOW_QUEUE_ENABLED", cast=bool, default=False
+    )  # type: ignore
     DB_POSTGRES_PORT: int = decouple.config("POSTGRES_PORT", cast=int)  # type: ignore
     DB_POSTGRES_SCHEMA: str = decouple.config("POSTGRES_SCHEMA", cast=str)  # type: ignore
     DB_TIMEOUT: int = decouple.config("DB_TIMEOUT", cast=int)  # type: ignore

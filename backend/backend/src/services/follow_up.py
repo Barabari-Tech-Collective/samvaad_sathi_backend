@@ -201,6 +201,15 @@ class FollowUpService:
                 )
                 return None
 
+        # Hand the database connection back before the model call. The worker pool
+        # is small (5 connections for 10 jobs) and the call takes 5-10 seconds, so
+        # holding it here made other jobs wait for a connection. Nothing is written
+        # above, and everything below re-reads and locks the rows it publishes to.
+        # Worker sessions use expire_on_commit=False, so the loaded rows stay usable.
+        in_transaction = getattr(self._async_session, "in_transaction", None)
+        if in_transaction is not None and in_transaction():
+            await self._async_session.commit()
+
         llm_start = time.perf_counter()
 
         logger.info(

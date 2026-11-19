@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import functools
+import hashlib
+import json
+import logging
 import math
 import re
 from collections import defaultdict
@@ -61,6 +65,7 @@ from src.models.schemas.analytics_v2 import (
 from src.services.analytics import AnalyticsService, _extract_overall_score
 from src.services.people import student_interview, student_only
 from src.services.course_access import legacy_analytics_guard
+from src.repository.redis_client import async_redis
 
 
 COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -82,6 +87,50 @@ router = fastapi.APIRouter(
     responses=COMMON_ERROR_RESPONSES,
     dependencies=[Depends(get_current_admin_user), Depends(legacy_analytics_guard)],
 )
+
+
+_logger = logging.getLogger(__name__)
+_AGGREGATE_TTL_SECONDS = 60
+
+
+def _aggregate_cache(handler):
+    """Share a dashboard aggregate for 60 seconds between staff who see the same data.
+
+    These charts are counts over the whole period; a minute's delay is invisible,
+    while 100 staff each re-running a dozen aggregate queries is not. The key is the
+    endpoint, its filters and the caller's college scope, so two people share an
+    entry only when the backend would compute the same answer for both. Redis
+    being down only means no cache.
+    """
+
+    @functools.wraps(handler)
+    async def wrapper(**kwargs):
+        user = kwargs["current_user"]
+        session = kwargs["session"]
+        allowed = await get_user_allowed_colleges(user, session)
+        filters = {
+            k: (v.value if isinstance(v, Enum) else v)
+            for k, v in kwargs.items()
+            if k not in {"current_user", "session"}
+        }
+        scope = sorted(allowed) if allowed is not None else "*"
+        raw = json.dumps([handler.__name__, filters, scope], default=str, sort_keys=True)
+        key = "analytics:v2:" + hashlib.sha256(raw.encode()).hexdigest()
+        try:
+            hit = await async_redis.client.get(key)
+            if hit:
+                return json.loads(hit)
+        except Exception:  # noqa: BLE001 - a cache miss, never a failed page
+            _logger.debug("analytics cache unavailable", exc_info=True)
+        result = await handler(**kwargs)
+        try:
+            body = result.model_dump_json() if hasattr(result, "model_dump_json") else json.dumps(result, default=str)
+            await async_redis.client.set(key, body, ex=_AGGREGATE_TTL_SECONDS)
+        except Exception:  # noqa: BLE001
+            _logger.debug("analytics cache write skipped", exc_info=True)
+        return result
+
+    return wrapper
 
 
 # Staff and students are in India; a "day" on the Overview is an Indian day.
@@ -377,6 +426,7 @@ async def verify_interview_access(
     description="Returns KPI cards for students, activity, interview volume, average score, and completion metrics."
     " Supports optional date, role, difficulty, and college filters.",
 )
+@_aggregate_cache
 async def get_dashboard_overview(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -457,6 +507,7 @@ async def get_dashboard_overview(
     description="Reasoning: helps identify usage spikes and troughs over time for operational monitoring."
     " Output: time-series points with date and interview count.",
 )
+@_aggregate_cache
 async def get_dashboard_interviews_per_day(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -491,6 +542,7 @@ async def get_dashboard_interviews_per_day(
 
 
 @router.get("/dashboard/active-users-trend", response_model=TimeSeriesResponse, status_code=200, summary="Active users trend", description="Reasoning: tracks daily engagement breadth across unique users. Output: date-wise active-user time-series points.")
+@_aggregate_cache
 async def get_dashboard_active_users_trend(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -520,6 +572,7 @@ async def get_dashboard_active_users_trend(
 
 
 @router.get("/dashboard/new-students-trend", response_model=TimeSeriesResponse, status_code=200, summary="New students trend", description="Reasoning: tracks daily new user signups. Output: date-wise new student time-series points.")
+@_aggregate_cache
 async def get_dashboard_new_students_trend(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -563,6 +616,7 @@ async def get_dashboard_new_students_trend(
 
 
 @router.get("/dashboard/top-roles", response_model=DashboardTopListResponse, status_code=200, summary="Top roles by interview volume", description="Reasoning: identifies highest-demand roles for planning content and resources. Output: top-list role metrics.")
+@_aggregate_cache
 async def get_dashboard_top_roles(
     limit: int = fastapi.Query(default=5, ge=1, le=20),
     start_date: datetime.date | None = None,
@@ -608,6 +662,7 @@ async def get_dashboard_top_roles(
     description="Reasoning: surfaces institutional adoption and performance concentration for program decisions."
     " Output: top-list rows keyed by college with aggregate metrics.",
 )
+@_aggregate_cache
 async def get_dashboard_top_colleges(
     limit: int = fastapi.Query(default=5, ge=1, le=20),
     start_date: datetime.date | None = None,
@@ -643,6 +698,7 @@ async def get_dashboard_top_colleges(
     summary="Students per college",
     description="Returns top colleges by number of unique students who took interviews in the given period.",
 )
+@_aggregate_cache
 async def get_dashboard_students_per_college(
     limit: int = fastapi.Query(default=10, ge=1, le=100),
     view_type: str = fastapi.Query(default="all"),
@@ -724,6 +780,7 @@ async def get_dashboard_students_per_college(
     description="Reasoning: reveals score spread and calibration quality instead of relying only on averages."
     " Output: histogram buckets with range label and count.",
 )
+@_aggregate_cache
 async def get_dashboard_score_distribution(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
