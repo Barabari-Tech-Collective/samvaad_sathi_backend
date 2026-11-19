@@ -239,6 +239,7 @@
  "GET /api/v2/teams/{team_id}/members",
  "GET /api/v2/teams/{team_id}/recycle-bin",
  "GET /api/v2/template-courses",
+ "GET /api/v2/whatsapp-updates/me",
  "GET /docs",
  "GET /docs/oauth2-redirect",
  "GET /openapi.json",
@@ -444,5 +445,6 @@
  "PUT /api/v2/practice-templates/{profile_id}",
  "PUT /api/v2/profile-context/me/{item_id}",
  "PUT /api/v2/readiness/courses/{course_id}/rule",
- "PUT /api/v2/staff-access/memberships/{membership_id}"
+ "PUT /api/v2/staff-access/memberships/{membership_id}",
+ "PUT /api/v2/whatsapp-updates/me"
 ]
