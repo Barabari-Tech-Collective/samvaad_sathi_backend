@@ -561,6 +561,7 @@ async def run_candidate_pipeline(
         preferred_skills=preferred_skills,
         link_report=link_requirement_report,
         jev_report=jev_report,
+        deterministic_report=deterministic_report,
     )
     confidence = calculate_confidence(
         role_context=role_context,

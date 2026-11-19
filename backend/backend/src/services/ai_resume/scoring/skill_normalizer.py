@@ -1,5 +1,6 @@
+from __future__ import annotations
 import re
-from typing import Set
+from typing import Set, List
 
 
 class SkillNormalizer:
@@ -157,18 +158,54 @@ class SkillNormalizer:
             "invision": "invision",
             "web design": "webdesign",
             "website design": "webdesign",
-            # --- AI / ML / DATA ---
+            # --- AI / ML / DATA / ANALYTICS ---
             "openai": "openai",
             "langchain": "langchain",
             "tensorflow": "tensorflow",
             "pytorch": "pytorch",
             "pandas": "pandas",
             "numpy": "numpy",
+            "matplotlib": "matplotlib",
+            "seaborn": "seaborn",
             "power bi": "powerbi",
             "powerbi": "powerbi",
             "tableau": "tableau",
             "microsoft excel": "excel",
+            "ms excel": "excel",
+            "msexcel": "excel",
             "excel": "excel",
+            "advanced excel": "advanced_excel",
+            "microsoft excel (advanced)": "advanced_excel",
+            "excel (advanced)": "advanced_excel",
+            "excel advanced": "advanced_excel",
+            "ms excel (basic)": "excel",
+            "excel (basic)": "excel",
+            "data analysis": "data_analysis",
+            "data analytics": "data_analysis",
+            "data cleaning": "data_cleaning",
+            "data preprocessing": "datapreprocessing",
+            "data wrangling": "data_wrangling",
+            "data munging": "data_wrangling",
+            "data modeling": "data_modeling",
+            "data modelling": "data_modeling",
+            "data reporting": "data_reporting",
+            "data visualization": "data_visualization",
+            "data visualisation": "data_visualization",
+            "data interpretation": "data_interpretation",
+            "data mining": "data_mining",
+            "etl": "etl",
+            "extract transform load": "etl",
+            "business intelligence": "bi",
+            "business intelligence (bi)": "bi",
+            "bi": "bi",
+            "dashboard development": "dashboards",
+            "dashboards": "dashboards",
+            "dashboard": "dashboards",
+            "exploratory data analysis": "eda",
+            "exploratory data analysis (eda)": "eda",
+            "eda": "eda",
+            "statistical analysis": "statistical_analysis",
+            "statistics": "statistical_analysis",
             "scikit-learn": "scikitlearn",
             "scikit learn": "scikitlearn",
             "sklearn": "scikitlearn",
@@ -181,10 +218,55 @@ class SkillNormalizer:
             "natural language processing": "nlp",
             "cnn": "cnn",
             "lstm": "lstm",
-            "data preprocessing": "datapreprocessing",
             "model evaluation": "modelevaluation",
             "streamlit": "streamlit",
             "spacy": "spacy",
+            "microsoft powerpoint": "powerpoint",
+            "powerpoint": "powerpoint",
+            "ppt": "powerpoint",
+            "ms powerpoint": "powerpoint",
+            # --- BUSINESS / PRODUCT / AGILE ---
+            "product management": "product_management",
+            "product manager": "product_management",
+            "project management": "project_management",
+            "project manager": "project_management",
+            "business analysis": "business_analysis",
+            "business analyst": "business_analysis",
+            "data science": "data_science",
+            "data scientist": "data_science",
+            "data engineering": "data_engineering",
+            "data engineer": "data_engineering",
+            "software engineering": "software_engineering",
+            "software engineer": "software_engineer",
+            "devops": "devops",
+            "devops engineer": "devops",
+            "qa": "qa",
+            "quality assurance": "qa",
+            "scrum": "scrum",
+            "kanban": "kanban",
+            "jira": "jira",
+            "confluence": "confluence",
+            "market research": "market_research",
+            "user stories": "user_stories",
+            "stakeholder management": "stakeholder_management",
+            "crm": "crm",
+            "salesforce": "salesforce",
+            "seo": "seo",
+            "digital marketing": "digital_marketing",
+            # --- UNIVERSAL / ANALYTICAL / SOFT SKILLS ---
+            "problem solving": "problem_solving",
+            "problem-solving": "problem_solving",
+            "critical thinking": "critical_thinking",
+            "analytical thinking": "analytical_thinking",
+            "analytical skills": "analytical_thinking",
+            "logical reasoning": "logical_reasoning",
+            "attention to detail": "attention_to_detail",
+            "communication skills": "communication",
+            "communication": "communication",
+            "team collaboration": "teamwork",
+            "teamwork": "teamwork",
+            "collaboration": "teamwork",
+            "adaptability": "adaptability",
         }
 
         self.display_names = {
@@ -279,6 +361,50 @@ class SkillNormalizer:
             "modelevaluation": "Model Evaluation",
             "streamlit": "Streamlit",
             "spacy": "spaCy",
+            "matplotlib": "Matplotlib",
+            "seaborn": "Seaborn",
+            "advanced_excel": "Advanced Excel",
+            "data_analysis": "Data Analysis",
+            "data_cleaning": "Data Cleaning",
+            "data_wrangling": "Data Wrangling",
+            "data_modeling": "Data Modeling",
+            "data_reporting": "Data Reporting",
+            "data_visualization": "Data Visualization",
+            "data_interpretation": "Data Interpretation",
+            "data_mining": "Data Mining",
+            "dashboards": "Dashboard Development",
+            "etl": "ETL",
+            "eda": "Exploratory Data Analysis (EDA)",
+            "statistical_analysis": "Statistical Analysis",
+            "bi": "Business Intelligence (BI)",
+            "powerpoint": "Microsoft PowerPoint",
+            "product_management": "Product Management",
+            "project_management": "Project Management",
+            "business_analysis": "Business Analysis",
+            "data_science": "Data Science",
+            "data_engineering": "Data Engineering",
+            "software_engineering": "Software Engineering",
+            "devops": "DevOps",
+            "qa": "QA / Quality Assurance",
+            "scrum": "Scrum",
+            "kanban": "Kanban",
+            "jira": "Jira",
+            "confluence": "Confluence",
+            "market_research": "Market Research",
+            "user_stories": "User Stories",
+            "stakeholder_management": "Stakeholder Management",
+            "crm": "CRM",
+            "salesforce": "Salesforce",
+            "seo": "SEO",
+            "digital_marketing": "Digital Marketing",
+            "problem_solving": "Problem Solving",
+            "critical_thinking": "Critical Thinking",
+            "analytical_thinking": "Analytical Thinking",
+            "logical_reasoning": "Logical Reasoning",
+            "attention_to_detail": "Attention to Detail",
+            "communication": "Communication Skills",
+            "teamwork": "Team Collaboration",
+            "adaptability": "Adaptability",
         }
 
         self.related_skill_groups = [
@@ -313,7 +439,27 @@ class SkillNormalizer:
             {"tensorflow", "pytorch", "scikitlearn"},
             {"machinelearning", "deeplearning", "cnn", "lstm"},
             {"computervision", "opencv"},
-            {"powerbi", "tableau", "excel"},
+            {"powerbi", "tableau", "excel", "advanced_excel", "bi"},
+            {"pandas", "numpy", "matplotlib", "seaborn", "python"},
+            {
+                "data_analysis",
+                "data_cleaning",
+                "data_wrangling",
+                "datapreprocessing",
+                "eda",
+                "statistical_analysis",
+                "data_visualization",
+                "data_interpretation",
+                "data_modeling",
+                "data_reporting",
+                "dashboards",
+            },
+            {
+                "problem_solving",
+                "critical_thinking",
+                "analytical_thinking",
+                "logical_reasoning",
+            },
             {
                 "uiux",
                 "uidesign",
@@ -350,6 +496,50 @@ class SkillNormalizer:
             return self.alias_matrix[mutated]
 
         return clean
+
+    def normalize_tokens(self, raw_string: str) -> List[str]:
+        """
+        Splits compound strings, strips qualifiers, and returns all canonical IDs represented.
+        Handles real-world candidate expressions across all roles:
+        - 'Programming & Data Analysis' -> ['data_analysis']
+        - 'Microsoft Excel (advanced)' -> ['excel', 'advanced_excel']
+        - 'Power BI / Tableau' -> ['powerbi', 'tableau']
+        - 'Exploratory Data Analysis (EDA)' -> ['eda']
+        """
+        if not raw_string or not isinstance(raw_string, str):
+            return []
+
+        canonicals: Set[str] = set()
+
+        raw_lower = raw_string.lower().strip()
+
+        # 1. Direct normalization
+        direct = self.normalize(raw_lower)
+        if direct and direct in self.alias_matrix.values():
+            canonicals.add(direct)
+
+        # 2. Check qualifier patterns like (advanced) or (basic)
+        if "advanced" in raw_lower:
+            if "excel" in raw_lower:
+                canonicals.add("advanced_excel")
+                canonicals.add("excel")
+            if "python" in raw_lower:
+                canonicals.add("python")
+            if "sql" in raw_lower:
+                canonicals.add("sql")
+        if "basic" in raw_lower and "excel" in raw_lower:
+            canonicals.add("excel")
+
+        # 3. Split by common delimiters (&, /, comma, ;, and, •, |)
+        sub_parts = re.split(r"[,/;&•|\n]|\band\b", raw_string, flags=re.IGNORECASE)
+        for part in sub_parts:
+            part_clean = part.strip()
+            if part_clean and len(part_clean) > 1:
+                part_norm = self.normalize(part_clean)
+                if part_norm and part_norm in self.alias_matrix.values():
+                    canonicals.add(part_norm)
+
+        return list(canonicals)
 
     def get_related_skills(self, canonical_skill: str) -> Set[str]:
         for group in self.related_skill_groups:

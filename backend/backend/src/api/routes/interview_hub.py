@@ -330,7 +330,7 @@ async def resend_invitation(
     """Put a failed invitation back in the send queue, inside this person's own scope."""
     viewer = await hub.viewer_for(user, session)
     if not viewer.human_read:
-        raise fastapi.HTTPException(403, "Human Interviews are not part of your role.")
+        raise fastapi.HTTPException(403, "Human interviews are not part of your role.")
     item = await session.get(NotificationDelivery, delivery_id, with_for_update=True)
     if item is None or item.related_type != "human_interview" or item.event not in ("scheduled", "rescheduled"):
         raise fastapi.HTTPException(404, "Invitation not found.")
@@ -356,7 +356,7 @@ async def assignment_group(
 
 async def _group(user, session, key, operation):
     if not assignments.permitted(user, operation):
-        raise fastapi.HTTPException(403, "Changing AI Interview assignments is not part of your role.")
+        raise fastapi.HTTPException(403, "Changing AI interview assignments is not part of your role.")
     viewer = await hub.viewer_for(user, session)
     profile, cohort, opens, closes, course = hub.parse_key(key)
     rows = await hub._group_query(viewer, session, profile, cohort, opens, closes, course)

@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Any, Sequence
 
 import sqlalchemy
+from sqlalchemy.orm import defer, load_only
 from sqlalchemy.ext.asyncio import AsyncSession as SQLAlchemyAsyncSession
 
 from src.models.db.interview import Interview
@@ -61,6 +62,30 @@ def _ensure_utc(dt: datetime.datetime | None) -> datetime.datetime:
         return dt.replace(tzinfo=datetime.timezone.utc)
     return dt
 
+
+
+# Analytics never reads a student's photo or resume text; skipping them keeps a
+# "list every student" query from pulling megabytes per request.
+LIGHT_USER = (defer(User.profile_picture), defer(User.resume_text))
+# Interview plans, receipts and integrity logs are never read by analytics.
+LIGHT_INTERVIEW = (
+    defer(Interview.integrity_events),
+    defer(Interview.question_plan),
+    defer(Interview.submission_receipt),
+    defer(Interview.last_transition_response),
+)
+
+
+class _ScoreSummary:
+    """A summary report reduced to the score sections the dashboards read."""
+
+    __slots__ = ("interview_id", "report_json")
+
+    def __init__(self, interview_id, overall, scores):
+        self.interview_id = interview_id
+        self.report_json = {
+            k: v for k, v in (("overallScoreSummary", overall), ("scoreSummary", scores)) if v is not None
+        }
 
 class AnalyticsService:
     def __init__(self, db: SQLAlchemyAsyncSession) -> None:
@@ -267,7 +292,7 @@ class AnalyticsService:
         }
 
     async def get_interview_level_analytics(self, *, interview_id: int) -> dict[str, Any] | None:
-        interview_stmt = sqlalchemy.select(Interview).where(Interview.id == interview_id)
+        interview_stmt = sqlalchemy.select(Interview).options(*LIGHT_INTERVIEW).where(Interview.id == interview_id)
         interview_res = await self._db.execute(interview_stmt)
         interview = interview_res.scalar_one_or_none()
         if interview is None:
@@ -568,7 +593,7 @@ class AnalyticsService:
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
 
-        users_stmt = sqlalchemy.select(User).where(student_only())
+        users_stmt = sqlalchemy.select(User).options(*LIGHT_USER).where(student_only())
         if college:
             users_stmt = users_stmt.where(User.university == college)
         elif allowed_colleges is not None:
@@ -674,7 +699,7 @@ class AnalyticsService:
         scoped_user_ids = {i.user_id for i in interviews}
         reports = await self._reports_by_interview(interview_ids)
         summaries = await self._summary_reports_by_interview(interview_ids)
-        users_stmt = sqlalchemy.select(User).where(student_only())
+        users_stmt = sqlalchemy.select(User).options(*LIGHT_USER).where(student_only())
         if college:
             users_stmt = users_stmt.where(User.university == college)
         elif allowed_colleges is not None:
@@ -1121,7 +1146,7 @@ class AnalyticsService:
         end_date: datetime.date | None = None,
         interview_mode: str | None = None,
     ) -> list[Interview]:
-        stmt = sqlalchemy.select(Interview).where(Interview.user_id == user_id).order_by(Interview.created_at.asc())
+        stmt = sqlalchemy.select(Interview).options(*LIGHT_INTERVIEW).where(Interview.user_id == user_id).order_by(Interview.created_at.asc())
         if interview_mode is not None:
             stmt = stmt.where(Interview.interview_mode == interview_mode)
         if start_date is not None:
@@ -1143,7 +1168,7 @@ class AnalyticsService:
         allowed_colleges: Sequence[str] | set[str] | None = None,
     ) -> list[Interview]:
         # Staff test interviews never count toward student numbers.
-        stmt = sqlalchemy.select(Interview).where(student_interview())
+        stmt = sqlalchemy.select(Interview).options(*LIGHT_INTERVIEW).where(student_interview())
         if college:
             stmt = stmt.join(User, User.id == Interview.user_id).where(User.university == college)
         elif allowed_colleges is not None:
@@ -1191,16 +1216,21 @@ class AnalyticsService:
     async def _reports_by_interview(self, interview_ids: list[int]) -> dict[int, Report]:
         if not interview_ids:
             return {}
-        stmt = sqlalchemy.select(Report).where(Report.interview_id.in_(interview_ids))
+        stmt = sqlalchemy.select(Report).options(defer(Report.summary)).where(Report.interview_id.in_(interview_ids))
         rows = list((await self._db.execute(stmt)).scalars().all())
         return {row.interview_id: row for row in rows}
 
     async def _summary_reports_by_interview(self, interview_ids: list[int]) -> dict[int, SummaryReport]:
         if not interview_ids:
             return {}
-        stmt = sqlalchemy.select(SummaryReport).where(SummaryReport.interview_id.in_(interview_ids))
-        rows = list((await self._db.execute(stmt)).scalars().all())
-        return {row.interview_id: row for row in rows}
+        # Every caller only reads the score summaries; whole reports are large JSON
+        # and decoding thousands of them blocked the server for seconds.
+        rj = SummaryReport.report_json
+        stmt = sqlalchemy.select(
+            SummaryReport.interview_id, rj["overallScoreSummary"], rj["scoreSummary"]
+        ).where(SummaryReport.interview_id.in_(interview_ids))
+        rows = (await self._db.execute(stmt)).all()
+        return {row[0]: _ScoreSummary(row[0], row[1], row[2]) for row in rows}
 
     async def _attempts_for_interviews(self, interview_ids: list[int]) -> list[QuestionAttempt]:
         if not interview_ids:
@@ -1382,14 +1412,17 @@ class AnalyticsService:
     async def _common_weakness_tags(self, interview_ids: list[int]) -> list[str]:
         if not interview_ids:
             return []
-        stmt = sqlalchemy.select(QuestionAttempt).where(QuestionAttempt.interview_id.in_(interview_ids))
-        attempts = list((await self._db.execute(stmt)).scalars().all())
+        # Only three short lists are read, and Postgres extracts them; decoding
+        # whole analyses in Python took seconds and blocked the server meanwhile.
+        aj = QuestionAttempt.analysis_json
+        stmt = sqlalchemy.select(
+            aj["communication"]["improvements"],
+            aj["communication"]["recommendations"],
+            aj["domain"]["improvements"],
+        ).where(QuestionAttempt.interview_id.in_(interview_ids))
         weakness_counts: dict[str, int] = defaultdict(int)
-        for attempt in attempts:
-            analysis = attempt.analysis_json or {}
-            communication = analysis.get("communication") or {}
-            domain = analysis.get("domain") or {}
-            for tag in _as_str_list(communication.get("improvements")) + _as_str_list(communication.get("recommendations")) + _as_str_list(domain.get("improvements")):
+        for comm_imp, comm_rec, dom_imp in (await self._db.execute(stmt)).all():
+            for tag in _as_str_list(comm_imp) + _as_str_list(comm_rec) + _as_str_list(dom_imp):
                 normalized = tag.strip().lower()
                 if normalized:
                     weakness_counts[normalized] += 1
@@ -1439,7 +1472,7 @@ class AnalyticsService:
                 "positive_improvement_rate": None,
             }
 
-        interview_stmt = sqlalchemy.select(Interview).where(Interview.user_id.in_(candidate_user_ids))
+        interview_stmt = sqlalchemy.select(Interview).options(*LIGHT_INTERVIEW).where(Interview.user_id.in_(candidate_user_ids))
         interviews = list((await self._db.execute(interview_stmt)).scalars().all())
         reports = await self._reports_by_interview([i.id for i in interviews])
         summaries = await self._summary_reports_by_interview([i.id for i in interviews])
@@ -1533,7 +1566,7 @@ class AnalyticsService:
         if not user_ids:
             return []
 
-        interview_stmt = sqlalchemy.select(Interview).where(Interview.user_id.in_(user_ids))
+        interview_stmt = sqlalchemy.select(Interview).options(*LIGHT_INTERVIEW).where(Interview.user_id.in_(user_ids))
         if start_date is not None:
             interview_stmt = interview_stmt.where(Interview.created_at >= datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc))
         if end_date is not None:
@@ -1668,12 +1701,22 @@ class AnalyticsService:
             ))
             .where(InterviewQuestion.interview_id.in_(interview_ids))
         )
-        attempts_stmt = sqlalchemy.select(QuestionAttempt).where(QuestionAttempt.interview_id.in_(interview_ids))
+        # Postgres pulls out the four numbers we need. Decoding every whole analysis
+        # in Python took seconds and blocked the server for everyone meanwhile.
+        aj = QuestionAttempt.analysis_json
+        attempts_stmt = sqlalchemy.select(
+            QuestionAttempt.id,
+            QuestionAttempt.question_id,
+            aj["domain"]["criteria"]["correctness"].label("correctness"),
+            aj["domain"]["domain_score"].label("domain_score"),
+            aj["communication"]["communication_score"].label("communication_score"),
+            aj["communication"]["overall_score"].label("overall_score"),
+        ).where(QuestionAttempt.interview_id.in_(interview_ids))
 
         questions = list((await self._db.execute(questions_stmt)).scalars().all())
-        attempts = list((await self._db.execute(attempts_stmt)).scalars().all())
+        attempts = list((await self._db.execute(attempts_stmt)).all())
 
-        latest_by_question: dict[int, QuestionAttempt] = {}
+        latest_by_question: dict[int, Any] = {}
         for a in sorted(attempts, key=lambda x: x.id, reverse=True):
             if a.question_id is not None and a.question_id not in latest_by_question:
                 latest_by_question[a.question_id] = a
@@ -1683,14 +1726,11 @@ class AnalyticsService:
             qa = latest_by_question.get(q.id)
             if qa is None:
                 continue
-            analysis = qa.analysis_json or {}
-            domain = analysis.get("domain") or {}
-            comm = analysis.get("communication") or {}
             knowledge = _normalize_score(
-                _criteria_score(domain.get("criteria"), "correctness")
-                or _to_float(domain.get("domain_score"))
+                _criteria_score({"correctness": qa.correctness}, "correctness")
+                or _to_float(qa.domain_score)
             )
-            speech = _normalize_score(_to_float(comm.get("communication_score") or comm.get("overall_score")))
+            speech = _normalize_score(_to_float(qa.communication_score or qa.overall_score))
             combined = _avg_non_null([knowledge, speech])
             if combined is not None:
                 question_scores[q.id] = combined
@@ -1779,7 +1819,7 @@ class AnalyticsService:
     async def _candidate_users(self, *, user_id: int | None, allowed_colleges: Sequence[str] | set[str] | None = None) -> list[User]:
         if allowed_colleges is not None and not allowed_colleges:
             return []
-        stmt = sqlalchemy.select(User)
+        stmt = sqlalchemy.select(User).options(*LIGHT_USER)
         if user_id is not None:
             stmt = stmt.where(User.id == user_id)
         else:

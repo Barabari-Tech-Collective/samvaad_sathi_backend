@@ -32,6 +32,7 @@ class LinkScorer:
             "linkedin": [],
             "github_profile": [],
             "portfolio": [],
+            "coding_profile": [],
             "deployments": [],
             "repositories": [],
             "packages": [],
@@ -54,6 +55,14 @@ class LinkScorer:
                 categories["linkedin"].append(link_payload)
             elif platform == "github" and details.get("sub_type") != "repository":
                 categories["github_profile"].append(link_payload)
+            elif cat == "coding_profile" or platform in {
+                "leetcode",
+                "hackerrank",
+                "codechef",
+                "codeforces",
+                "geeksforgeeks",
+            }:
+                categories["coding_profile"].append(link_payload)
             elif cat == "portfolio":
                 categories["portfolio"].append(link_payload)
             elif cat == "deployment":
@@ -69,6 +78,7 @@ class LinkScorer:
         li_valid = any(l["valid"] for l in categories["linkedin"])
         gh_valid = any(l["valid"] for l in categories["github_profile"])
         port_valid = any(l["valid"] for l in categories["portfolio"])
+        code_valid = any(l["valid"] for l in categories["coding_profile"])
 
         profile_score = 0.0
         if li_valid:
@@ -76,6 +86,8 @@ class LinkScorer:
         if gh_valid:
             profile_score += 0.8
         if port_valid:
+            profile_score += 0.4
+        if code_valid:
             profile_score += 0.4
         profile_score = min(profile_score, 2.0)
 
@@ -136,6 +148,11 @@ class LinkScorer:
                 "portfolio": {
                     "present": len(categories["portfolio"]) > 0,
                     "working": port_valid,
+                },
+                "coding_profile": {
+                    "present": len(categories["coding_profile"]) > 0,
+                    "working": code_valid,
+                    "count": len(categories["coding_profile"]),
                 },
                 "deployments": {
                     "present": len(categories["deployments"]) > 0,

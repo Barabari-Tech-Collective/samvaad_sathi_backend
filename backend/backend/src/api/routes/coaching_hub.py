@@ -117,7 +117,7 @@ async def learners(
         pool = groups.get(card, [])
         typed = lambda k: [i for i in pool if i["type"] == k]  # noqa: E731
         chips = [{"key": "all", "label": "All", "count": len(pool)}, {"key": "drill", "label": "Drills", "count": len(typed("drill"))},
-                 {"key": "plan", "label": "Learning Plans", "count": len(typed("plan"))}, {"key": "mock", "label": "Mock Interviews", "count": len(typed("mock"))}]
+                 {"key": "plan", "label": "Learning Plans", "count": len(typed("plan"))}, {"key": "mock", "label": "Mock interviews", "count": len(typed("mock"))}]
         rows = pool if sub == "all" else typed(sub)
     rows = sorted(rows, key=lambda i: (i["due_days"] is None, i["due_days"] or 0))
     total = len(rows)
