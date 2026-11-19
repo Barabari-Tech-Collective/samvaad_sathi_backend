@@ -65,6 +65,10 @@ services:
         sync: false
       - key: CENTRAL_IDENTITY_CHECK_ENABLED
         value: 'True'
+      # ADR-1: accept the HttpOnly product session on staging. Bearer tokens keep working,
+      # so this is safe before the apps switch NEXT_PUBLIC_AUTH_MODE=server-session.
+      - key: PRODUCT_COOKIE_API_ENABLED
+        value: 'True'
       - key: PRODUCT_IDENTITY_API_KEY
         sync: false
       - key: CENTRAL_PROFILE_API_KEY
