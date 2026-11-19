@@ -188,7 +188,7 @@ async def _scores(session, ids: list[int]) -> dict[int, tuple[float, int | None,
     return found
 
 
-# ---- Human interviews -------------------------------------------------------------------------
+# ---- human interviews -------------------------------------------------------------------------
 
 
 def stage_of(row: HumanInterview, card_status: str | None, now: dt.datetime) -> str:
@@ -283,7 +283,7 @@ def _human_out(row, card, student, college, host, failed, can_host, now) -> dict
 async def human_list(user, session, status, q, interviewer, page, size) -> dict:
     viewer = await viewer_for(user, session)
     if not (viewer.human_read or viewer.hosts):
-        raise fastapi.HTTPException(403, "Human Interviews are not part of your role.")
+        raise fastapi.HTTPException(403, "Human interviews are not part of your role.")
     now = dt.datetime.now(UTC)
     rows = await _human_rows(viewer, session)
     hosts = await _host_names(session, rows)
@@ -866,7 +866,7 @@ async def assignment_group(user, session, key) -> dict:
     rows = await _group_query(viewer, session, profile, cohort, opens, closes, course)
     now = dt.datetime.now(UTC)
     job = await session.get(JobProfile, profile)
-    out = await _group_out(session, key, rows, now, {profile: job.job_name if job else "AI Interview"})
+    out = await _group_out(session, key, rows, now, {profile: job.job_name if job else "AI interview"})
     ids = [r[0].student_id for r in rows]
     since = now - dt.timedelta(hours=REMIND_GAP_HOURS)
     reminded = set(
@@ -1006,7 +1006,7 @@ async def _queue_human(viewer, session, now) -> tuple[list[dict], list[dict]]:
 
     out = [
         x for x in (
-            add("attendance", "Say what happened in a Human Interview", "The time has passed", "Interviewer", "clock"),
+            add("attendance", "Say what happened in a human interview", "The time has passed", "Interviewer", "clock"),
             add("scorecard", "Scorecards still to fill in", "After the interview", "Interviewer", "message"),
             add("review", "Scorecards to review", "Waiting for a second person", "You", "check", viewer.human_review),
             add("share", "Human results not shared", "Approved", "You", "send", viewer.human_review),
@@ -1087,7 +1087,7 @@ async def _queue_results(viewer, session, context, course, now) -> tuple[list[di
                 left = (closes.astimezone(IST).date() - local).days
                 when = "today" if left <= 0 else f"in {left} {'day' if left == 1 else 'days'}"
                 out.append(_item(
-                    f"closing-{key}", f"Closing {when}: {info['job'] or 'AI Interview'}", f"{info['label']} · not started",
+                    f"closing-{key}", f"Closing {when}: {info['job'] or 'AI interview'}", f"{info['label']} · not started",
                     info["not_started"], 0, "You", f"{BASE}/assignments/{key}", "clock",
                 ))
             if first.opens_at.astimezone(IST).date() == local or (closes and closes.astimezone(IST).date() == local):
@@ -1097,7 +1097,7 @@ async def _queue_results(viewer, session, context, course, now) -> tuple[list[di
                         "kind": "ai",
                         "id": key,
                         "time": closes if closing else first.opens_at,
-                        "title": info["job"] or "AI Interview",
+                        "title": info["job"] or "AI interview",
                         "detail": f"{'Closes' if closing else 'Opens'} · {info['label']} · {info['not_started']} not started",
                         "can_join": False,
                         "href": f"{BASE}/assignments/{key}",

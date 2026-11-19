@@ -1,4 +1,5 @@
 import sqlalchemy
+import sqlalchemy.exc
 
 from src.models.db.user import TargetPositionEnum
 
@@ -70,7 +71,14 @@ class UserCRUDRepository(BaseCRUDRepository):
         new_user.password_hash = pwd_generator.generate_hashed_password(hash_salt="", new_password=password)
 
         self.async_session.add(new_user)
-        await self.async_session.commit()
+        try:
+            await self.async_session.commit()
+        except sqlalchemy.exc.IntegrityError as exc:
+            # Two first requests for the same person race past the check above; the
+            # unique index lets one win. The loser is told the user exists, so the caller
+            # re-reads it instead of answering 500 (seen in the 300-student load test).
+            await self.async_session.rollback()
+            raise EntityAlreadyExists("User with this email already exists!") from exc
         await self.async_session.refresh(new_user)
         return new_user
 

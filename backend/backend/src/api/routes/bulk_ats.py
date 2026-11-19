@@ -306,6 +306,7 @@ def _candidate_detail(c: BulkATSCandidate) -> dict:
     # client show the actual project claims beside the saved scoring factors,
     # including for candidates screened before this response field existed.
     parsed_projects = []
+    parsed_education = []
     if isinstance(parsed_resume, dict):
         raw_projects = parsed_resume.get("projects")
         for project in (raw_projects if isinstance(raw_projects, list) else [])[:20]:
@@ -321,6 +322,27 @@ def _candidate_detail(c: BulkATSCandidate) -> dict:
                     else [],
                 }
             )
+        raw_education = parsed_resume.get("education")
+        for edu in (raw_education if isinstance(raw_education, list) else [])[:20]:
+            if not isinstance(edu, dict):
+                continue
+            grade_val = (
+                edu.get("grade")
+                or edu.get("cgpa")
+                or edu.get("gpa")
+                or edu.get("cpi")
+                or edu.get("percentage")
+                or edu.get("marks")
+            )
+            parsed_education.append(
+                {
+                    "institution": str(edu.get("institution") or "")[:200],
+                    "degree": str(edu.get("degree") or "")[:200],
+                    "field": str(edu.get("field") or "")[:150],
+                    "duration": str(edu.get("duration") or "")[:100],
+                    "grade": str(grade_val or "")[:50],
+                }
+            )
     return {
         **_candidate_summary(c),
         "originalFilename": c.original_filename,
@@ -329,6 +351,7 @@ def _candidate_detail(c: BulkATSCandidate) -> dict:
         "errorMessage": c.error_message,
         "extractedSkills": extracted_skills,
         "parsedProjects": parsed_projects,
+        "parsedEducation": parsed_education,
         "deterministicReport": c.deterministic_report,
         "jevReport": c.jev_report,
         "linkReport": c.link_report,

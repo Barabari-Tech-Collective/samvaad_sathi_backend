@@ -214,10 +214,15 @@ def test_shell_success_requires_both_services_and_contract(tmp_path):
     result, events, _ = run_release(tmp_path, "success")
     assert result.returncode == 0, result.stderr
     assert "Released " in result.stdout
-    checks = [args for name, args, _ in events if name == "systemctl"]
+    systemctl = [args for name, args, _ in events if name == "systemctl"]
+    checks = [args for args in systemctl if args[0] == "is-active"]
     assert checks == [
         ["is-active", "--quiet", "samvaad_sathi_backend.service"],
         ["is-active", "--quiet", "samvaad-worker.service"],
+    ]
+    # The optional long-job worker is only looked up, never required.
+    assert [args for args in systemctl if args[0] == "cat"] == [
+        ["cat", "samvaad-worker-slow.service"]
     ]
     assert not any(name == "git" and args[-1] == "a" * 40 for name, args, _ in events)
 

@@ -1767,3 +1767,43 @@ async def test_admin_can_read_any_recruiters_candidate():
     result = await _get_authorized_candidate(repo, candidate_id=5, current_user=admin)
 
     assert result is candidate
+
+
+@pytest.mark.asyncio
+async def test_resume_download_refuses_a_private_address_at_connect_time(monkeypatch):
+    """DNS rebinding: the host looked public when checked, then resolves privately."""
+    import anyio
+    import httpcore
+
+    async def rebinding_getaddrinfo(host, port, **_kwargs):
+        return [(2, 1, 6, "", ("10.0.0.5", port))]
+
+    monkeypatch.setattr(anyio, "getaddrinfo", rebinding_getaddrinfo)
+    backend = worker_tasks._PublicOnlyNetworkBackend()
+    with pytest.raises(httpcore.ConnectError):
+        await backend.connect_tcp("resumes.example.com", 443)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_resume_download_stays_cancelled(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    class CancelledClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(httpx, "AsyncClient", CancelledClient)
+    monkeypatch.setattr(worker_tasks, "_is_public_http_url", lambda _url: True)
+    with pytest.raises(asyncio.CancelledError):
+        await _fetch_resume_from_url("https://example.com/resume.pdf")

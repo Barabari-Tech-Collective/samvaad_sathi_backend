@@ -99,9 +99,14 @@ class SkillsScorer:
         # 1. Explicit parsed skill list
         if explicit_list and isinstance(explicit_list, list):
             for skill in explicit_list:
-                canonical = self.normalizer.normalize(skill)
-                if canonical:
-                    normalized_set.add(canonical)
+                tokens = self.normalizer.normalize_tokens(skill)
+                if tokens:
+                    for canonical in tokens:
+                        normalized_set.add(canonical)
+                else:
+                    canonical = self.normalizer.normalize(skill)
+                    if canonical:
+                        normalized_set.add(canonical)
 
         # 2. Raw text fallback scan with symbol-safe boundaries
         if raw_text and isinstance(raw_text, str):

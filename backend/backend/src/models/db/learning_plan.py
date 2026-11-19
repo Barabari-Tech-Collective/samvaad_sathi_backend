@@ -2,7 +2,7 @@
 
 A plan is authored as a draft and frozen when published; changing a published plan makes a
 new version, so a learner always keeps the version they started. Steps are speaking drills,
-mock interviews or short written reflections. A learner works through an assignment of one
+Mock interviews or short written reflections. A learner works through an assignment of one
 plan version, given by staff in a course or self-started when the plan allows it."""
 
 import datetime

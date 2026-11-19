@@ -123,3 +123,19 @@ def test_callback_tasks_have_their_own_retry_limit():
 
 def test_worker_checks_configuration_at_startup():
     assert worker_main.WorkerSettings.on_startup is worker_main.verify_configuration
+
+
+def test_sampark_callbacks_keep_their_retries_on_both_workers():
+    """With WORKER_SLOW_QUEUE_ENABLED the callbacks run on the slow worker, whose class-wide
+    max_tries is 1; each callback must still carry its own max_tries there."""
+    from src.worker.main import SlowWorkerSettings, WorkerSettings
+
+    def tries(settings_cls, name):
+        for f in settings_cls.functions:
+            if getattr(f, "name", getattr(f, "__name__", "")) == name:
+                return getattr(f, "max_tries", None)
+        return "missing"
+
+    for cls in (WorkerSettings, SlowWorkerSettings):
+        for name in ("submit_resume_score_task", "submit_batch_choice_task"):
+            assert tries(cls, name) == 8, (cls.__name__, name)

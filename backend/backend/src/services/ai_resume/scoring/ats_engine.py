@@ -59,7 +59,10 @@ class ATSEngine:
         )
 
         # 3. Run Education Verification
-        education_report = self.education_scorer.score_education(parsed_education)
+        education_report = self.education_scorer.score_education(
+            parsed_education,
+            raw_resume_text=raw_resume_text,
+        )
 
         # 4. Run Project Scoring (Evaluates independent project structural points)
         project_report = self.project_scorer.score_projects(
