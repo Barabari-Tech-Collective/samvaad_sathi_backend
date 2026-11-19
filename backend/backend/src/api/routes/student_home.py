@@ -83,7 +83,7 @@ async def today(
         return {
             "action": {
                 "kind": "human_interview",
-                "title": "Join your Human Interview" if human_interviews.joinable(row, now) else row.title,
+                "title": "Join your human interview" if human_interviews.joinable(row, now) else row.title,
                 "detail": "Your verified meeting access is open." if human_interviews.joinable(row, now) else f"Scheduled {row.starts_at.isoformat()}.",
                 "href": "/human-interviews",
                 "joinable": human_interviews.joinable(row, now),
@@ -107,7 +107,7 @@ async def today(
         )
     ).scalar_one_or_none()
     if assessment:
-        return {"action": {"kind": "ai_interview", "title": f"Continue AI Interview: {assessment.track}", "detail": "Your placement assessment is ready to continue.", "href": f"/interview?interviewId={assessment.id}&interviewMode=assessment"}, "activity": activity, "has_assessments": True}
+        return {"action": {"kind": "ai_interview", "title": f"Continue AI interview: {assessment.track}", "detail": "Your placement assessment is ready to continue.", "href": f"/interview?interviewId={assessment.id}&interviewMode=assessment"}, "activity": activity, "has_assessments": True}
 
     if hub.resume is not None and hub.resume.readiness == "ready":
         saved = hub.resume
@@ -115,7 +115,7 @@ async def today(
         return {
             "action": {
                 "kind": "resume_mock",
-                "title": f"Continue your {saved.track} Mock Interview",
+                "title": f"Continue your {saved.track} mock interview",
                 "detail": f"{saved.answered_questions} of {total} answers are saved." if total else "Your interview is saved.",
                 "href": f"/interview?interviewId={saved.interview_id}&resumed=true&interviewMode=practice",
                 "cta": "Continue",
@@ -174,7 +174,7 @@ async def today(
         href = f"/interview-start?mode=practice&jobProfileId={row.job_profile_id}&courseId={quote(row.course_id, safe='')}"
         return {
             "action": {
-                "kind": "mock_assignment", "title": f"Mock Interview: {name}", "detail": row.reason,
+                "kind": "mock_assignment", "title": f"Mock interview: {name}", "detail": row.reason,
                 "href": href, "due_date": row.due_date, "from_teacher": True,
             },
             "activity": activity,

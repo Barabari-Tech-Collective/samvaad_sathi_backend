@@ -136,6 +136,16 @@ class ATSCalculator:
         has_email = "@" in text_lower and "." in text_lower
         has_phone = len([c for c in text_lower if c.isdigit()]) >= 10
 
+        grade_data = edu_analysis.get("grade", {})
+        has_score = bool(grade_data.get("present", False))
+        detected_val = grade_data.get("detectedValue")
+        detected_score = str(detected_val).strip() if (has_score and detected_val and detected_val != "Missing") else None
+        score_msg = (
+            f"Education score present ({detected_score})"
+            if has_score and detected_score
+            else ("Education score / CGPA present" if has_score else "Education score / CGPA missing")
+        )
+
         return {
             "hasLinkedIn": li_data.get("present", False),
             "linkedInWorking": li_data.get("working", False),
@@ -145,7 +155,11 @@ class ATSCalculator:
             "portfolioWorking": port_data.get("working", False),
             "hasInstitution": edu_analysis.get("institution", {}).get("present", False),
             "hasDuration": edu_analysis.get("duration", {}).get("present", False),
-            "hasScore": edu_analysis.get("grade", {}).get("present", False),
+            "hasScore": has_score,
+            "hasCgpaOrPercentage": has_score,
+            "detectedScore": detected_score,
+            "detectedCgpaOrPercentage": detected_score,
+            "scoreMessage": score_msg,
             "hasPhone": has_phone,
             "hasEmail": has_email,
         }
