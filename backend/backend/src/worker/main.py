@@ -83,8 +83,10 @@ class SlowWorkerSettings:
 
     queue_name = SLOW_QUEUE
     functions = [
-        submit_resume_score_task,
-        submit_batch_choice_task,
+        # Same retry budget as on the main worker: the class-wide max_tries = 1 would refuse
+        # every retry, and a short Sampark outage would lose the score (platform audit F17).
+        func(submit_resume_score_task, max_tries=8),
+        func(submit_batch_choice_task, max_tries=8),
         generate_questions_task,
         func(generate_summary_report_task, max_tries=8, timeout=300),
         process_bulk_ats_candidate_task,
