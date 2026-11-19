@@ -21,6 +21,7 @@ from src.worker.tasks import (
     generate_summary_report_task,
     process_bulk_ats_candidate_task,
     purge_expired_bulk_ats_batches_task,
+    refresh_dashboard_aggregate_task,
     sweep_stalled_answer_transcriptions_task,
     submit_batch_choice_task,
     submit_resume_score_task,
@@ -39,6 +40,7 @@ class WorkerSettings:
         process_bulk_ats_candidate_task,
         generate_bulk_ats_feedback_task,
         purge_expired_bulk_ats_batches_task,
+        func(refresh_dashboard_aggregate_task, max_tries=1, timeout=120),
     ]
     cron_jobs = [
         cron(dispatch_notification_deliveries_task, minute=set(range(60)), run_at_startup=False, timeout=120),
@@ -77,6 +79,7 @@ class SlowWorkerSettings:
         func(generate_summary_report_task, max_tries=8, timeout=300),
         process_bulk_ats_candidate_task,
         generate_bulk_ats_feedback_task,
+        func(refresh_dashboard_aggregate_task, max_tries=1, timeout=120),
     ]
     redis_settings = redis_settings
     max_jobs = settings.WORKER_SLOW_MAX_JOBS

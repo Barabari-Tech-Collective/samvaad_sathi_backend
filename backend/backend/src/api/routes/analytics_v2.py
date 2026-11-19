@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
+import time
 import decimal
 import functools
 import hashlib
@@ -62,7 +64,7 @@ from src.models.schemas.analytics_v2 import (
     TimeSeriesPoint,
     TimeSeriesResponse,
 )
-from src.services.analytics import AnalyticsService, _extract_overall_score
+from src.services.analytics import LIGHT_INTERVIEW, LIGHT_USER, AnalyticsService, _extract_overall_score
 from src.services.people import student_interview, student_only
 from src.services.course_access import legacy_analytics_guard
 from src.repository.redis_client import async_redis
@@ -90,23 +92,112 @@ router = fastapi.APIRouter(
 
 
 _logger = logging.getLogger(__name__)
+# Fresh for a minute; after that the last answer is served at once while one
+# background task recomputes it. Kept for 15 minutes so a quiet spell does not
+# make the next person wait for a cold computation.
 _AGGREGATE_TTL_SECONDS = 60
+_AGGREGATE_KEEP_SECONDS = 900
+
+_inflight: dict[str, asyncio.Lock] = {}
+_refreshing: set[str] = set()
 
 
-def _aggregate_cache(handler):
-    """Share a dashboard aggregate for 60 seconds between staff who see the same data.
+async def _cache_get(key: str):
+    """Returns (value, age_seconds), or None."""
+    try:
+        hit = await async_redis.client.get(key)
+        if not hit:
+            return None
+        entry = json.loads(hit)
+        if isinstance(entry, dict) and "v" in entry and "t" in entry:
+            return entry["v"], time.time() - float(entry["t"])
+        return entry, 0.0  # an entry written before this format: treat as fresh
+    except Exception:  # noqa: BLE001 - a cache miss, never a failed page
+        _logger.debug("analytics cache unavailable", exc_info=True)
+        return None
+
+
+async def _compute_and_store(key: str, handler, kwargs):
+    from src.api.bulkhead import compute_slot
+
+    async with compute_slot():
+        result = await handler(**kwargs)
+    try:
+        body = (
+            result.model_dump(mode="json")
+            if hasattr(result, "model_dump")
+            else json.loads(json.dumps(result, default=str))
+        )
+        entry = json.dumps({"t": time.time(), "v": body}, default=str)
+        await async_redis.client.set(key, entry, ex=_AGGREGATE_KEEP_SECONDS)
+    except Exception:  # noqa: BLE001
+        _logger.debug("analytics cache write skipped", exc_info=True)
+    return result
+
+
+_CACHED_HANDLERS: dict[str, object] = {}
+
+
+async def refresh_dashboard_aggregate(key: str, handler_name: str, filters: dict, user_id: int) -> None:
+    """Recompute one cached dashboard view. Runs in the job worker, so the
+    seconds of Python it takes never block the web server's requests."""
+    from src.models.db.user import User
+    from src.repository.database import async_db
+
+    handler = _CACHED_HANDLERS[handler_name]
+    session = async_db.get_session()
+    try:
+        user = await session.get(User, user_id)
+        if user is None:
+            return
+        await _compute_and_store(key, handler, {**filters, "current_user": user, "session": session})
+    finally:
+        await session.close()
+
+
+async def _refresh_in_background(key: str, handler, kwargs) -> None:
+    from src.worker.queue import enqueue_job
+
+    try:
+        filters = {k: v for k, v in kwargs.items() if k not in {"current_user", "session"}}
+        queued = await enqueue_job(
+            "refresh_dashboard_aggregate_task",
+            key=key,
+            handler_name=handler.__name__,
+            filters=filters,
+            user_id=kwargs["current_user"].id,
+            _job_id=f"dash:{key}",  # one refresh per view at a time
+        )
+        if not queued:
+            _logger.info("dashboard refresh not queued; the stale view stays until the next request")
+    finally:
+        _refreshing.discard(key)
+
+
+def _aggregate_cache(handler=None, *, guard=None):
+    """Share a dashboard aggregate between staff who see the same data.
 
     These charts are counts over the whole period; a minute's delay is invisible,
     while 100 staff each re-running a dozen aggregate queries is not. The key is the
     endpoint, its filters and the caller's college scope, so two people share an
     entry only when the backend would compute the same answer for both. Redis
-    being down only means no cache.
+    being down only means no cache. A staff member only waits for a computation
+    when nobody has opened that view in the last 15 minutes.
     """
+
+    if handler is None:
+        return lambda h: _aggregate_cache(h, guard=guard)
+
+    _CACHED_HANDLERS[handler.__name__] = handler
 
     @functools.wraps(handler)
     async def wrapper(**kwargs):
         user = kwargs["current_user"]
         session = kwargs["session"]
+        # A role check inside a handler would be skipped on a cache hit, so it
+        # runs here first; the key only carries the data scope.
+        if guard is not None:
+            guard(user)
         allowed = await get_user_allowed_colleges(user, session)
         filters = {
             k: (v.value if isinstance(v, Enum) else v)
@@ -116,19 +207,30 @@ def _aggregate_cache(handler):
         scope = sorted(allowed) if allowed is not None else "*"
         raw = json.dumps([handler.__name__, filters, scope], default=str, sort_keys=True)
         key = "analytics:v2:" + hashlib.sha256(raw.encode()).hexdigest()
+        # Hand the request's database connection back before touching the cache or
+        # waiting on someone else's computation. Otherwise 100 staff waiting for one
+        # cold aggregate hold every pooled connection and students get 503s. The
+        # session takes a connection again only if this request has to compute.
+        if session is not None:
+            await session.close()
+        hit = await _cache_get(key)
+        if hit is not None:
+            value, age = hit
+            if age > _AGGREGATE_TTL_SECONDS and key not in _refreshing:
+                _refreshing.add(key)
+                asyncio.create_task(_refresh_in_background(key, handler, kwargs))
+            return value
+        # Nothing cached: one computation per key, the others wait for its result.
+        lock = _inflight.setdefault(key, asyncio.Lock())
         try:
-            hit = await async_redis.client.get(key)
-            if hit:
-                return json.loads(hit)
-        except Exception:  # noqa: BLE001 - a cache miss, never a failed page
-            _logger.debug("analytics cache unavailable", exc_info=True)
-        result = await handler(**kwargs)
-        try:
-            body = result.model_dump_json() if hasattr(result, "model_dump_json") else json.dumps(result, default=str)
-            await async_redis.client.set(key, body, ex=_AGGREGATE_TTL_SECONDS)
-        except Exception:  # noqa: BLE001
-            _logger.debug("analytics cache write skipped", exc_info=True)
-        return result
+            async with lock:
+                hit = await _cache_get(key)
+                if hit is not None:
+                    return hit[0]
+                return await _compute_and_store(key, handler, kwargs)
+        finally:
+            if not lock.locked():
+                _inflight.pop(key, None)
 
     return wrapper
 
@@ -378,7 +480,7 @@ async def verify_student_access(
     - Junior Facilitators can only access students enrolled in their assigned colleges.
     """
     allowed_colleges = await get_user_allowed_colleges(user, session)
-    student = (await session.execute(sqlalchemy.select(User).where(User.id == student_id))).scalar_one_or_none()
+    student = (await session.execute(sqlalchemy.select(User).options(*LIGHT_USER).where(User.id == student_id))).scalar_one_or_none()
     if student is None:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Student not found")
     if allowed_colleges is not None:
@@ -912,7 +1014,7 @@ async def get_dashboard_recent_students(
     if allowed_colleges is not None and not allowed_colleges:
         limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 10))
         return TablePageResponse(table_type="recent_students", items=[], page=1, limit=limit_val, total=0)
-    stmt = sqlalchemy.select(User).where(student_only())
+    stmt = sqlalchemy.select(User).options(*LIGHT_USER).where(student_only())
     if allowed_colleges is not None:
         stmt = stmt.where(User.university.in_(list(allowed_colleges)))
     stmt = stmt.order_by(User.created_at.desc()).limit(limit)
@@ -932,6 +1034,7 @@ async def get_dashboard_recent_students(
 
 
 @router.get("/dashboard/attention-required", response_model=TablePageResponse, status_code=200, summary="Students needing attention", description="Reasoning: prioritizes intervention candidates based on alert signals. Output: table rows of student/system attention items.")
+@_aggregate_cache(guard=require_operations)
 async def get_dashboard_attention_required(
     limit: int = fastapi.Query(default=20, ge=1, le=100),
     start_date: datetime.date | None = None,
@@ -1031,7 +1134,7 @@ async def get_students_table(
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if college:
         await verify_college_access(current_user, college, session)
-    users_stmt = sqlalchemy.select(User).where(student_only())
+    users_stmt = sqlalchemy.select(User).options(*LIGHT_USER).where(student_only())
     if college:
         users_stmt = users_stmt.where(User.university == college)
     elif allowed_colleges is not None:
@@ -1056,7 +1159,7 @@ async def get_students_table(
         return TablePageResponse(table_type="students", items=[], page=page, limit=limit, total=total)
 
     user_ids = [user.id for user in users]
-    interviews_stmt = sqlalchemy.select(Interview).where(Interview.user_id.in_(user_ids)).order_by(Interview.created_at.asc())
+    interviews_stmt = sqlalchemy.select(Interview).options(*LIGHT_INTERVIEW).where(Interview.user_id.in_(user_ids)).order_by(Interview.created_at.asc())
     interviews = list((await session.execute(interviews_stmt)).scalars().all())
 
     interview_ids = [interview.id for interview in interviews]

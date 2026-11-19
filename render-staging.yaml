@@ -8,7 +8,9 @@ services:
     rootDir: backend/backend
     buildCommand: pip install -r requirements.txt
     preDeployCommand: alembic upgrade head
-    startCommand: uvicorn src.main:backend_app --host 0.0.0.0 --port $PORT
+    # BACKEND_SERVER_WORKERS was declared but never used; each process gets its own
+    # pool, so keep workers x (DB_POOL_SIZE + DB_POOL_OVERFLOW) under the database limit.
+    startCommand: uvicorn src.main:backend_app --host 0.0.0.0 --port $PORT --workers ${BACKEND_SERVER_WORKERS:-1}
     healthCheckPath: /api/health
     envVars:
       - key: ENVIRONMENT

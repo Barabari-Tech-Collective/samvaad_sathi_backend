@@ -1268,3 +1268,14 @@ async def dispatch_notification_deliveries_task(ctx: dict):
         raise
     finally:
         await session.close()
+
+
+async def refresh_dashboard_aggregate_task(
+    ctx: dict, *, key: str, handler_name: str, filters: dict, user_id: int
+) -> None:
+    """Recompute a stale staff dashboard view off the web server (see
+    api/routes/analytics_v2.py). Staff keep seeing the previous minute's
+    numbers until this finishes."""
+    from src.api.routes.analytics_v2 import refresh_dashboard_aggregate
+
+    await refresh_dashboard_aggregate(key, handler_name, filters, user_id)

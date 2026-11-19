@@ -31,6 +31,7 @@ SLOW_JOBS = frozenset(
         "submit_batch_choice_task",
         "process_bulk_ats_candidate_task",
         "generate_bulk_ats_feedback_task",
+        "refresh_dashboard_aggregate_task",
     }
 )
 

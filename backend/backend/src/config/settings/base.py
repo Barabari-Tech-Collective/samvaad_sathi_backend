@@ -74,6 +74,14 @@ class BackendBaseSettings(BaseSettings):
     # default queue; with WORKER_SLOW_QUEUE_ENABLED, reports, question writing and
     # Bulk ATS move to a second queue served by samvaad-worker-slow.service, so a
     # class finishing at once never delays the next student's transcript.
+    # Staff analytics requests allowed to run at once per API process; the rest
+    # wait (see api/bulkhead.py) so dashboards cannot take students' connections.
+    ANALYTICS_MAX_CONCURRENCY: int = decouple.config(
+        "ANALYTICS_MAX_CONCURRENCY", cast=int, default=4
+    )  # type: ignore
+    ANALYTICS_QUEUE_WAIT_SECONDS: float = decouple.config(
+        "ANALYTICS_QUEUE_WAIT_SECONDS", cast=float, default=20.0
+    )  # type: ignore
     WORKER_MAX_JOBS: int = decouple.config("WORKER_MAX_JOBS", cast=int, default=10)  # type: ignore
     WORKER_SLOW_MAX_JOBS: int = decouple.config(
         "WORKER_SLOW_MAX_JOBS", cast=int, default=4
