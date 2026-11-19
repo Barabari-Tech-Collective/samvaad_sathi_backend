@@ -8,6 +8,8 @@ See deploy/samvaad-worker.service for a systemd unit that runs this.
 
 from src.services.resume_storage_delivery import deliver_resume_files
 from arq import cron
+from src.config.json_logging import configure_root_logging
+from src.config.manager import settings as _settings
 from arq.worker import func
 
 from src.config.manager import settings
@@ -28,6 +30,8 @@ from src.worker.tasks import (
     submit_resume_score_task,
     synchronize_sampark_enrollments_task,
 )
+
+configure_root_logging(_settings.LOGGING_LEVEL)
 
 
 async def verify_configuration(ctx: dict) -> None:
