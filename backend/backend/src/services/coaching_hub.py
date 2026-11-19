@@ -84,7 +84,7 @@ async def load_items(session, context, ids: set[int]) -> list[dict]:
         )
     ).all()
     for row, job in mocks:
-        out.append(base(f"m{row.id}", "mock", row, f"Mock Interview: {job}", "", row.status, names.get(row.assigned_by)))
+        out.append(base(f"m{row.id}", "mock", row, f"Mock interview: {job}", "", row.status, names.get(row.assigned_by)))
     assigned = list((await session.execute(sa.select(LearningPlanAssignment).where(LearningPlanAssignment.student_id.in_(ids)))).scalars())
     views = await plans.assignment_views(session, assigned)
     for row, view in zip(assigned, views):

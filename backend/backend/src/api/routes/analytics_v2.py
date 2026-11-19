@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
+import time
 import decimal
+import functools
+import hashlib
+import json
+import logging
 import math
 import re
 from collections import defaultdict
@@ -58,9 +64,12 @@ from src.models.schemas.analytics_v2 import (
     TimeSeriesPoint,
     TimeSeriesResponse,
 )
-from src.services.analytics import AnalyticsService, _extract_overall_score
+from src.services.analytics import LIGHT_INTERVIEW, LIGHT_USER, AnalyticsService, _extract_overall_score
 from src.services.people import student_interview, student_only
 from src.services.course_access import legacy_analytics_guard
+from src.services.legacy_analytics_usage import count_legacy_call
+from src.services.legacy_analytics_usage import usage as legacy_usage
+from src.repository.redis_client import async_redis
 
 
 COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -80,8 +89,169 @@ router = fastapi.APIRouter(
     prefix="/v2/analytics",
     tags=["analytics-v2"],
     responses=COMMON_ERROR_RESPONSES,
-    dependencies=[Depends(get_current_admin_user), Depends(legacy_analytics_guard)],
+    dependencies=[Depends(get_current_admin_user), Depends(legacy_analytics_guard), Depends(count_legacy_call)],
+    # ADR-3: superseded by the hub summaries; removed once a release shows no calls.
+    deprecated=True,
 )
+
+usage_router = fastapi.APIRouter(prefix="/v2/analytics-usage", tags=["analytics-v2"])
+
+
+@usage_router.get("")
+async def legacy_analytics_usage(
+    days: int = fastapi.Query(30, ge=1, le=40),
+    user=Depends(get_current_admin_user),
+):
+    """Calls per legacy analytics route per day, for deciding which routes to remove."""
+    from src.api.dependencies.admin import is_admin_user
+
+    if not is_admin_user(user):
+        raise fastapi.HTTPException(403, "Administrator access required.")
+    return {"days": await legacy_usage(days)}
+
+
+_logger = logging.getLogger(__name__)
+# Fresh for a minute; after that the last answer is served at once while one
+# background task recomputes it. Kept for 15 minutes so a quiet spell does not
+# make the next person wait for a cold computation.
+_AGGREGATE_TTL_SECONDS = 60
+_AGGREGATE_KEEP_SECONDS = 900
+
+_inflight: dict[str, asyncio.Lock] = {}
+_refreshing: set[str] = set()
+
+
+async def _cache_get(key: str):
+    """Returns (value, age_seconds), or None."""
+    try:
+        hit = await async_redis.client.get(key)
+        if not hit:
+            return None
+        entry = json.loads(hit)
+        if isinstance(entry, dict) and "v" in entry and "t" in entry:
+            return entry["v"], time.time() - float(entry["t"])
+        return entry, 0.0  # an entry written before this format: treat as fresh
+    except Exception:  # noqa: BLE001 - a cache miss, never a failed page
+        _logger.debug("analytics cache unavailable", exc_info=True)
+        return None
+
+
+async def _compute_and_store(key: str, handler, kwargs):
+    from src.api.bulkhead import compute_slot
+
+    async with compute_slot():
+        result = await handler(**kwargs)
+    try:
+        body = (
+            result.model_dump(mode="json")
+            if hasattr(result, "model_dump")
+            else json.loads(json.dumps(result, default=str))
+        )
+        entry = json.dumps({"t": time.time(), "v": body}, default=str)
+        await async_redis.client.set(key, entry, ex=_AGGREGATE_KEEP_SECONDS)
+    except Exception:  # noqa: BLE001
+        _logger.debug("analytics cache write skipped", exc_info=True)
+    return result
+
+
+_CACHED_HANDLERS: dict[str, object] = {}
+
+
+async def refresh_dashboard_aggregate(key: str, handler_name: str, filters: dict, user_id: int) -> None:
+    """Recompute one cached dashboard view. Runs in the job worker, so the
+    seconds of Python it takes never block the web server's requests."""
+    from src.models.db.user import User
+    from src.repository.database import async_db
+
+    handler = _CACHED_HANDLERS[handler_name]
+    session = async_db.get_session()
+    try:
+        user = await session.get(User, user_id)
+        if user is None:
+            return
+        await _compute_and_store(key, handler, {**filters, "current_user": user, "session": session})
+    finally:
+        await session.close()
+
+
+async def _refresh_in_background(key: str, handler, kwargs) -> None:
+    from src.worker.queue import enqueue_job
+
+    try:
+        filters = {k: v for k, v in kwargs.items() if k not in {"current_user", "session"}}
+        queued = await enqueue_job(
+            "refresh_dashboard_aggregate_task",
+            key=key,
+            handler_name=handler.__name__,
+            filters=filters,
+            user_id=kwargs["current_user"].id,
+            _job_id=f"dash:{key}",  # one refresh per view at a time
+        )
+        if not queued:
+            _logger.info("dashboard refresh not queued; the stale view stays until the next request")
+    finally:
+        _refreshing.discard(key)
+
+
+def _aggregate_cache(handler=None, *, guard=None):
+    """Share a dashboard aggregate between staff who see the same data.
+
+    These charts are counts over the whole period; a minute's delay is invisible,
+    while 100 staff each re-running a dozen aggregate queries is not. The key is the
+    endpoint, its filters and the caller's college scope, so two people share an
+    entry only when the backend would compute the same answer for both. Redis
+    being down only means no cache. A staff member only waits for a computation
+    when nobody has opened that view in the last 15 minutes.
+    """
+
+    if handler is None:
+        return lambda h: _aggregate_cache(h, guard=guard)
+
+    _CACHED_HANDLERS[handler.__name__] = handler
+
+    @functools.wraps(handler)
+    async def wrapper(**kwargs):
+        user = kwargs["current_user"]
+        session = kwargs["session"]
+        # A role check inside a handler would be skipped on a cache hit, so it
+        # runs here first; the key only carries the data scope.
+        if guard is not None:
+            guard(user)
+        allowed = await get_user_allowed_colleges(user, session)
+        filters = {
+            k: (v.value if isinstance(v, Enum) else v)
+            for k, v in kwargs.items()
+            if k not in {"current_user", "session"}
+        }
+        scope = sorted(allowed) if allowed is not None else "*"
+        raw = json.dumps([handler.__name__, filters, scope], default=str, sort_keys=True)
+        key = "analytics:v2:" + hashlib.sha256(raw.encode()).hexdigest()
+        # Hand the request's database connection back before touching the cache or
+        # waiting on someone else's computation. Otherwise 100 staff waiting for one
+        # cold aggregate hold every pooled connection and students get 503s. The
+        # session takes a connection again only if this request has to compute.
+        if session is not None:
+            await session.close()
+        hit = await _cache_get(key)
+        if hit is not None:
+            value, age = hit
+            if age > _AGGREGATE_TTL_SECONDS and key not in _refreshing:
+                _refreshing.add(key)
+                asyncio.create_task(_refresh_in_background(key, handler, kwargs))
+            return value
+        # Nothing cached: one computation per key, the others wait for its result.
+        lock = _inflight.setdefault(key, asyncio.Lock())
+        try:
+            async with lock:
+                hit = await _cache_get(key)
+                if hit is not None:
+                    return hit[0]
+                return await _compute_and_store(key, handler, kwargs)
+        finally:
+            if not lock.locked():
+                _inflight.pop(key, None)
+
+    return wrapper
 
 
 # Staff and students are in India; a "day" on the Overview is an Indian day.
@@ -252,6 +422,20 @@ def _metric_or_zero(value: Any, *, digits: int | None = None) -> int | float:
     return 0
 
 
+def _metric_or_none(value: Any, *, digits: int | None = None) -> int | float | None:
+    """Like `_metric_or_zero`, but "no data yet" stays None.
+
+    A KPI card for an average or a score must not show 0 for a learner who has
+    no scored interview: 0 reads as a failing learner. The dashboard renders None
+    as an em dash. Counts keep `_metric_or_zero`, where 0 is the true answer.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return _metric_or_zero(value, digits=digits)
+
+
 def _zero_fill_metric_nulls(payload: Any) -> Any:
     metric_hints = (
         "score",
@@ -315,7 +499,7 @@ async def verify_student_access(
     - Junior Facilitators can only access students enrolled in their assigned colleges.
     """
     allowed_colleges = await get_user_allowed_colleges(user, session)
-    student = (await session.execute(sqlalchemy.select(User).where(User.id == student_id))).scalar_one_or_none()
+    student = (await session.execute(sqlalchemy.select(User).options(*LIGHT_USER).where(User.id == student_id))).scalar_one_or_none()
     if student is None:
         raise fastapi.HTTPException(status_code=fastapi.status.HTTP_404_NOT_FOUND, detail="Student not found")
     if allowed_colleges is not None:
@@ -363,6 +547,7 @@ async def verify_interview_access(
     description="Returns KPI cards for students, activity, interview volume, average score, and completion metrics."
     " Supports optional date, role, difficulty, and college filters.",
 )
+@_aggregate_cache
 async def get_dashboard_overview(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -443,6 +628,7 @@ async def get_dashboard_overview(
     description="Reasoning: helps identify usage spikes and troughs over time for operational monitoring."
     " Output: time-series points with date and interview count.",
 )
+@_aggregate_cache
 async def get_dashboard_interviews_per_day(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -477,6 +663,7 @@ async def get_dashboard_interviews_per_day(
 
 
 @router.get("/dashboard/active-users-trend", response_model=TimeSeriesResponse, status_code=200, summary="Active users trend", description="Reasoning: tracks daily engagement breadth across unique users. Output: date-wise active-user time-series points.")
+@_aggregate_cache
 async def get_dashboard_active_users_trend(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -506,6 +693,7 @@ async def get_dashboard_active_users_trend(
 
 
 @router.get("/dashboard/new-students-trend", response_model=TimeSeriesResponse, status_code=200, summary="New students trend", description="Reasoning: tracks daily new user signups. Output: date-wise new student time-series points.")
+@_aggregate_cache
 async def get_dashboard_new_students_trend(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -549,6 +737,7 @@ async def get_dashboard_new_students_trend(
 
 
 @router.get("/dashboard/top-roles", response_model=DashboardTopListResponse, status_code=200, summary="Top roles by interview volume", description="Reasoning: identifies highest-demand roles for planning content and resources. Output: top-list role metrics.")
+@_aggregate_cache
 async def get_dashboard_top_roles(
     limit: int = fastapi.Query(default=5, ge=1, le=20),
     start_date: datetime.date | None = None,
@@ -594,6 +783,7 @@ async def get_dashboard_top_roles(
     description="Reasoning: surfaces institutional adoption and performance concentration for program decisions."
     " Output: top-list rows keyed by college with aggregate metrics.",
 )
+@_aggregate_cache
 async def get_dashboard_top_colleges(
     limit: int = fastapi.Query(default=5, ge=1, le=20),
     start_date: datetime.date | None = None,
@@ -629,6 +819,7 @@ async def get_dashboard_top_colleges(
     summary="Students per college",
     description="Returns top colleges by number of unique students who took interviews in the given period.",
 )
+@_aggregate_cache
 async def get_dashboard_students_per_college(
     limit: int = fastapi.Query(default=10, ge=1, le=100),
     view_type: str = fastapi.Query(default="all"),
@@ -710,6 +901,7 @@ async def get_dashboard_students_per_college(
     description="Reasoning: reveals score spread and calibration quality instead of relying only on averages."
     " Output: histogram buckets with range label and count.",
 )
+@_aggregate_cache
 async def get_dashboard_score_distribution(
     start_date: datetime.date | None = None,
     end_date: datetime.date | None = None,
@@ -841,7 +1033,7 @@ async def get_dashboard_recent_students(
     if allowed_colleges is not None and not allowed_colleges:
         limit_val = limit if isinstance(limit, int) else int(getattr(limit, "default", 10))
         return TablePageResponse(table_type="recent_students", items=[], page=1, limit=limit_val, total=0)
-    stmt = sqlalchemy.select(User).where(student_only())
+    stmt = sqlalchemy.select(User).options(*LIGHT_USER).where(student_only())
     if allowed_colleges is not None:
         stmt = stmt.where(User.university.in_(list(allowed_colleges)))
     stmt = stmt.order_by(User.created_at.desc()).limit(limit)
@@ -861,6 +1053,7 @@ async def get_dashboard_recent_students(
 
 
 @router.get("/dashboard/attention-required", response_model=TablePageResponse, status_code=200, summary="Students needing attention", description="Reasoning: prioritizes intervention candidates based on alert signals. Output: table rows of student/system attention items.")
+@_aggregate_cache(guard=require_operations)
 async def get_dashboard_attention_required(
     limit: int = fastapi.Query(default=20, ge=1, le=100),
     start_date: datetime.date | None = None,
@@ -960,7 +1153,7 @@ async def get_students_table(
     allowed_colleges = await get_user_allowed_colleges(current_user, session)
     if college:
         await verify_college_access(current_user, college, session)
-    users_stmt = sqlalchemy.select(User).where(student_only())
+    users_stmt = sqlalchemy.select(User).options(*LIGHT_USER).where(student_only())
     if college:
         users_stmt = users_stmt.where(User.university == college)
     elif allowed_colleges is not None:
@@ -985,7 +1178,7 @@ async def get_students_table(
         return TablePageResponse(table_type="students", items=[], page=page, limit=limit, total=total)
 
     user_ids = [user.id for user in users]
-    interviews_stmt = sqlalchemy.select(Interview).where(Interview.user_id.in_(user_ids)).order_by(Interview.created_at.asc())
+    interviews_stmt = sqlalchemy.select(Interview).options(*LIGHT_INTERVIEW).where(Interview.user_id.in_(user_ids)).order_by(Interview.created_at.asc())
     interviews = list((await session.execute(interviews_stmt)).scalars().all())
 
     interview_ids = [interview.id for interview in interviews]
@@ -1185,18 +1378,18 @@ async def get_student_summary(
     speech_scores = [item["speech_score"] for item in score_history if item.get("speech_score") is not None]
     knowledge_scores = [item["knowledge_score"] for item in score_history if item.get("knowledge_score") is not None]
 
-    true_avg_score = round(sum(overall_scores) / len(overall_scores), 2) if overall_scores else 0
-    true_avg_speech = round(sum(speech_scores) / len(speech_scores), 2) if speech_scores else 0
-    true_avg_knowledge = round(sum(knowledge_scores) / len(knowledge_scores), 2) if knowledge_scores else 0
+    true_avg_score = round(sum(overall_scores) / len(overall_scores), 2) if overall_scores else None
+    true_avg_speech = round(sum(speech_scores) / len(speech_scores), 2) if speech_scores else None
+    true_avg_knowledge = round(sum(knowledge_scores) / len(knowledge_scores), 2) if knowledge_scores else None
 
     kpis = [
         KpiCard(key="total_interviews", label="Total Interviews", value=attempts.get("interviews_attempted", 0)),
-        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(true_avg_score, digits=2)),
-        KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_zero(performance.get("improvement_rate"), digits=2), unit="percent"),
+        KpiCard(key="average_score", label="Average Score", value=_metric_or_none(true_avg_score, digits=2)),
+        KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_none(performance.get("improvement_rate"), digits=2), unit="percent"),
         KpiCard(key="last_active_date", label="Last Active Date", value=(score_history[-1].get("created_at").isoformat().replace("+00:00", "Z") if score_history and score_history[-1].get("created_at") else None)),
         KpiCard(key="practice_completion_rate", label="Practice Completion Rate", value=_metric_or_zero(practice.get("completion_ratio"), digits=2), unit="ratio"),
-        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero(true_avg_speech, digits=2)),
-        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero(true_avg_knowledge, digits=2)),
+        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_none(true_avg_speech, digits=2)),
+        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_none(true_avg_knowledge, digits=2)),
     ]
     return StudentSummaryResponse(student_id=student_id, kpis=kpis)
 
@@ -1661,9 +1854,9 @@ async def get_interviews_summary(
 
     kpis = [
         KpiCard(key="total_interviews", label="Total Interviews", value=total_interviews),
-        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(average_score, digits=2)),
+        KpiCard(key="average_score", label="Average Score", value=_metric_or_none(average_score, digits=2)),
         KpiCard(key="completion_rate", label="Completion Rate", value=_safe_percent(completed_interviews, total_interviews), unit="percent"),
-        KpiCard(key="average_duration", label="Typical duration", value=int(_metric_or_zero(average_duration)), unit="seconds"),
+        KpiCard(key="average_duration", label="Typical duration", value=(None if average_duration is None else int(_metric_or_zero(average_duration))), unit="seconds"),
         KpiCard(key="most_popular_role", label="Most Popular Role", value=popular_role[0] if popular_role else None),
         KpiCard(key="most_popular_difficulty", label="Most Popular Difficulty", value=popular_difficulty[0] if popular_difficulty else None),
     ]
@@ -1876,8 +2069,8 @@ async def get_college_detail_summary(
     kpis = [
         KpiCard(key="total_students_enrolled", label="Total Students Enrolled", value=students_count),
         KpiCard(key="students_with_interviews", label="Students Who Have Given Interviews", value=students_with_interviews),
-        KpiCard(key="average_score", label="Average Score", value=_metric_or_zero(summary.get("avg_score"), digits=2)),
-        KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_zero(summary.get("improvement_rate"), digits=2), unit="percent"),
+        KpiCard(key="average_score", label="Average Score", value=_metric_or_none(summary.get("avg_score"), digits=2)),
+        KpiCard(key="improvement_percent", label="Improvement %", value=_metric_or_none(summary.get("improvement_rate"), digits=2), unit="percent"),
         KpiCard(key="active_users_last_30_days", label="Active Users (Last 30 Days)", value=summary.get("usage_frequency")),
         KpiCard(key="completion_rate", label="Completion Rate", value=completion_rate, unit="percent"),
     ]
@@ -2159,12 +2352,12 @@ async def get_interview_detail_summary(
         raise fastapi.HTTPException(status_code=404, detail="Interview not found")
     question_level = metrics.get("question_level", [])
     kpis = [
-        KpiCard(key="overall_score", label="Overall Score", value=_metric_or_zero(metrics.get("total_score"), digits=2)),
+        KpiCard(key="overall_score", label="Overall Score", value=_metric_or_none(metrics.get("total_score"), digits=2)),
         KpiCard(key="duration", label="Duration", value=_metric_or_zero(metrics.get("duration_seconds")), unit="seconds"),
         KpiCard(key="difficulty_level", label="Difficulty Level", value=metrics.get("difficulty")),
         KpiCard(key="questions_count", label="Number of Questions", value=len(question_level)),
-        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_zero(metrics.get("speech_score"), digits=2)),
-        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_zero(metrics.get("knowledge_score"), digits=2)),
+        KpiCard(key="speech_score", label="Speech Score", value=_metric_or_none(metrics.get("speech_score"), digits=2)),
+        KpiCard(key="knowledge_score", label="Knowledge Score", value=_metric_or_none(metrics.get("knowledge_score"), digits=2)),
         KpiCard(key="completion_status", label="Completion Status", value=metrics.get("status")),
         # Scored identically to Assessment - this is the only card that tells a
         # reviewer whether this sitting is a scouting signal or a formal record.

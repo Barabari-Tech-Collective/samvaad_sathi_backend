@@ -360,7 +360,7 @@ async def human_record(
             for e, name in events
         ]
     released = row.result_released_at is not None
-    # The same entry the Human interviews list shows, so the record offers the same Join,
+    # The same entry the human interviews list shows, so the record offers the same Join,
     # reschedule, close and outcome actions under the same rules.
     from src.services.sampark_enrollment_sync import freshness_predicate
 

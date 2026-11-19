@@ -133,6 +133,64 @@ def _safe_download_filename(
     return candidate
 
 
+class _PublicOnlyNetworkBackend:
+    """Checks the address actually connected to, not only the one checked earlier.
+
+    `_is_public_http_url` resolves the host before the request, and the HTTP client
+    resolves it again to connect. A hostile DNS server can answer "public" the first
+    time and "10.0.0.5" the second (DNS rebinding). This backend resolves once at
+    connect time, refuses any non-global address, and connects to that address. TLS
+    still verifies the certificate against the original host name.
+    """
+
+    def __init__(self) -> None:
+        import httpcore
+
+        self._inner = httpcore.AnyIOBackend()
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        import ipaddress
+        import socket
+
+        import anyio
+        import httpcore
+
+        try:
+            infos = await anyio.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise httpcore.ConnectError(f"Could not resolve {host}") from exc
+        addresses = [info[4][0] for info in infos]
+        if not addresses or not all(ipaddress.ip_address(a).is_global for a in addresses):
+            raise httpcore.ConnectError(f"{host} does not resolve to a public address")
+        return await self._inner.connect_tcp(
+            addresses[0],
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        import httpcore
+
+        raise httpcore.ConnectError("Unix sockets are not allowed for resume downloads")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+def _public_only_transport():
+    import httpcore
+    import httpx
+
+    transport = httpx.AsyncHTTPTransport(trust_env=False)
+    transport._pool = httpcore.AsyncConnectionPool(
+        ssl_context=httpx.create_ssl_context(),
+        network_backend=_PublicOnlyNetworkBackend(),
+    )
+    return transport
+
+
 async def _fetch_resume_from_url(
     url: str, *, google_access_token: str | None = None
 ) -> ResumeFetchResult:
@@ -154,7 +212,9 @@ async def _fetch_resume_from_url(
         else _google_drive_download_url(url)
     )
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=20.0, follow_redirects=False, transport=_public_only_transport()
+        ) as client:
             for _redirect_count in range(6):
                 if not _is_public_http_url(current_url):
                     return ResumeFetchResult(
@@ -217,19 +277,9 @@ async def _fetch_resume_from_url(
                 None, error="Resume link exceeded the redirect limit"
             )
     except asyncio.CancelledError:
-        logger.warning(
-            "Question generation was interrupted for job_profile_id=%s token=%s",
-            job_profile_id,
-            generation_token,
-        )
-        await session.rollback()
-        if generation_token is not None:
-            await repo.finish_generation(
-                job_profile_id,
-                generation_token,
-                "failed",
-                "Question generation was interrupted. Your draft is safe; retry.",
-            )
+        # A cancelled download (job timeout, worker shutdown) must stay a cancellation.
+        # This handler used to belong to question generation and referenced names that
+        # do not exist here, so cancelling turned into a NameError.
         raise
     except Exception as exc:
         logger.warning("Bulk ATS: failed to fetch resume_url: %s", exc)
@@ -1226,3 +1276,14 @@ async def dispatch_notification_deliveries_task(ctx: dict):
         raise
     finally:
         await session.close()
+
+
+async def refresh_dashboard_aggregate_task(
+    ctx: dict, *, key: str, handler_name: str, filters: dict, user_id: int
+) -> None:
+    """Recompute a stale staff dashboard view off the web server (see
+    api/routes/analytics_v2.py). Staff keep seeing the previous minute's
+    numbers until this finishes."""
+    from src.api.routes.analytics_v2 import refresh_dashboard_aggregate
+
+    await refresh_dashboard_aggregate(key, handler_name, filters, user_id)
