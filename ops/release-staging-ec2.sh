@@ -27,7 +27,13 @@ BACKUP_DIR="${BACKUP_DIR:-$HOME/backups/samvaad}"
 STATE_DIR="${STATE_DIR:-$APP_DIR/.release}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 CODE_DIR="$APP_DIR/backend/backend"
-ENV_FILE="$APP_DIR/backend/.env"
+# The app's settings come from the .env nearest the code (python-decouple and load_dotenv both
+# search upward from backend/backend/src), so backend/backend/.env wins when it exists.
+if [ -f "$APP_DIR/backend/backend/.env" ]; then
+  ENV_FILE="$APP_DIR/backend/backend/.env"
+else
+  ENV_FILE="$APP_DIR/backend/.env"
+fi
 log() { echo "[samvaad-release $(date -u +%H:%M:%S)] $*"; }
 
 cd "$APP_DIR"
@@ -65,7 +71,7 @@ go_back() {
 
 if [ "${1:-}" = "--rollback" ]; then go_back; exit $?; fi
 
-log "1/7 environment file"
+log "1/7 environment file: $ENV_FILE"
 [ -f "$ENV_FILE" ] || { log "missing $ENV_FILE"; exit 1; }
 
 # Record what runs now, so a failed release can come back to it.
