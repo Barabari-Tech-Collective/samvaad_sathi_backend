@@ -70,9 +70,21 @@ envval() { grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed -e 's/^"//'
 TAG_NOW=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="$BACKUP_DIR/$TAG_NOW-${CURRENT:0:12}.dump"
 SSLMODE=require; [ "$(envval DB_SSL_ENABLED | tr '[:upper:]' '[:lower:]')" = "false" ] && SSLMODE=disable
-PGPASSWORD="$(envval POSTGRES_PASSWORD)" PGSSLMODE="$SSLMODE" pg_dump --format=custom --no-owner \
-  -h "$(envval POSTGRES_HOST)" -p "$(envval POSTGRES_PORT)" -U "$(envval POSTGRES_USERNAME)" -d "$(envval POSTGRES_DB)" \
-  -f "$BACKUP"
+PGHOST_V="$(envval POSTGRES_HOST)"; PGPORT_V="$(envval POSTGRES_PORT)"
+PGUSER_V="$(envval POSTGRES_USERNAME)"; PGDB_V="$(envval POSTGRES_DB)"
+if command -v pg_dump >/dev/null; then
+  PGPASSWORD="$(envval POSTGRES_PASSWORD)" PGSSLMODE="$SSLMODE" pg_dump --format=custom --no-owner \
+    -h "$PGHOST_V" -p "$PGPORT_V" -U "$PGUSER_V" -d "$PGDB_V" -f "$BACKUP"
+elif command -v docker >/dev/null; then
+  log "pg_dump not installed; using the postgres:18 image for the backup"
+  docker run --rm --network host -e PGPASSWORD="$(envval POSTGRES_PASSWORD)" -e PGSSLMODE="$SSLMODE" \
+    postgres:18-alpine pg_dump --format=custom --no-owner \
+    -h "$PGHOST_V" -p "$PGPORT_V" -U "$PGUSER_V" -d "$PGDB_V" > "$BACKUP"
+else
+  log "pg_dump is not installed. Install it once (client 18 backs up any server up to 18):"
+  log "  sudo apt-get install -y postgresql-common && sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y && sudo apt-get install -y postgresql-client-18"
+  exit 1
+fi
 [ -s "$BACKUP" ] || { log "backup is empty; stopping"; exit 1; }
 log "backup: $BACKUP ($(du -h "$BACKUP" | cut -f1))"
 
