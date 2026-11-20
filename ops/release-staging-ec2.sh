@@ -13,6 +13,14 @@
 # Run it on the server as the app user (ubuntu). It needs sudo only for systemctl restart.
 set -euo pipefail
 
+# Step 3 checks out a new commit, which can rewrite this very file while bash is still
+# reading it. Run from a private copy so the release never executes a half-old script.
+if [ -z "${SAMVAAD_RELEASE_COPY:-}" ]; then
+  copy=$(mktemp /tmp/samvaad-release.XXXXXX.sh)
+  cp "$0" "$copy"
+  SAMVAAD_RELEASE_COPY=1 exec bash "$copy" "$@"
+fi
+
 APP_DIR="${APP_DIR:-/home/ubuntu/apps/samvaad_sathi_backend}"
 VENV="${VENV:-$APP_DIR/venv}"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/backups/samvaad}"
@@ -59,6 +67,16 @@ if [ "${1:-}" = "--rollback" ]; then go_back; exit $?; fi
 
 log "1/7 environment file"
 [ -f "$ENV_FILE" ] || { log "missing $ENV_FILE"; exit 1; }
+
+# Edits made on the server would block the checkout after the backup has run, so stop
+# here instead, and say how to keep them.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  log "the server copy has local edits, so the release would stop at checkout:"
+  git status --short --untracked-files=no | sed 's/^/    /'
+  log "keep them with:  git stash push -m \"server edits $(date -u +%F)\""
+  log "or drop them:    git checkout -- <file>     then run this again"
+  exit 1
+fi
 
 # Record what runs now, so a failed release can come back to it.
 CURRENT=$(git rev-parse HEAD)
