@@ -12,7 +12,7 @@ WorkingDirectory=/home/ubuntu/apps/samvaad_sathi_backend/backend/backend
 Environment="PATH=/home/ubuntu/apps/samvaad_sathi_backend/venv/bin"
 
 # No EnvironmentFile needed - settings/base.py reads .env directly via
-# python-decouple from ROOT_DIR (backend/.env), same as the main service.
+# python-decouple from the .env nearest the code (backend/backend/.env), same as the main service.
 ExecStart=/home/ubuntu/apps/samvaad_sathi_backend/venv/bin/arq src.worker.main.WorkerSettings
 
 Restart=always
