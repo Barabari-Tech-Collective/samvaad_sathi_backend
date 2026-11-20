@@ -133,7 +133,8 @@ class BackendBaseSettings(BaseSettings):
         "https://samvaad-sathi.barabaricollective.org",  # Production frontend (without www)
         "https://www.samvaad-sathi.barabaricollective.org",  # Production frontend (with www)
         "https://dev-backend-samvaadsathi.barabaricollective.org",  # Dev backend (for local frontend testing)
-        "https://samvaad-saathi-dashboard.onrender.com",  # Dashboard frontend on Render
+        # Not used: nothing runs on Render (everything is on AWS).
+        # "https://samvaad-saathi-dashboard.onrender.com",
         "https://samvaad-dashboard.barabaricollective.org",
         "https://admin.barabaricollective.org",  # Sampark integrated staff dashboard
         "https://samvaad-saathi.barabaricollective.org",  # new domain for production
@@ -142,9 +143,9 @@ class BackendBaseSettings(BaseSettings):
         "https://master.d1ljdkppy5vau1.amplifyapp.com",  # new aws dashboard prod
         # staging
         "https://samvaad-saathi-staging.barabaricollective.org",
-        # Staging on render
-        "https://samvaad-sathi-backend-tdd0.onrender.com",
-        "https://samvaad-saathi-frontend.onrender.com",
+        # Not used: nothing runs on Render (everything is on AWS).
+        # "https://samvaad-sathi-backend-tdd0.onrender.com",
+        # "https://samvaad-saathi-frontend.onrender.com",
         # Sampark Saathi frontend staging on Amplify
         "https://staging.d1zdqqsxijaw3t.amplifyapp.com",
         # Samvaad Saathi Student frontend staging on Amplify
@@ -215,7 +216,7 @@ class BackendBaseSettings(BaseSettings):
     # ------------------------------
     # Sampark Saathi central auth (replaces Cognito as the source of student identity)
     # ------------------------------
-    # Public origin of the barabari-auth-service, e.g. https://barabari-auth-service.onrender.com
+    # Public origin of the barabari-auth-service, e.g. https://auth-staging.barabaricollective.org
     AUTH_SERVICE_BASE_URL: str = decouple.config("AUTH_SERVICE_BASE_URL", cast=str, default="")  # type: ignore
     # Optional browser-facing origin when server-to-server auth uses a private TLS endpoint.
     AUTH_SERVICE_PUBLIC_BASE_URL: str = decouple.config("AUTH_SERVICE_PUBLIC_BASE_URL", cast=str, default="")
