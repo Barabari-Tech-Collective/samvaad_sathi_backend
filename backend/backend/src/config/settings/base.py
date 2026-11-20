@@ -216,7 +216,7 @@ class BackendBaseSettings(BaseSettings):
     # ------------------------------
     # Sampark Saathi central auth (replaces Cognito as the source of student identity)
     # ------------------------------
-    # Public origin of the barabari-auth-service, e.g. https://auth-staging.barabaricollective.org
+    # Public origin of the barabari-auth-service, e.g. https://staging-auth.barabaricollective.org
     AUTH_SERVICE_BASE_URL: str = decouple.config("AUTH_SERVICE_BASE_URL", cast=str, default="")  # type: ignore
     # Optional browser-facing origin when server-to-server auth uses a private TLS endpoint.
     AUTH_SERVICE_PUBLIC_BASE_URL: str = decouple.config("AUTH_SERVICE_PUBLIC_BASE_URL", cast=str, default="")
