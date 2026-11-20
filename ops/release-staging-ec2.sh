@@ -13,6 +13,14 @@
 # Run it on the server as the app user (ubuntu). It needs sudo only for systemctl restart.
 set -euo pipefail
 
+# Run from a temporary copy: step 3 switches commits, and bash reads a script while it runs,
+# so the copy in the repository must be free to change.
+if [ -z "${SAMVAAD_RELEASE_COPY:-}" ]; then
+  copy=$(mktemp /tmp/samvaad-release.XXXXXX.sh)
+  cp "${BASH_SOURCE[0]}" "$copy"
+  SAMVAAD_RELEASE_COPY=1 exec bash "$copy" "$@"
+fi
+
 APP_DIR="${APP_DIR:-/home/ubuntu/apps/samvaad_sathi_backend}"
 VENV="${VENV:-$APP_DIR/venv}"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/backups/samvaad}"
@@ -90,6 +98,14 @@ log "backup: $BACKUP ($(du -h "$BACKUP" | cut -f1))"
 
 log "3/7 checking out"
 git fetch --quiet origin staging
+# A copy of this script fetched on its own (git checkout origin/staging -- ops/release-staging-ec2.sh)
+# would block the checkout below; put it back the way the current commit has it.
+if git cat-file -e HEAD:ops/release-staging-ec2.sh 2>/dev/null; then
+  git checkout --quiet HEAD -- ops/release-staging-ec2.sh
+else
+  git rm --quiet --cached --ignore-unmatch ops/release-staging-ec2.sh
+  rm -f ops/release-staging-ec2.sh
+fi
 SHA="${1:-$(git rev-parse origin/staging)}"
 git checkout --quiet --detach "$SHA"
 log "release ${SHA:0:12} (was ${CURRENT:0:12})"
