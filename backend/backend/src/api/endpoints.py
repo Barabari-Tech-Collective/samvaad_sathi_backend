@@ -96,6 +96,8 @@ from src.api.routes.human_interviews import router as human_interviews_router
 router.include_router(router=human_interviews_router)
 from src.api.routes.human_scorecards import router as human_scorecards_router
 router.include_router(router=human_scorecards_router)
+from src.api.routes.writing_assist import router as writing_assist_router
+router.include_router(router=writing_assist_router)
 from src.api.routes.notifications import router as notifications_router
 router.include_router(router=notifications_router)
 from src.api.routes.operations import router as operations_router

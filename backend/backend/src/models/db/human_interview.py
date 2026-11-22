@@ -2,6 +2,7 @@
 
 import datetime
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from src.repository.table import Base
 
@@ -64,6 +65,8 @@ class HumanInterview(Base):
     # The staff member who takes the interview, when it is not the scheduler (pack F17). A plain
     # id: HumanInterview already links to user through host_id.
     interviewer_id: Mapped[int | None] = mapped_column(sa.Integer, index=True)
+    # Questions the interviewer plans to ask: [{"id": str, "text": str, "area": str | null}]
+    question_sheet: Mapped[list] = mapped_column(JSONB, server_default="[]")
     reschedule_count: Mapped[int] = mapped_column(server_default="0")
     # Host-entered outcome. Students see it only once result_released_at is set.
     result: Mapped[str | None] = mapped_column(sa.String(24))

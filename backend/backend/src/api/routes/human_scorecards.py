@@ -39,15 +39,46 @@ def _trim(value):
 
 class Criterion(BaseModel):
     name: str = Field(min_length=2, max_length=80)
-    score: int | None = Field(None, ge=0, le=5)
+    score: int | None = Field(None, ge=0, le=7)
     evidence: str | None = Field(None, max_length=1000)
 
     _trim = field_validator("name", "evidence", mode="before")(classmethod(lambda c, v: _trim(v)))
 
 
+class Answer(BaseModel):
+    question_id: str = Field(min_length=1, max_length=40)
+    question: str = Field(min_length=3, max_length=500)
+    score: int | None = Field(None, ge=1, le=7)
+    remarks: str | None = Field(None, max_length=2000)
+
+    _trim = field_validator("question", "remarks", mode="before")(
+        classmethod(lambda c, v: _trim(v) or None)
+    )
+
+
+class SheetQuestion(BaseModel):
+    id: str = Field(min_length=1, max_length=40)
+    text: str = Field(min_length=3, max_length=500)
+    area: str | None = Field(None, max_length=60)
+
+    _trim = field_validator("text", "area", mode="before")(
+        classmethod(lambda c, v: _trim(v) or None)
+    )
+
+
+class SheetBody(BaseModel):
+    questions: list[SheetQuestion] = Field(max_length=30)
+
+
+class GenerateBody(BaseModel):
+    count: int = Field(8, ge=3, le=15)
+    focus: str | None = Field(None, max_length=300)
+
+
 class Draft(BaseModel):
     expected_version: int = Field(ge=0)
     criteria: list[Criterion] = Field(min_length=1, max_length=12)
+    answers: list[Answer] = Field(default_factory=list, max_length=30)
     suggested_result: RESULTS | None = None
     internal_notes: str | None = Field(None, max_length=3000)
     student_comments: str | None = Field(None, max_length=3000)
@@ -75,6 +106,35 @@ def can_review(user):
     )
 
 
+def sheet_answers(card, row):
+    """One answer row per question on the sheet, keeping what was already written."""
+    saved = {a.get("question_id"): a for a in (card.answers if card else []) or []}
+    out = []
+    for q in row.question_sheet or []:
+        a = saved.pop(q["id"], None) or {}
+        out.append({
+            "question_id": q["id"],
+            "question": q["text"],
+            "area": q.get("area"),
+            "score": a.get("score"),
+            "remarks": a.get("remarks"),
+        })
+    # Answers to questions later removed from the sheet stay visible, not lost.
+    out.extend({**a, "area": None} for a in saved.values())
+    return out
+
+
+def may_edit(card, row, user):
+    mine = user.id in (row.host_id, row.interviewer_id)
+    status = card.status if card else "none"
+    return (
+        ((mine and service.permitted(user, "update")) or is_admin_user(user))
+        and row.status in ("scheduled", "completed")
+        and row.result_released_at is None
+        and (status != "submitted" or can_review(user))
+    )
+
+
 def view(card, row, user):
     mine = user.id in (row.host_id, row.interviewer_id)
     status = card.status if card else "none"
@@ -84,6 +144,10 @@ def view(card, row, user):
         "status": status,
         "version": card.version if card else 0,
         "criteria": card.criteria if card else [{"name": n, "score": None, "evidence": None} for n in DEFAULT_CRITERIA],
+        "answers": sheet_answers(card, row),
+        "question_sheet": row.question_sheet or [],
+        "scale": card.scale if card else 7,
+        "interview_status": row.status,
         "suggested_result": card.suggested_result if card else None,
         "internal_notes": card.internal_notes if card else None,
         "student_comments": card.student_comments if card else None,
@@ -91,16 +155,15 @@ def view(card, row, user):
         "reviewed_at": card.reviewed_at if card else None,
         "review_note": card.review_note if card else None,
         "released": row.result_released_at is not None,
-        "can_edit": (
-            mine
-            and service.permitted(user, "update")
-            and row.status == "completed"
+        "can_edit": may_edit(card, row, user),
+        "can_edit_sheet": (
+            ((mine and service.permitted(user, "update")) or is_admin_user(user))
+            and row.status in ("scheduled", "completed")
             and row.result_released_at is None
-            and status in ("none", "draft", "returned")
         ),
         "can_submit": (
-            mine
-            and service.permitted(user, "update")
+            ((mine and service.permitted(user, "update")) or is_admin_user(user))
+            and row.status == "completed"
             and status in ("draft", "returned")
         ),
         "can_review": (
@@ -166,27 +229,37 @@ async def save_draft(
     if not state["can_edit"]:
         raise fastapi.HTTPException(
             409,
-            "The interviewer can edit the scorecard after marking the interview as completed, "
-            "until it is submitted or its result is shared.",
+            "The scorecard can be edited from the day of the interview until its result is "
+            "shared. While it waits for review, only a reviewer can change it.",
         )
     if body.expected_version != state["version"]:
         raise fastapi.HTTPException(409, "This scorecard changed. Refresh before saving.")
     names = [c.name.casefold() for c in body.criteria]
     if len(set(names)) != len(names):
         raise fastapi.HTTPException(422, "Each criterion needs a different name.")
+    scale = card.scale if card else 7
+    if any(c.score is not None and c.score > scale for c in body.criteria):
+        raise fastapi.HTTPException(422, f"Scores on this scorecard go up to {scale}.")
     fields = dict(
         criteria=[c.model_dump() for c in body.criteria],
+        answers=[a.model_dump() for a in body.answers],
         suggested_result=body.suggested_result,
         internal_notes=body.internal_notes,
         student_comments=body.student_comments,
     )
     if card is None:
-        card = HumanScorecard(appointment_id=row.id, status="draft", version=1, **fields)
+        card = HumanScorecard(appointment_id=row.id, status="draft", version=1, scale=7, **fields)
         session.add(card)
     else:
         for key, value in fields.items():
             setattr(card, key, value)
-        card.status, card.version = "draft", card.version + 1
+        # A reviewer correcting a card keeps its review state; anyone else's edit sends it back
+        # through review, so an approved result never changes unseen.
+        keep = card.status in ("submitted", "approved") and can_review(user) and (
+            is_admin_user(user) or card.submitted_by != user.id
+        )
+        card.status = card.status if keep else "draft"
+        card.version += 1
     service.audit(session, user, row, "human_scorecard_saved", "Saved a draft scorecard.")
     await session.commit()
     await session.refresh(card)
@@ -207,12 +280,12 @@ async def submit(
         raise fastapi.HTTPException(409, "Save a draft scorecard first.")
     if body.expected_version != card.version:
         raise fastapi.HTTPException(409, "This scorecard changed. Refresh before submitting.")
-    scored = [c for c in card.criteria if c.get("score") is not None]
+    scored = [c for c in [*card.criteria, *(card.answers or [])] if c.get("score") is not None]
     if not scored or not card.suggested_result or not card.student_comments:
         raise fastapi.HTTPException(
             422,
-            "Score at least one criterion, choose a suggested result and write the comments "
-            "the student will see.",
+            "Score at least one answer or area, choose a suggested result and write the "
+            "comments the student will see.",
         )
     card.status, card.version = "submitted", card.version + 1
     card.submitted_by, card.submitted_at = user.id, dt.datetime.now(UTC)
@@ -313,6 +386,60 @@ async def release(
     await session.commit()
     await session.refresh(card)
     return view(card, row, user)
+
+
+@router.put("/courses/{course_id}/{appointment_id}/question-sheet")
+async def save_sheet(
+    course_id: str,
+    appointment_id: int,
+    body: SheetBody,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """The questions the interviewer plans to ask. Students never see this sheet."""
+    row, card = await load(session, user, course_id, appointment_id, lock=True)
+    if not view(card, row, user)["can_edit_sheet"]:
+        raise fastapi.HTTPException(
+            409, "Only the interviewer can change the questions, until the result is shared."
+        )
+    ids = [q.id for q in body.questions]
+    if len(set(ids)) != len(ids):
+        raise fastapi.HTTPException(422, "Each question needs its own id.")
+    row.question_sheet = [q.model_dump() for q in body.questions]
+    service.audit(
+        session, user, row, "human_question_sheet_saved",
+        f"Saved {len(ids)} interview question(s).",
+    )
+    await session.commit()
+    await session.refresh(row)
+    return view(card, row, user)
+
+
+@router.post("/courses/{course_id}/{appointment_id}/question-sheet/generate")
+async def generate_sheet(
+    course_id: str,
+    appointment_id: int,
+    body: GenerateBody,
+    response: fastapi.Response,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Suggested questions from the round, role and preparation notes. Not saved."""
+    from src.services import writing_assist
+
+    response.headers["Cache-Control"] = "no-store"
+    row, card = await load(session, user, course_id, appointment_id)
+    if not view(card, row, user)["can_edit_sheet"]:
+        raise fastapi.HTTPException(409, "Only the interviewer can prepare the questions.")
+    questions = await writing_assist.question_sheet(
+        title=row.title, role=row.role_name, notes=row.instructions,
+        focus=(body.focus or "").strip() or None, count=body.count,
+    )
+    if not questions:
+        raise fastapi.HTTPException(
+            503, "AI could not suggest questions right now. Type your own, or try again."
+        )
+    return {"questions": questions}
 
 
 @router.get("/courses/{course_id}/interviewers")

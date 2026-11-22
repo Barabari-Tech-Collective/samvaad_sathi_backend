@@ -199,7 +199,7 @@ async def board(
     courses = await shortlists.placement_course_ids(user, session)
     can = {"create": shortlists.permission(user, "create"), "update": shortlists.permission(user, "update"), "publish": shortlists.permission(user, "publish")}
     if courses is not None and not courses:
-        return {"items": [], "can": can}
+        return {"items": [], "can": can, "courses": []}
     query = sa.select(Opportunity).order_by(Opportunity.created_at.desc(), Opportunity.id.desc()).limit(300)
     if courses is not None:
         query = query.where(Opportunity.course_id.in_(sorted(courses)))
@@ -234,7 +234,32 @@ async def board(
         for opening in openings
     ]
     names = await _course_names(session, {o.course_id for o in openings})
-    return {"items": [i | {"course_name": names.get(i["course_id"], i["course_id"])} for i in items], "can": can}
+    return {
+        "items": [i | {"course_name": names.get(i["course_id"], i["course_id"])} for i in items],
+        "can": can,
+        # The courses a new opening can be created in, so the form never depends on the
+        # course catalogue service being reachable.
+        "courses": await _creatable_courses(session, courses) if can["create"] else [],
+    }
+
+
+async def _creatable_courses(session, scoped):
+    from src.models.db.student_placement import StudentPlacement
+
+    if scoped is None:
+        rows = await session.execute(
+            sa.select(StudentPlacement.course_id, sa.func.max(StudentPlacement.course_name))
+            .where(StudentPlacement.course_id.is_not(None))
+            .group_by(StudentPlacement.course_id)
+        )
+        found = {k: v for k, v in rows.all() if k}
+    else:
+        found = dict.fromkeys(scoped)
+        found.update(await _course_names(session, set(scoped)))
+    return sorted(
+        ({"id": str(k), "name": v or f"Course {k}"} for k, v in found.items()),
+        key=lambda c: c["name"].casefold(),
+    )
 
 
 @router.post("/courses/{course_id}", status_code=201)
