@@ -240,6 +240,8 @@ async def board(
         # The courses a new opening can be created in, so the form never depends on the
         # course catalogue service being reachable.
         "courses": await _creatable_courses(session, courses) if can["create"] else [],
+        # True for administrators, who may also open one in a course with no learners yet.
+        "all_courses": courses is None,
     }
 
 

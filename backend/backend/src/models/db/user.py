@@ -51,6 +51,15 @@ class User(Base):  # type: ignore
         sqlalchemy.String(length=256), nullable=True, doc="Name of University / College"
     )
 
+    # Staff-editable contact number, shown on their profile. Students do not use it.
+    contact_number: SQLAlchemyMapped[str | None] = sqlalchemy_mapped_column(
+        sqlalchemy.String(length=20), nullable=True
+    )
+    # True once the person changed their own display name, so sign-in no longer replaces it.
+    name_edited: SQLAlchemyMapped[bool] = sqlalchemy_mapped_column(
+        sqlalchemy.Boolean, nullable=False, server_default=sqlalchemy.false()
+    )
+
     # Store raw image bytes (≤5 MB recommended). In Postgres this maps to BYTEA.
     profile_picture: SQLAlchemyMapped[bytes | None] = sqlalchemy_mapped_column(sqlalchemy.LargeBinary, nullable=True)
 

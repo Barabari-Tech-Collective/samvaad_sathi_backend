@@ -105,3 +105,16 @@ async def test_question_sheet_trims_and_caps(monkeypatch):
     monkeypatch.setattr(writing_assist, "structured_output", fake)
     out = await writing_assist.question_sheet(title="R1", role="Analyst", notes=None, focus=None, count=4)
     assert len(out) == 4 and out[0]["text"].startswith("Walk me")
+
+
+def test_staff_profile_validation():
+    from src.api.routes.staff_access import MyProfile
+
+    p = MyProfile(name="  Asha   Rao ", contact_number=" +91 98765-43210 ")
+    assert p.name == "Asha Rao" and p.contact_number == "+91 98765-43210"
+    assert MyProfile(name="Asha", contact_number="  ").contact_number is None
+    for bad in ("call me", "12", "+91 9876543210 ext 5"):
+        with pytest.raises(ValidationError):
+            MyProfile(name="Asha", contact_number=bad)
+    with pytest.raises(ValidationError):
+        MyProfile(name="A")

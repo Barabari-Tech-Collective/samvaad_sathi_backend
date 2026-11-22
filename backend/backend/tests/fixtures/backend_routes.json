@@ -252,6 +252,7 @@
  "PATCH /api/v2/learning-plans/{plan_id}",
  "PATCH /api/v2/opportunities/{opportunity_id}",
  "PATCH /api/v2/practice-templates/{profile_id}/review",
+ "PATCH /api/v2/staff-access/me/profile",
  "PATCH /api/v2/teams/{team_id}/members/{member_id}",
  "PATCH /api/v2/teams/{team_id}/members/{member_id}/restore",
  "PATCH /api/v2/teams/{team_id}/restore",

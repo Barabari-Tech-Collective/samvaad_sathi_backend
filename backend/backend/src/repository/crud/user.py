@@ -249,7 +249,7 @@ class UserCRUDRepository(BaseCRUDRepository):
         # callbacks deterministic: exactly one can establish a previously-empty binding.
         if user.central_identity_id is None:
             user = await self.bind_central_identity(user, central_user_id)
-        if name:
+        if name and not getattr(user, "name_edited", False):
             user.name = name
         if degree:
             user.degree = degree
