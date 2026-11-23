@@ -118,9 +118,45 @@ class ProjectLinkMapper:
             if current_url and not current_url.lower().startswith("http"):
                 proj["projectUrl"] = ""
 
-            # If project already has a valid URL assigned, mark it used
-            if proj.get("projectUrl") and proj.get("projectUrl") in candidate_urls:
-                assigned_urls.add(proj["projectUrl"])
+            # If project already has a valid URL assigned, attach verified metadata and mark used
+            existing_url = str(proj.get("projectUrl", "")).strip()
+            matched_candidate = None
+            if existing_url:
+                for c_url in candidate_urls:
+                    if existing_url == c_url or existing_url.rstrip("/") == c_url.rstrip("/"):
+                        matched_candidate = c_url
+                        break
+
+            if matched_candidate:
+                assigned_urls.add(matched_candidate)
+                url_data = links_data.get(matched_candidate, {})
+                url_cat = url_data.get("category")
+                is_valid = url_data.get("valid", False)
+                if url_cat == "repository":
+                    proj["repository"] = {
+                        "present": True,
+                        "working": is_valid,
+                        "url": matched_candidate,
+                        "status_code": url_data.get("status_code"),
+                        "is_private_or_missing_repo": bool(
+                            url_data.get("is_private_or_missing_repo")
+                        ),
+                        "user_exists": bool(url_data.get("user_exists")),
+                        "platform": url_data.get("platform", "github"),
+                        "reason": url_data.get("reason", ""),
+                    }
+                else:
+                    proj["deployment"] = {
+                        "present": True,
+                        "working": is_valid,
+                        "url": matched_candidate,
+                        "status_code": url_data.get("status_code"),
+                        "is_sleeping_or_timeout": bool(
+                            url_data.get("is_sleeping_or_timeout")
+                        ),
+                        "platform": url_data.get("platform", "deployment"),
+                        "reason": url_data.get("reason", ""),
+                    }
                 continue
 
             best_repo = None
@@ -188,8 +224,18 @@ class ProjectLinkMapper:
 
             if best_repo:
                 assigned_urls.add(best_repo)
-                is_valid = links_data.get(best_repo, {}).get("valid", False)
-                proj["repository"] = {"present": True, "working": is_valid}
+                repo_data = links_data.get(best_repo, {})
+                is_valid = repo_data.get("valid", False)
+                proj["repository"] = {
+                    "present": True,
+                    "working": is_valid,
+                    "url": best_repo,
+                    "status_code": repo_data.get("status_code"),
+                    "is_private_or_missing_repo": bool(repo_data.get("is_private_or_missing_repo")),
+                    "user_exists": bool(repo_data.get("user_exists")),
+                    "platform": repo_data.get("platform", "github"),
+                    "reason": repo_data.get("reason", ""),
+                }
                 if not proj.get("projectUrl"):
                     proj["projectUrl"] = best_repo
                 print(
@@ -198,8 +244,17 @@ class ProjectLinkMapper:
 
             if best_deployment:
                 assigned_urls.add(best_deployment)
-                is_valid = links_data.get(best_deployment, {}).get("valid", False)
-                proj["deployment"] = {"present": True, "working": is_valid}
+                dep_data = links_data.get(best_deployment, {})
+                is_valid = dep_data.get("valid", False)
+                proj["deployment"] = {
+                    "present": True,
+                    "working": is_valid,
+                    "url": best_deployment,
+                    "status_code": dep_data.get("status_code"),
+                    "is_sleeping_or_timeout": bool(dep_data.get("is_sleeping_or_timeout")),
+                    "platform": dep_data.get("platform", "deployment"),
+                    "reason": dep_data.get("reason", ""),
+                }
                 if is_valid and (
                     not proj.get("projectUrl") or proj.get("projectUrl") == best_repo
                 ):

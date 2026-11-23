@@ -42,6 +42,7 @@ def infer_role_track(role_name: str) -> RoleTrack:
 
 def _safe_link_records(verified_links: dict[str, Any]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
+    seen_canonical_keys: set[str] = set()
     links = verified_links.get("links", {}) if isinstance(verified_links, dict) else {}
     if not isinstance(links, dict):
         return records
@@ -55,6 +56,14 @@ def _safe_link_records(verified_links: dict[str, Any]) -> list[dict[str, Any]]:
         parsed = urlparse(normalized_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             continue
+        
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        canonical_key = f"{hostname}{parsed.path.rstrip('/')}"
+        if canonical_key in seen_canonical_keys:
+            continue
+        seen_canonical_keys.add(canonical_key)
         anchor = str(details.get("anchorText") or "").strip()
         platform = str(details.get("platform") or "").strip()
         if platform in {"system_link", "email"}:

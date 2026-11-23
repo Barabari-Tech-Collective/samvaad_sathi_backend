@@ -546,6 +546,7 @@ async def create_batch(
     experience_mode: str = Form("experienced"),
     retention_days: int = Form(settings.BULK_ATS_DEFAULT_RETENTION_DAYS),
     job_profile_id: Optional[int] = Form(None),
+    require_project_links: Optional[bool] = Form(None),
     current_user: User = Depends(get_current_bulk_ats_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
 ):
@@ -629,6 +630,8 @@ async def create_batch(
             "requiredSkills": parsed_required_skills,
             "preferredSkills": parsed_preferred_skills,
             "experienceMode": experience_mode,
+            "requireProjectLinks": require_project_links,
+            "require_project_links": require_project_links,
             "jdAnalysis": jd_analysis,
         },
     )
@@ -1601,6 +1604,7 @@ async def rerun_candidate(
 @router.patch("/candidates/{candidate_id}/review")
 async def review_candidate(
     candidate_id: int,
+    request: fastapi.Request,
     reviewer_notes: str | None = Form(None),
     reviewer_decision: str | None = Form(None),
     decision_reason: str | None = Form(None),
@@ -1613,19 +1617,25 @@ async def review_candidate(
     existing = await _get_authorized_candidate(
         repo, candidate_id=candidate_id, current_user=current_user
     )
-    decision = (
-        reviewer_decision.strip() or None if reviewer_decision is not None else None
-    )
+
+    form_data = await request.form()
+    has_decision_field = "reviewer_decision" in form_data
+    if has_decision_field:
+        raw_decision = str(form_data.get("reviewer_decision") or "").strip().lower()
+        if raw_decision in {"", "none", "null", "not_decided", "pending"}:
+            decision = None
+        elif raw_decision in {"shortlist", "hold", "not_shortlisted"}:
+            decision = raw_decision
+        else:
+            raise HTTPException(status_code=400, detail="Invalid reviewer_decision")
+        update_reviewer_decision = True
+    else:
+        decision = None
+        update_reviewer_decision = False
+
     outcome = (
         interview_outcome.strip() or None if interview_outcome is not None else None
     )
-    if reviewer_decision is not None and decision not in {
-        None,
-        "shortlist",
-        "hold",
-        "not_shortlisted",
-    }:
-        raise HTTPException(status_code=400, detail="Invalid reviewer_decision")
     if interview_outcome is not None and outcome not in {
         None,
         "not_interviewed",
@@ -1651,7 +1661,7 @@ async def review_candidate(
     candidate = await repo.update_review(
         candidate_id,
         reviewer_notes=(reviewer_notes[:10000] if reviewer_notes is not None else None),
-        reviewer_decision=(decision if reviewer_decision is not None else None),
+        reviewer_decision=decision,
         decision_reason=(
             decision_reason.strip()[:5000] or None
             if decision_reason is not None
@@ -1661,7 +1671,7 @@ async def review_candidate(
         reviewed_by=current_user.id,
         assigned_reviewer_id=assigned_reviewer_id,
         update_reviewer_notes=reviewer_notes is not None,
-        update_reviewer_decision=reviewer_decision is not None,
+        update_reviewer_decision=update_reviewer_decision,
         update_decision_reason=decision_reason is not None,
         update_interview_outcome=interview_outcome is not None,
     )

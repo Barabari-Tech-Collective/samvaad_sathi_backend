@@ -1,5 +1,6 @@
 import re
 from typing import Dict, Any, List
+from urllib.parse import urlparse
 
 
 class ProjectScorer:
@@ -80,6 +81,200 @@ class ProjectScorer:
             re.IGNORECASE,
         )
 
+    def _classify_project_evidence(
+        self,
+        project: Dict[str, Any],
+        project_url: str = "",
+        *,
+        is_tech_or_data: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Classifies project implementation evidence across 7 exhaustive edge cases:
+        1. VERIFIED_LIVE: Working public repository or working live deployment (HTTP 200).
+        2. DEPLOYMENT_SLEEPING: Live deployment server timed out or returned 502/503/504 (free-tier spin-down).
+        3. PRIVATE_REPO: GitHub repo specified & user exists, but repo returns 404/403 (private visibility).
+        4. BROKEN_404: Link provided but returns 404/dead and user not verified.
+        5. GENERIC_ROOT_URL: Points to platform root (e.g. github.com, linkedin.com) without project path.
+        6. INVALID_FORMAT: Malformed or unparseable URL string.
+        7. NO_LINK_PROVIDED: No repository or deployment link provided.
+        """
+        repo = project.get("repository") or {}
+        deployment = project.get("deployment") or {}
+
+        submitted_url = str(
+            project_url
+            or (repo.get("url") if isinstance(repo, dict) else "")
+            or (deployment.get("url") if isinstance(deployment, dict) else "")
+            or ""
+        ).strip()
+
+        # 1. VERIFIED_LIVE
+        repo_working = bool(isinstance(repo, dict) and repo.get("working"))
+        dep_working = bool(isinstance(deployment, dict) and deployment.get("working"))
+        if repo_working or dep_working:
+            return {
+                "status": "VERIFIED_LIVE",
+                "badgeType": "success",
+                "submittedUrl": submitted_url,
+                "statusCode": 200,
+                "platform": (
+                    repo.get("platform")
+                    if repo_working
+                    else deployment.get("platform", "deployment")
+                ),
+                "isWorking": True,
+                "evidenceScore": 7.0,
+                "title": "Verified Public Code / Demo",
+                "reason": "Public repository or live deployment link is verified and active.",
+                "actionableFix": "No action required. Your project implementation is publicly verified.",
+                "scoreImpact": "Full evidence points awarded (7.0/7.0).",
+            }
+
+        # 2. DEPLOYMENT_SLEEPING
+        dep_sleeping = bool(
+            isinstance(deployment, dict)
+            and (
+                deployment.get("is_sleeping_or_timeout")
+                or deployment.get("status_code") in (502, 503, 504)
+            )
+        )
+        if dep_sleeping:
+            code = deployment.get("status_code")
+            code_label = f"HTTP {code}" if code else "Request Timeout"
+            return {
+                "status": "DEPLOYMENT_SLEEPING",
+                "badgeType": "warning",
+                "submittedUrl": submitted_url,
+                "statusCode": code,
+                "platform": deployment.get("platform", "deployment"),
+                "isWorking": False,
+                "evidenceScore": 4.0,
+                "title": "Live Demo Inactive or Sleeping",
+                "reason": f"The deployment hosting server timed out or returned a temporary server error ({code_label}).",
+                "actionableFix": "Visit your live demo URL in a browser to spin up or wake up the server, or deploy to an always-on host like Vercel, Netlify, or Cloudflare Pages.",
+                "scoreImpact": "Partial credit awarded (4.0/7.0). Keeping the site active will unlock full 7.0 evidence points.",
+            }
+
+        # 3. PRIVATE_REPO
+        repo_private = bool(
+            isinstance(repo, dict)
+            and (
+                repo.get("is_private_or_missing_repo")
+                or (repo.get("present") and repo.get("user_exists") and not repo.get("working"))
+            )
+        )
+        if repo_private:
+            return {
+                "status": "PRIVATE_REPO",
+                "badgeType": "warning",
+                "submittedUrl": submitted_url,
+                "statusCode": repo.get("status_code", 404),
+                "platform": repo.get("platform", "github"),
+                "isWorking": False,
+                "evidenceScore": 2.5,
+                "title": "GitHub Repository is Private",
+                "reason": "We verified your GitHub account, but this repository cannot be viewed publicly (returns 404). Recruiters cannot inspect your code.",
+                "actionableFix": "Open your GitHub repository → Click 'Settings' → Scroll down to 'Danger Zone' → Click 'Change visibility' → Choose 'Make public'.",
+                "scoreImpact": "Partial credit awarded (2.5/7.0). Making your repository public will increase your score by up to +20 points.",
+            }
+
+        # URL provided but not working
+        if submitted_url:
+            clean_lower = submitted_url.lower()
+            # 5. GENERIC_ROOT_URL
+            try:
+                parsed = urlparse(
+                    clean_lower if clean_lower.startswith(("http://", "https://")) else f"https://{clean_lower}"
+                )
+                path = (parsed.path or "").strip("/")
+                if parsed.netloc in ("github.com", "gitlab.com", "bitbucket.org", "linkedin.com", "vercel.app", "netlify.app") and not path:
+                    return {
+                        "status": "GENERIC_ROOT_URL",
+                        "badgeType": "warning",
+                        "submittedUrl": submitted_url,
+                        "statusCode": 200,
+                        "platform": "generic",
+                        "isWorking": False,
+                        "evidenceScore": 1.0,
+                        "title": "Generic Platform Link",
+                        "reason": f"The link ({submitted_url}) points to a platform root rather than the specific project repository or demo.",
+                        "actionableFix": "Provide the direct URL to your specific project repository (e.g. github.com/username/project-name) instead of the homepage.",
+                        "scoreImpact": "Minimal evidence credit (1.0/7.0). Direct project links unlock full verification.",
+                    }
+            except Exception:
+                pass
+
+            # 6. INVALID_FORMAT
+            if not clean_lower.startswith(("http://", "https://", "github.com", "gitlab.com", "bitbucket.org")) and "." not in clean_lower:
+                return {
+                    "status": "INVALID_FORMAT",
+                    "badgeType": "error",
+                    "submittedUrl": submitted_url,
+                    "statusCode": 400,
+                    "platform": "unknown",
+                    "isWorking": False,
+                    "evidenceScore": 1.0,
+                    "title": "Malformed URL",
+                    "reason": f"'{submitted_url}' is not a valid web link format.",
+                    "actionableFix": "Ensure your project link starts with https:// and has no extra spaces or invalid characters.",
+                    "scoreImpact": "Minimal credit (1.0/7.0). Correcting the URL format will enable verification.",
+                }
+
+            # 4. BROKEN_404
+            status_code = (
+                (repo.get("status_code") if isinstance(repo, dict) else None)
+                or (deployment.get("status_code") if isinstance(deployment, dict) else None)
+                or 404
+            )
+            return {
+                "status": "BROKEN_404",
+                "badgeType": "error",
+                "submittedUrl": submitted_url,
+                "statusCode": status_code,
+                "platform": (
+                    repo.get("platform")
+                    if isinstance(repo, dict) and repo.get("platform")
+                    else deployment.get("platform", "web")
+                    if isinstance(deployment, dict)
+                    else "web"
+                ),
+                "isWorking": False,
+                "evidenceScore": 1.5,
+                "title": "Broken Link (404 Not Found)",
+                "reason": f"The submitted project link ({submitted_url}) returned 404 Not Found or is unreachable.",
+                "actionableFix": "Check your résumé for URL typos, ensure the repository/site name is accurate, or update it with an active link.",
+                "scoreImpact": "Low evidence score (1.5/7.0). Fixing this link will restore full verification points.",
+            }
+
+        # 7. NO_LINK_PROVIDED
+        evidence_score = 0.5 if is_tech_or_data else 2.5
+        fix_msg = (
+            "Add a public GitHub repository link or a live demo URL directly under this project in your résumé."
+            if is_tech_or_data
+            else "Add an appropriate work sample or enough detail for a recruiter to verify the outcome."
+        )
+        return {
+            "status": "NO_LINK_PROVIDED",
+            "badgeType": "neutral",
+            "submittedUrl": None,
+            "statusCode": None,
+            "platform": None,
+            "isWorking": False,
+            "evidenceScore": evidence_score,
+            "title": "No Public Code or Demo Provided" if is_tech_or_data else "No Work Sample Provided",
+            "reason": (
+                "This project was evaluated based only on résumé bullet points. No public repository or live demo was detected."
+                if is_tech_or_data
+                else "This project was evaluated based on description details alone."
+            ),
+            "actionableFix": fix_msg,
+            "scoreImpact": (
+                "Unverified project score is capped at 60%. Adding a verified public link will allow this project to score up to 90+."
+                if is_tech_or_data
+                else "Adding a work sample will provide supporting evidence for this project."
+            ),
+        }
+
     def score_projects(
         self,
         parsed_projects: List[Dict[str, Any]],
@@ -150,56 +345,24 @@ class ProjectScorer:
             metrics_pts = 7.0 if has_metrics else 3.0
 
             # Pillar 5: Verified Repository & Deployment Health (Max 7.0 pts)
-            repo_status = project.get("repository", {})
-            deployment_status = project.get("deployment", {})
+            link_verif = self._classify_project_evidence(
+                project, project_url, is_tech_or_data=True
+            )
+            verification_pts = link_verif["evidenceScore"]
 
-            verification_pts = 0.0
-            if repo_status.get("working"):
-                verification_pts += 4.0
-            elif repo_status.get("present") or "github.com" in str(project_url).lower():
-                verification_pts += 2.0
-
-            if deployment_status.get("working"):
-                verification_pts += 3.0
-            elif deployment_status.get("present"):
-                verification_pts += 1.5
-
-            if verification_pts == 0.0 and project_url:
-                verification_pts = 2.0  # Fallback for unclassified working web URLs
-
-            project_total = round(
+            raw_total = round(
                 context_pts + fw_pts + relevance_pts + metrics_pts + verification_pts, 1
             )
-            project_total = min(project_total, 35.0)
+            if link_verif["status"] != "VERIFIED_LIVE":
+                project_total = min(raw_total, 21.0)
+            else:
+                project_total = min(raw_total, 35.0)
             cumulative_score += project_total
 
             # Generate targeted gaps
             gaps = []
-
-            if repo_status.get("working") and deployment_status.get("working"):
-                pass  # No gaps — both links are fine; the LLM prompt has nothing to critique here
-            else:
-                # Repo status checks
-                if repo_status.get("present") and not repo_status.get("working"):
-                    gaps.append(
-                        "A repository link was detected, but it appears to be broken or private. Ensure the link is public and functioning."
-                    )
-                elif not repo_status.get("present"):
-                    gaps.append(
-                        "A working repository link (e.g., GitHub) is missing. Adding the source code repository would maximize your score."
-                    )
-
-                # Deployment status checks
-                if deployment_status.get("present") and not deployment_status.get(
-                    "working"
-                ):
-                    gaps.append(
-                        "A live deployment link was detected, but it appears to be broken. Ensure the application is actively hosted."
-                    )
-                elif not deployment_status.get("present"):
-                    gaps.append(
-                        "A live deployment website link is missing. Adding a live deployment link would maximize your score."
-                    )
+            if link_verif["status"] != "VERIFIED_LIVE":
+                gaps.append(link_verif["actionableFix"])
             if not has_metrics:
                 gaps.append(
                     "Project description could be strengthened by including quantitative impact or performance metrics."
@@ -215,14 +378,15 @@ class ProjectScorer:
                     "score": project_total,
                     "maxScore": 35,
                     "rating": self._get_rating_label(project_total),
-                    "projectUrl": project_url,
+                    "projectUrl": link_verif.get("submittedUrl") or project_url,
                     "detectedGaps": gaps,
+                    "linkVerification": link_verif,
                     "breakdown": {
                         "structureDepth": context_pts >= 5.5,
                         "frameworkDeclarations": has_framework,
                         "stackDensity": tech_count >= 2,
                         "impactMetrics": has_metrics,
-                        "verifiedDeploymentOrRepo": verification_pts >= 4.0,
+                        "verifiedDeploymentOrRepo": link_verif["status"] == "VERIFIED_LIVE",
                     },
                 }
             )
@@ -291,6 +455,17 @@ class ProjectScorer:
             "outcome",
             "result",
         }
+        domain_id = str(domain_profile.get("id") or "").lower()
+        domain_label = str(domain_profile.get("label") or "").lower()
+        is_tech_or_data = (
+            any(k in domain_id for k in ("tech", "engineer", "data", "software"))
+            or any(k in domain_label for k in ("tech", "engineer", "data", "software"))
+            or any(
+                k in kw.lower()
+                for kw in normalized_keywords
+                for k in ("sql", "python", "java", "react", "data", "developer", "engineer", "backend", "frontend", "sde")
+            )
+        )
         evaluations: list[Dict[str, Any]] = []
         total = 0.0
 
@@ -344,26 +519,24 @@ class ProjectScorer:
             has_outcome = bool(outcome_matches)
             outcomes = 7.0 if has_metric else 5.5 if has_outcome else 3.0
 
-            repo = project.get("repository") or {}
-            deployment = project.get("deployment") or {}
-            working_evidence = bool(
-                (isinstance(repo, dict) and repo.get("working"))
-                or (isinstance(deployment, dict) and deployment.get("working"))
+            link_verif = self._classify_project_evidence(
+                project, project_url, is_tech_or_data=is_tech_or_data
             )
-            if working_evidence:
-                evidence = 7.0
-            elif project_url:
-                evidence = 5.5
-            elif clarity >= 5.5 or has_metric:
-                evidence = 4.5
-            else:
-                evidence = 3.0
+            evidence = link_verif["evidenceScore"]
 
-            project_total = round(
+            raw_total = round(
                 clarity + ownership + relevance + outcomes + evidence, 1
             )
+            # Cap unverified technical projects at 60% (21.0 / 35.0)
+            if is_tech_or_data and link_verif["status"] != "VERIFIED_LIVE":
+                project_total = min(raw_total, 21.0)
+            else:
+                project_total = min(raw_total, 35.0)
             total += project_total
+
             gaps: list[str] = []
+            if link_verif["status"] != "VERIFIED_LIVE":
+                gaps.append(link_verif["actionableFix"])
             if clarity < 5.5:
                 gaps.append(
                     "Clarify the problem, your contribution, and the work completed."
@@ -379,10 +552,6 @@ class ProjectScorer:
             if outcomes < 5.5:
                 gaps.append(
                     "Add the result, learning, decision, or measurable impact of the work."
-                )
-            if evidence < 5.5:
-                gaps.append(
-                    "Add an appropriate work sample or enough detail for a recruiter to verify the outcome."
                 )
 
             factor_evidence = {
@@ -416,11 +585,7 @@ class ProjectScorer:
                     else "No result, learning, decision, or measurable impact is stated."
                 ),
                 "supportingEvidence": (
-                    "A repository or work-sample link was checked as working."
-                    if working_evidence
-                    else "A project URL is provided, but its contents were not assessed."
-                    if project_url
-                    else "No direct project URL was provided; the résumé details alone support this factor."
+                    f"{link_verif['title']}: {link_verif['reason']} {link_verif['scoreImpact']}"
                 ),
             }
 
@@ -430,8 +595,9 @@ class ProjectScorer:
                     "score": project_total,
                     "maxScore": 35,
                     "rating": self._get_rating_label(project_total),
-                    "projectUrl": project_url,
+                    "projectUrl": link_verif.get("submittedUrl") or project_url,
                     "detectedGaps": gaps,
+                    "linkVerification": link_verif,
                     "factorEvidence": factor_evidence,
                     "domain": domain_profile.get("label", "General business"),
                     "breakdown": {
