@@ -188,6 +188,7 @@
  "GET /api/v2/learner-hub/groups",
  "GET /api/v2/learner-hub/learners",
  "GET /api/v2/learner-hub/learners/{student_id}",
+ "GET /api/v2/learner-hub/learners/{student_id}/timeline",
  "GET /api/v2/learner-hub/summary",
  "GET /api/v2/learners/{student_id}",
  "GET /api/v2/learning-plans",
