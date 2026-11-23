@@ -14,7 +14,7 @@ from typing import Literal
 
 import fastapi
 import sqlalchemy as sa
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.session import get_async_session
@@ -45,15 +45,50 @@ class Criterion(BaseModel):
     _trim = field_validator("name", "evidence", mode="before")(classmethod(lambda c, v: _trim(v)))
 
 
+# The seven things an interviewer looks for in every answer, each marked 1-7 like the columns
+# of a judging sheet. A metric left blank does not apply to that question and is not counted.
+METRICS = (
+    "relevance",
+    "correctness",
+    "depth",
+    "structure",
+    "evidence",
+    "problem_solving",
+    "communication",
+)
+
+
 class Answer(BaseModel):
     question_id: str = Field(min_length=1, max_length=40)
     question: str = Field(min_length=3, max_length=500)
+    # The answer's score: the rounded average of its metric marks when any are given,
+    # otherwise the single score the interviewer chose.
     score: int | None = Field(None, ge=1, le=7)
+    metrics: dict[str, int | None] = Field(default_factory=dict)
     remarks: str | None = Field(None, max_length=2000)
 
     _trim = field_validator("question", "remarks", mode="before")(
         classmethod(lambda c, v: _trim(v) or None)
     )
+
+    @field_validator("metrics")
+    @classmethod
+    def _metrics(cls, v):
+        unknown = set(v) - set(METRICS)
+        if unknown:
+            raise ValueError(f"Unknown metric: {sorted(unknown)[0]}.")
+        for value in v.values():
+            if value is not None and not 1 <= value <= 7:
+                raise ValueError("Each metric is marked from 1 to 7.")
+        return {k: v[k] for k in METRICS if v.get(k) is not None}
+
+    @model_validator(mode="after")
+    def _score_from_metrics(self):
+        marks = list(self.metrics.values())
+        if marks:
+            # Round half up, so 4.5 becomes 5 as a person would expect.
+            self.score = int(sum(marks) / len(marks) + 0.5)
+        return self
 
 
 class SheetQuestion(BaseModel):
@@ -117,10 +152,11 @@ def sheet_answers(card, row):
             "question": q["text"],
             "area": q.get("area"),
             "score": a.get("score"),
+            "metrics": a.get("metrics") or {},
             "remarks": a.get("remarks"),
         })
     # Answers to questions later removed from the sheet stay visible, not lost.
-    out.extend({**a, "area": None} for a in saved.values())
+    out.extend({"metrics": {}, **a, "area": None} for a in saved.values())
     return out
 
 
