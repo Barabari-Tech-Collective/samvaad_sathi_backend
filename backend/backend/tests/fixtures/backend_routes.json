@@ -246,6 +246,7 @@
  "GET /redoc",
  "PATCH /api/bulk-ats/candidates/{candidate_id}/review",
  "PATCH /api/v2/assessment-roles/{job_profile_id}/review",
+ "PATCH /api/v2/coaching-hub/items/{key}",
  "PATCH /api/v2/cohorts/courses/{course_id}/{cohort_id}",
  "PATCH /api/v2/job-profile-questions/{question_id}",
  "PATCH /api/v2/job-profiles/{job_profile_id}/review",
