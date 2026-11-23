@@ -18,14 +18,16 @@ class SmartLinkValidator:
     validates network integrity, and categorizes links by platform and category.
     """
 
-    def __init__(self, timeout: int = 4):
+    def __init__(self, timeout: int = 8):
         self.timeout = timeout
         self.headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
-            )
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
         }
 
         self.platform_catalog = {
@@ -136,6 +138,8 @@ class SmartLinkValidator:
         except ValueError:
             return ""
         hostname = (parsed.hostname or "").casefold().rstrip(".")
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
         if (
             parsed.scheme.casefold() not in {"http", "https"}
             or not hostname
@@ -151,9 +155,10 @@ class SmartLinkValidator:
         normalized_path = parsed.path or ""
         if normalized_path != "/":
             normalized_path = normalized_path.rstrip("/")
+        scheme = "https" if parsed.scheme.casefold() in {"http", "https"} else parsed.scheme.casefold()
         return urlunparse(
             (
-                parsed.scheme.casefold(),
+                scheme,
                 f"{hostname}{port}",
                 normalized_path,
                 "",
@@ -241,8 +246,8 @@ class SmartLinkValidator:
     async def validate_github_url_async(
         self, client: httpx.AsyncClient, url: str
     ) -> Dict[str, Any]:
-        """GitHub API validation for profiles and repositories."""
-        clean_url = self._unwrap_url(url)
+        """Real-world browser-aligned validation for GitHub repositories and profiles."""
+        clean_url = self._unwrap_url(url).strip()
         if not clean_url.startswith(("http://", "https://")):
             clean_url = "https://" + clean_url
 
@@ -254,57 +259,133 @@ class SmartLinkValidator:
                 "reason": "Invalid GitHub URL format",
             }
 
-        username, repo = match.group(1), match.group(2)
+        username, raw_repo = match.group(1).strip(), match.group(2).strip()
         if username.lower() in ["settings", "notifications", "marketplace", "explore"]:
             return {"valid": False, "status_code": 404, "reason": "System path"}
 
+        # Build candidate URLs to test (handling spaces or formatting quirks from PDF extraction)
+        candidates = [clean_url]
+        if " " in clean_url:
+            candidates.append(clean_url.replace(" ", "-"))
+            candidates.append(clean_url.replace(" ", "_"))
+            candidates.append(clean_url.replace(" ", "%20"))
+
+        working_url = None
+
+        # Step 1: Real-world Web Check with browser headers and follow_redirects=True
+        # This mirrors EXACTLY what the user experiences in their browser!
+        for test_url in candidates:
+            try:
+                res = await client.get(
+                    test_url,
+                    timeout=self.timeout,
+                    follow_redirects=True,
+                    headers=self.headers,
+                )
+                if res.status_code == 200:
+                    working_url = str(res.url) if res.url else test_url
+                    break
+            except Exception:
+                pass
+
+        # Step 2: If web check succeeded, it is VERIFIED LIVE!
+        if working_url:
+            return {
+                "valid": True,
+                "status_code": 200,
+                "url": working_url,
+                "sub_type": "repository" if raw_repo else "profile",
+                "reason": "Repository is publicly accessible and verified live.",
+            }
+
+        # Step 3: If web check did not return 200, try GitHub API as secondary check
+        api_repo_slug = raw_repo.replace(" ", "-") if raw_repo else ""
         api_url = (
-            f"https://api.github.com/repos/{username}/{repo}"
-            if repo
+            f"https://api.github.com/repos/{username}/{api_repo_slug}"
+            if api_repo_slug
             else f"https://api.github.com/users/{username}"
         )
-
         try:
-            response = await client.get(api_url, timeout=self.timeout)
-            status_code = response.status_code
-            if status_code == 200:
-                data = response.json()
+            api_res = await client.get(
+                api_url,
+                timeout=self.timeout,
+                follow_redirects=True,
+                headers=self.headers,
+            )
+            if api_res.status_code == 200:
+                data = api_res.json() if hasattr(api_res, "json") else {}
                 return {
                     "valid": True,
                     "status_code": 200,
-                    "sub_type": "repository" if repo else "profile",
-                    "stars": data.get("stargazers_count", 0) if repo else None,
-                    "followers": data.get("followers", 0) if not repo else None,
+                    "sub_type": "repository" if raw_repo else "profile",
+                    "stars": data.get("stargazers_count", 0) if raw_repo else None,
+                    "followers": data.get("followers", 0) if not raw_repo else None,
+                    "reason": "Verified via GitHub API.",
                 }
-            elif status_code == 403 or status_code == 401:
-                # Only fall back on rate-limit/auth (403/401). For anything else (404, etc.),
-                # the GitHub API result is authoritative — trust it.
-                is_valid, fallback_status, err = await self.check_link_active_async(
-                    client, clean_url
-                )
-                return {
-                    "valid": is_valid,
-                    "status_code": fallback_status,
-                    "sub_type": "repository" if repo else "profile",
-                    "reason": err or f"Fallback {fallback_status}",
-                }
-            else:
-                return {
-                    "valid": False,
-                    "status_code": status_code,
-                    "reason": f"GitHub Status {status_code}",
-                }
-        except Exception as e:
-            # Fallback on exception as well
-            is_valid, fallback_status, err = await self.check_link_active_async(
-                client, clean_url
+        except Exception:
+            pass
+
+        # Step 4: Link is NOT accessible in the browser. Diagnose the EXACT reason:
+        # Check if user profile exists on GitHub
+        user_exists = False
+        try:
+            user_web_res = await client.get(
+                f"https://github.com/{username}",
+                timeout=self.timeout,
+                follow_redirects=True,
+                headers=self.headers,
             )
+            if user_web_res.status_code == 200:
+                user_exists = True
+        except Exception:
+            pass
+
+        if not user_exists:
+            # Fallback to API user check
+            try:
+                user_api_res = await client.get(
+                    f"https://api.github.com/users/{username}",
+                    timeout=self.timeout,
+                    follow_redirects=True,
+                    headers=self.headers,
+                )
+                if user_api_res.status_code == 200:
+                    user_exists = True
+            except Exception:
+                pass
+
+        if raw_repo and user_exists:
+            # User profile exists, but repository is 404 -> Private repository!
             return {
-                "valid": is_valid,
-                "status_code": fallback_status,
-                "sub_type": "repository" if repo else "profile",
-                "reason": str(e),
+                "valid": False,
+                "status_code": 404,
+                "sub_type": "repository",
+                "user_exists": True,
+                "is_private_or_missing_repo": True,
+                "reason": (
+                    f"GitHub account '{username}' exists, but this repository cannot be viewed publicly (404 Not Found). "
+                    "The repository is likely set to Private or the repository name has a typo."
+                ),
             }
+
+        if " " in clean_url:
+            return {
+                "valid": False,
+                "status_code": 400,
+                "sub_type": "repository" if raw_repo else "profile",
+                "user_exists": user_exists,
+                "is_private_or_missing_repo": False,
+                "reason": f"The repository URL contains invalid spaces ('{clean_url}'). Ensure the link is properly formatted.",
+            }
+
+        return {
+            "valid": False,
+            "status_code": 404,
+            "sub_type": "repository" if raw_repo else "profile",
+            "user_exists": False,
+            "is_private_or_missing_repo": False,
+            "reason": f"GitHub repository or user '{username}' returned 404 Not Found.",
+        }
 
     async def validate_all_links_async(
         self, extracted_links: List[Any]
@@ -388,7 +469,13 @@ class SmartLinkValidator:
                     is_valid, status_code, err_msg = await self.check_link_active_async(
                         client, clean_url
                     )
-                    extra_meta = {"error": err_msg} if err_msg else {}
+                    is_sleeping = (
+                        status_code in (502, 503, 504)
+                        or any(k in str(err_msg).lower() for k in ("timeout", "timed out", "connecterror"))
+                    )
+                    extra_meta = {"is_sleeping_or_timeout": is_sleeping}
+                    if err_msg:
+                        extra_meta["error"] = err_msg
 
                 link_record = {
                     "url": clean_url,

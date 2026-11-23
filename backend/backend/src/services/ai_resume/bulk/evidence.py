@@ -308,19 +308,9 @@ def build_category_evidence(
                 "text": "No role-required professional link is missing.",
             }))
 
-    question_for = {
-        "skills": "skills_score",
-        "education": "education_quality",
-        "experience": "experience_relevance",
-        "projects": "project_quality",
-    }
-    for category, question in question_for.items():
-        answer = (jev_report or {}).get(question) or {}
-        if answer.get("value") is not None:
-            evidence[category].append(with_location({
-                    "source": f"jev.{question}",
-                    "text": f"Jev assessment: {answer['value']} (confidence {answer.get('confidence')})",
-                }))
+    # Return clean, candidate-grounded resume evidence only.
+    # Provider-internal notes (e.g. Jev raw values and confidence metrics) are omitted
+    # from resume details so recruiters and students see only authentic resume evidence.
     return evidence
 
 

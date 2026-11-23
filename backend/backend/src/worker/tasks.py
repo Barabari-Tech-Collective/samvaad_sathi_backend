@@ -793,6 +793,13 @@ async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> di
             (job_profile.skills or []) if job_profile else (batch.required_skills or [])
         )
         preferred_skills = batch.preferred_skills or []
+        require_project_links = (
+            (batch.rubric_snapshot or {}).get("require_project_links")
+            if isinstance(batch.rubric_snapshot, dict)
+            else (batch.weight_overrides or {}).get("require_project_links")
+            if isinstance(batch.weight_overrides, dict)
+            else None
+        )
 
         try:
             result = await run_candidate_pipeline(
@@ -808,6 +815,7 @@ async def process_bulk_ats_candidate_task(ctx: dict, *, candidate_id: int) -> di
                 experience_mode=batch.experience_mode,
                 weight_overrides=batch.weight_overrides,
                 jev_provider=get_jev_provider(cohort_key=f"batch:{batch.id}"),
+                require_project_links=require_project_links,
             )
         except Exception as exc:
             logger.exception(

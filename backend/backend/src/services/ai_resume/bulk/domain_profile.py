@@ -304,11 +304,13 @@ def explicit_link_requirements(
     role_description: str,
     evaluation_intent: str,
     required_skills: Iterable[str],
+    role_name: str = "",
+    require_project_links: bool | None = None,
 ) -> tuple[str, ...]:
-    """Return only link types the recruiter rubric explicitly asks to inspect."""
+    """Return link types the recruiter rubric asks to inspect, auto-enabling for technical roles."""
 
     text = " ".join(
-        [role_description, evaluation_intent, " ".join(required_skills)]
+        [role_name, role_description, evaluation_intent, " ".join(required_skills)]
     ).casefold()
     patterns = {
         "repository": (
@@ -326,8 +328,31 @@ def explicit_link_requirements(
             r"(?:live\s+demo|deployment)\s+(?:link|required|url)?",
         ),
     }
-    return tuple(
+    categories = [
         category
         for category, expressions in patterns.items()
         if any(re.search(expression, text) for expression in expressions)
+    ]
+
+    is_tech_role = any(
+        k in role_name.lower()
+        for k in (
+            "developer",
+            "engineer",
+            "backend",
+            "frontend",
+            "full stack",
+            "fullstack",
+            "software",
+            "data",
+            "analyst",
+            "scientist",
+            "sde",
+            "programmer",
+        )
     )
+    if require_project_links is True or (require_project_links is None and is_tech_role):
+        if "project_evidence" not in categories:
+            categories.append("project_evidence")
+
+    return tuple(dict.fromkeys(categories))

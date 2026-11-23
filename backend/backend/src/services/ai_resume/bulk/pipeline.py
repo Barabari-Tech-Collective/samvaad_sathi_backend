@@ -212,6 +212,7 @@ async def run_candidate_pipeline(
     weight_overrides: dict | None,
     jev_provider: JevProvider,
     evaluation_intent: str = "",
+    require_project_links: bool | None = None,
 ) -> CandidateResult:
     warnings, role_context = _assess_role_context(
         role_description=role_description,
@@ -301,9 +302,11 @@ async def run_candidate_pipeline(
         preferred_skills=preferred_skills,
     )
     required_link_categories = explicit_link_requirements(
+        role_name=role_name,
         role_description=role_description,
         evaluation_intent=evaluation_intent,
         required_skills=required_skills,
+        require_project_links=require_project_links,
     )
 
     # 2. Link validation + applicability-aware evidence check (deterministic).

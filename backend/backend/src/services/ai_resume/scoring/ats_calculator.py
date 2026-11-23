@@ -100,20 +100,26 @@ class ATSCalculator:
             cat = link_info.get("category", "")
             is_valid = link_info.get("valid", False)
 
+            existing_repo = proj.get("repository") if isinstance(proj.get("repository"), dict) else {}
+            existing_dep = proj.get("deployment") if isinstance(proj.get("deployment"), dict) else {}
+
             repo_status = {
-                "present": cat == "repository",
-                "working": cat == "repository" and is_valid,
+                **existing_repo,
+                "present": existing_repo.get("present", cat == "repository"),
+                "working": existing_repo.get("working", cat == "repository" and is_valid),
             }
 
             deployment_status = {
-                "present": cat == "deployment",
-                "working": cat == "deployment" and is_valid,
+                **existing_dep,
+                "present": existing_dep.get("present", cat == "deployment"),
+                "working": existing_dep.get("working", cat == "deployment" and is_valid),
             }
 
             enriched_proj = {
                 **proj,
                 "repository": repo_status,
                 "deployment": deployment_status,
+                "linkVerification": proj.get("linkVerification"),
             }
             enriched_list.append(enriched_proj)
 

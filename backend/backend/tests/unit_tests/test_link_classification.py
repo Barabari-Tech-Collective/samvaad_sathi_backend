@@ -113,3 +113,39 @@ def test_link_scorer_with_coding_profile_and_portfolio():
     assert breakdown["coding_profile"]["present"] is True
     assert breakdown["coding_profile"]["working"] is True
     assert breakdown["linkedin"]["present"] is True
+
+
+def test_linkedin_and_profiles_are_deduplicated():
+    validator = SmartLinkValidator()
+    raw_links = [
+        "https://www.linkedin.com/in/udayasri-dasari-108b47308/",
+        "https://linkedin.com/in/udayasri-dasari-108b47308",
+        "https://github.com/3824-uday/",
+        "https://www.github.com/3824-uday",
+    ]
+    # Check normalization
+    normalized = [validator._normalize_candidate_url(u) for u in raw_links]
+    assert normalized[0] == normalized[1] == "https://linkedin.com/in/udayasri-dasari-108b47308"
+    assert normalized[2] == normalized[3] == "https://github.com/3824-uday"
+
+    # Check safe link records deduplication
+    mock_verified = {
+        "links": {
+            "https://www.linkedin.com/in/udayasri-dasari-108b47308/": {
+                "valid": True,
+                "platform": "linkedin",
+                "category": "social",
+                "status_code": 999,
+            },
+            "https://linkedin.com/in/udayasri-dasari-108b47308": {
+                "valid": True,
+                "platform": "linkedin",
+                "category": "social",
+                "status_code": 999,
+            },
+        }
+    }
+    records = _safe_link_records(mock_verified)
+    assert len(records) == 1
+    assert records[0]["platform"] == "linkedin"
+
