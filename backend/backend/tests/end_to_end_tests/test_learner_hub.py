@@ -536,3 +536,40 @@ async def test_learner_timeline_is_scoped_and_newest_first(hub_client):
     # Outside the coach's course: refused, not empty.
     r = await c.get(f"/v2/learner-hub/learners/{users['chitra']}/timeline", headers=as_("coach"))
     assert r.status_code == 404
+
+
+async def test_admin_adds_college_course_and_batch_that_are_listed_before_they_have_students(hub_client):
+    c, users, factory = hub_client
+    r = await c.post("/v2/learner-hub/groups", headers=as_("admin"), json={"kind": "college", "label": "  Lake   Side College "})
+    assert r.status_code == 201, r.text
+    colleges = (await c.get("/v2/learner-hub/groups?of=colleges", headers=as_("admin"))).json()
+    added = [row for row in colleges["items"] if row["label"] == "Lake Side College"]
+    assert added and added[0]["learners"] == 0 and added[0]["added"] is True
+    assert colleges["can"]["create_groups"] is True
+    # The same name again, or a name students already use, is refused clearly.
+    assert (await c.post("/v2/learner-hub/groups", headers=as_("admin"), json={"kind": "college", "label": "lake side college"})).status_code == 409
+    assert (await c.post("/v2/learner-hub/groups", headers=as_("admin"), json={"kind": "college", "label": "City College"})).status_code == 409
+    # A course, then a batch inside it.
+    assert (await c.post("/v2/learner-hub/groups", headers=as_("admin"), json={"kind": "course", "label": "Data Science 2027"})).status_code == 201
+    courses = (await c.get("/v2/learner-hub/groups?of=courses", headers=as_("admin"))).json()["items"]
+    assert any(row["label"] == "Data Science 2027" and row["learners"] == 0 for row in courses)
+    assert (await c.post("/v2/learner-hub/groups", headers=as_("admin"), json={"kind": "batch", "label": "Morning"})).status_code == 422
+    r = await c.post("/v2/learner-hub/groups", headers=as_("admin"), json={"kind": "batch", "label": "Morning", "course_id": "added-data-science-2027"})
+    assert r.status_code == 201
+    batches = (await c.get("/v2/learner-hub/groups?of=batches&course=added-data-science-2027", headers=as_("admin"))).json()["items"]
+    assert [b["label"] for b in batches] == ["Morning"]
+    # Staff who are not administrators neither see nor create them.
+    assert (await c.post("/v2/learner-hub/groups", headers=as_("lead"), json={"kind": "college", "label": "Nope College"})).status_code == 403
+    seen = (await c.get("/v2/learner-hub/groups?of=colleges", headers=as_("lead"))).json()
+    assert all(row["label"] != "Lake Side College" for row in seen["items"])
+    # Take one back.
+    entry_id = added[0]["entry_id"]
+    assert (await c.delete(f"/v2/learner-hub/groups/{entry_id}", headers=as_("admin"))).status_code == 204
+    colleges = (await c.get("/v2/learner-hub/groups?of=colleges", headers=as_("admin"))).json()
+    assert all(row["label"] != "Lake Side College" for row in colleges["items"])
+    # Once students are given the college it is a normal row, listed once.
+    await c.post("/v2/learner-hub/groups", headers=as_("admin"), json={"kind": "college", "label": "Hill Top"})
+    r = await c.post("/v2/learner-hub/actions/set-college", headers=as_("admin"), json={"selection": {"ids": [users["dev"]]}, "college": "hill top"})
+    assert r.status_code == 200, r.text
+    rows = [row for row in (await c.get("/v2/learner-hub/groups?of=colleges", headers=as_("admin"))).json()["items"] if row["label"].lower() == "hill top"]
+    assert len(rows) == 1 and rows[0]["learners"] == 1 and not rows[0].get("added")

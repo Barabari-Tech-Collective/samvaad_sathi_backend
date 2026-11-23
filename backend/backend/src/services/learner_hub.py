@@ -28,7 +28,7 @@ from src.api.dependencies.admin import (
 )
 from src.models.db.assessment_assignment import AssessmentAssignment
 from src.models.db.coaching_assignment import CoachingAssignment
-from src.models.db.college_alias import CollegeAlias, LearnerImportCollege
+from src.models.db.college_alias import CollegeAlias, LearnerGroupEntry, LearnerImportCollege
 from src.models.db.interview import Interview
 from src.models.db.job_profile import JobProfile
 from src.models.db.opportunity import OpportunityCandidate
@@ -838,6 +838,41 @@ async def weak_skills(session, people: list[Learner]) -> list[dict]:
     ]
 
 
+def slug(value: str) -> str:
+    return "-".join("".join(c if c.isalnum() else " " for c in value.casefold()).split())
+
+
+async def added_groups(session, context: Context, of: str, level: Level, q: str, shown: set[str]) -> list[dict]:
+    """Groups staff added by hand that have no students yet. Only administrators see them."""
+    if not context.viewer.admin or level.college or (level.batch and of != "batches"):
+        return []
+    kind = {"colleges": "college", "courses": "course", "batches": "batch"}[of]
+    stmt = sa.select(LearnerGroupEntry).where(LearnerGroupEntry.kind == kind)
+    if of == "batches" and level.course:
+        stmt = stmt.where(LearnerGroupEntry.course_key == level.course)
+    out = []
+    query = q.strip().casefold()
+    for entry in (await session.execute(stmt.order_by(LearnerGroupEntry.label))).scalars():
+        key = f"{entry.course_key}|{entry.group_key}" if of == "batches" else entry.group_key
+        if key in shown or (query and query not in entry.label.casefold()):
+            continue
+        meta = {"key": entry.group_key, "label": entry.label, "added": True, "entry_id": entry.id}
+        if of == "batches":
+            meta |= {
+                "course_id": entry.course_key,
+                "course_name": context.course_names.get(entry.course_key, entry.course_key or None),
+            }
+        out.append(
+            meta
+            | {
+                "learners": 0, "active": 0, "active_share": 0, "assessments": 0, "average_score": None,
+                "need_action": 0, "need_share": 0, "ready": 0, "ready_share": 0,
+                "colleges": 0, "courses": 0, "batches": 0,
+            }
+        )
+    return out
+
+
 def group_rows(context: Context, of: str, level: Level, q: str = "") -> tuple[list[dict], int]:
     people = filter_learners(context, level)
     buckets: dict[str, list[Learner]] = defaultdict(list)
@@ -1003,6 +1038,7 @@ def capabilities(viewer: Viewer) -> dict:
         "add_learners": viewer.admin or viewer.lead,
         "set_college": viewer.admin or viewer.lead,
         "merge_colleges": viewer.admin,
+        "create_groups": viewer.admin,
         "export": viewer.admin or explicit("course_workspace", "export"),
         "coach": viewer.admin or (has and viewer.lens == "program" and allowed("practice_coaching", "create")),
         "open_opening": viewer.admin or (has and explicit("placement_shortlists", "update")),
