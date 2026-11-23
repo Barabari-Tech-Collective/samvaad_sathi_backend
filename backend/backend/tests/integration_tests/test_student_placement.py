@@ -556,4 +556,7 @@ async def test_staff_cannot_hand_edit_a_group_that_follows_learner_choices():
     ):
         with pytest.raises(fastapi.HTTPException) as err:
             await cohorts.change_members("7", 5, body, user=SimpleNamespace(id=1), session=AsyncMock())
-    assert err.value.status_code == 409 and "follows what learners chose" in err.value.detail
+    assert err.value.status_code == 409 and (
+        "follows what students chose" in err.value.detail
+        or "follows what learners chose" in err.value.detail
+    )

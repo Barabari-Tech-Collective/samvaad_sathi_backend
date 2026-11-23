@@ -18,7 +18,7 @@ class SmartLinkValidator:
     validates network integrity, and categorizes links by platform and category.
     """
 
-    def __init__(self, timeout: int = 8):
+    def __init__(self, timeout: int = 4):
         self.timeout = timeout
         self.headers = {
             "User-Agent": (
@@ -155,7 +155,7 @@ class SmartLinkValidator:
         normalized_path = parsed.path or ""
         if normalized_path != "/":
             normalized_path = normalized_path.rstrip("/")
-        scheme = "https" if parsed.scheme.casefold() in {"http", "https"} else parsed.scheme.casefold()
+        scheme = parsed.scheme.casefold()
         return urlunparse(
             (
                 scheme,
