@@ -29,6 +29,26 @@ PURPOSES = {
     "answer_remark": (
         "the interviewer's remark on one answer in an interview. Short, specific, evidence based."
     ),
+    "instruction": (
+        "an instruction or reason a staff member gives a student about practice or a task. "
+        "Clear, kind and specific: what to do and why it helps. Speak to the student as 'you'."
+    ),
+    "reason": (
+        "a short reason recorded in the history so a colleague understands the decision later. "
+        "Factual, specific and neutral, one or two sentences."
+    ),
+    "description": (
+        "a description of a role, opening, batch or programme that candidates and students "
+        "will read. Clear and welcoming, with the concrete details kept as written."
+    ),
+    "question": (
+        "an interview question asked aloud to a candidate. One clear question, easy to say "
+        "and to understand, with no hints about the answer."
+    ),
+    "message": (
+        "a message from the Samvaad team to students or applicants. Polite, clear and brief, "
+        "with every date, link and name kept exactly as written."
+    ),
     "general": "a clear, professional message.",
 }
 

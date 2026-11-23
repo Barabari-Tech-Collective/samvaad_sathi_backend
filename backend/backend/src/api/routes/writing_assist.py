@@ -19,6 +19,11 @@ class Ask(BaseModel):
         "private_note",
         "handoff_note",
         "answer_remark",
+        "instruction",
+        "reason",
+        "description",
+        "question",
+        "message",
         "general",
     ] = "general"
 
