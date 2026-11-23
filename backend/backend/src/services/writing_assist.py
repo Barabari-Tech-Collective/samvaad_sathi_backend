@@ -11,8 +11,8 @@ from src.services.llm import structured_output
 
 PURPOSES = {
     "learner_feedback": (
-        "feedback that a learner will read after an interview. Warm, specific and encouraging. "
-        "Say what went well, then what to improve and how. Speak to the learner as 'you'."
+        "feedback that a student will read after an interview. Warm, specific and encouraging. "
+        "Say what went well, then what to improve and how. Speak to the student as 'you'."
     ),
     "interview_note": (
         "a short internal note about how an interview went (who joined, what happened). "

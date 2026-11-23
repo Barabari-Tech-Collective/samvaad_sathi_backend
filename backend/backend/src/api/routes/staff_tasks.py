@@ -345,7 +345,7 @@ async def _support_tasks(user, session, now, directory):
     if not waiting:
         return []
     return [_owned(_task(
-        "support_follow_ups", "Learners whose practice needs a look", waiting,
+        "support_follow_ups", "Students whose practice needs a look", waiting,
         "Blocked sessions, delayed feedback or failed answers. Saved work is kept.",
         "Facilitator", "Open support",
         f"/dashboard/samvaad/courses/{oldest_course}/support", True, oldest,

@@ -98,7 +98,7 @@ _PROFILES: dict[DomainId, DomainProfile] = {
         "education_social_impact",
         "Education and social impact",
         ("program evidence", "curriculum", "research", "impact report"),
-        "Judge learner or community need, contribution, delivery, inclusion, and measured impact.",
+        "Judge student or community need, contribution, delivery, inclusion, and measured impact.",
     ),
     "healthcare_life_sciences": DomainProfile(
         "healthcare_life_sciences",

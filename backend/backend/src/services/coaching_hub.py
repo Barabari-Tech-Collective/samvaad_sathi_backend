@@ -27,10 +27,10 @@ DRILLS = {
 }
 REMIND_GAP_DAYS = 3
 SIGNALS = {
-    "session_blocked": ("Session blocked", "Check what stopped this session. On its own, this does not mean the learner did anything wrong."),
-    "report_delayed": ("Report not yet available", "The report is late. Check it is still being made before asking the learner to redo anything."),
-    "open_over_two_hours": ("Open for over two hours", "Ask the learner if they need help. A session left open is not always stuck."),
-    "answer_processing_failed": ("Answer processing failed", "The learner may need help saving an answer. Saved answers are kept while you check."),
+    "session_blocked": ("Session blocked", "Check what stopped this session. On its own, this does not mean the student did anything wrong."),
+    "report_delayed": ("Report not yet available", "The report is late. Check it is still being made before asking the student to redo anything."),
+    "open_over_two_hours": ("Open for over two hours", "Ask the student if they need help. A session left open is not always stuck."),
+    "answer_processing_failed": ("Answer processing failed", "The student may need help saving an answer. Saved answers are kept while you check."),
 }
 
 

@@ -28,7 +28,7 @@ router = fastapi.APIRouter(prefix="/v2/opportunities", tags=["opportunity-handof
 UTC = dt.timezone.utc
 STATUS_TEXT = {
     "not_sent": "Not sent yet", "sent": "Sent to the company", "interviewing": "Company is interviewing",
-    "offered": "Offer made", "joined": "Joined", "declined": "Declined by the learner",
+    "offered": "Offer made", "joined": "Joined", "declined": "Declined by the student",
     "not_selected": "Not selected by the company",
 }
 

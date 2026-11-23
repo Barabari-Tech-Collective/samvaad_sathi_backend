@@ -1021,7 +1021,7 @@ async def get_dashboard_recent_interviews(
     response_model=TablePageResponse,
     status_code=200,
     summary="Recently active students",
-    description="Reasoning: helps identify currently engaged learners for outreach and follow-up actions."
+    description="Reasoning: helps identify currently engaged students for outreach and follow-up actions."
     " Output: paginated table of recent student activity.",
 )
 async def get_dashboard_recent_students(
@@ -1076,7 +1076,7 @@ async def get_dashboard_attention_required(
     return TablePageResponse(table_type="attention_required", items=items[:limit], page=1, limit=limit, total=len(items))
 
 
-@router.get("/students/summary", response_model=StudentsSummaryResponse, status_code=200, summary="Student analytics summary", description="Reasoning: provides fast cohort-level learner health snapshot. Output: aggregate student KPI cards.")
+@router.get("/students/summary", response_model=StudentsSummaryResponse, status_code=200, summary="Student analytics summary", description="Reasoning: provides fast cohort-level student health snapshot. Output: aggregate student KPI cards.")
 async def get_students_summary(
     current_user: User = Depends(get_current_user),
     session: SQLAlchemyAsyncSession = Depends(get_async_session),
@@ -1394,7 +1394,7 @@ async def get_student_summary(
     return StudentSummaryResponse(student_id=student_id, kpis=kpis)
 
 
-@router.get("/students/{student_id}/score-history", response_model=StudentScoreHistoryResponse, status_code=200, summary="Student score history", description="Reasoning: shows longitudinal progression for one learner. Output: score trend time-series for the student.")
+@router.get("/students/{student_id}/score-history", response_model=StudentScoreHistoryResponse, status_code=200, summary="Student score history", description="Reasoning: shows longitudinal progression for one student. Output: score trend time-series for the student.")
 async def get_student_score_history(
     student_id: int,
     start_date: datetime.date | None = None,
@@ -1498,7 +1498,7 @@ async def get_student_practice_completion(
     return StudentPracticeCompletionResponse(student_id=student_id, kpis=kpis)
 
 
-@router.get("/students/{student_id}/interviews", response_model=TablePageResponse, status_code=200, summary="Student interview history", description="Reasoning: provides complete interview timeline for learner-level review. Output: paginated interview rows scoped to student.")
+@router.get("/students/{student_id}/interviews", response_model=TablePageResponse, status_code=200, summary="Student interview history", description="Reasoning: provides complete interview timeline for student-level review. Output: paginated interview rows scoped to student.")
 async def get_student_interviews(
     student_id: int,
     page: int = fastapi.Query(default=1, ge=1),
@@ -2229,7 +2229,7 @@ async def get_college_weak_skills(
     return HeatmapResponse(chart_type="heatmap", items=items)
 
 
-@router.get("/colleges/{college_name}/students", response_model=TablePageResponse, status_code=200, summary="Students in a college", description="Reasoning: enables institution-specific learner drill-down from college views. Output: paginated student analytics rows for selected college.")
+@router.get("/colleges/{college_name}/students", response_model=TablePageResponse, status_code=200, summary="Students in a college", description="Reasoning: enables institution-specific student drill-down from college views. Output: paginated student analytics rows for selected college.")
 async def get_college_students(
     college_name: str,
     page: int = fastapi.Query(default=1, ge=1),

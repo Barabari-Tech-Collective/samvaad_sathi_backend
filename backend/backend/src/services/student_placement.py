@@ -148,7 +148,7 @@ async def require_student(session, user, *, lock: bool = False) -> User:
         stmt = stmt.with_for_update()
     student = (await session.execute(stmt)).scalar_one_or_none()
     if student is None:
-        raise fastapi.HTTPException(403, "Choosing a course is for learners.")
+        raise fastapi.HTTPException(403, "Choosing a course is for students.")
     return student
 
 
