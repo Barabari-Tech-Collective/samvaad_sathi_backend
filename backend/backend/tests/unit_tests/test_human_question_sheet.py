@@ -118,3 +118,28 @@ def test_staff_profile_validation():
             MyProfile(name="Asha", contact_number=bad)
     with pytest.raises(ValidationError):
         MyProfile(name="A")
+
+
+def test_answer_score_is_the_average_of_its_metric_marks():
+    a = hs.Answer(
+        question_id="q1", question="Tell me",
+        metrics={"relevance": 6, "correctness": 5, "depth": None, "communication": 4},
+    )
+    # depth was left blank: it does not apply and is not counted.
+    assert a.metrics == {"relevance": 6, "correctness": 5, "communication": 4}
+    assert a.score == 5
+    assert hs.Answer(question_id="q1", question="Tell me", metrics={"relevance": 4, "depth": 5}).score == 5
+    # Without metric marks the single score stands.
+    assert hs.Answer(question_id="q1", question="Tell me", score=3).score == 3
+
+
+def test_metric_marks_are_checked():
+    for bad in ({"charm": 5}, {"relevance": 0}, {"relevance": 8}):
+        with pytest.raises(ValidationError):
+            hs.Answer(question_id="q1", question="Tell me", metrics=bad)
+
+
+def test_old_answers_without_metrics_still_show():
+    card = SimpleNamespace(answers=[{"question_id": "q1", "question": "Tell me", "score": 6, "remarks": None}])
+    out = hs.sheet_answers(card, _row())
+    assert out[0]["metrics"] == {} and out[0]["score"] == 6
