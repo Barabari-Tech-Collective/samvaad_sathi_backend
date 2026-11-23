@@ -493,8 +493,12 @@ async def test_assignments_and_coaching_finished(hub_client):
         s.add(CoachingAssignment(student_id=users["asha"], assigned_by=users["admin"], course_id="course-a", module="warm_up", reason="Needs a warm up.", due_date=(NOW - dt.timedelta(days=1)).date(), request_key=str(uuid.uuid4()), request_hash="x", status="assigned", version=1))
         await s.commit()
     o = (await get(c, "summary", days=7))["outcomes"]
-    assert o["assignments"] == {"total": 5, "finished": 3, "share": 60}
-    assert o["coaching"] == {"total": 1, "finished": 0, "share": None}
+    pick = lambda d: {k: d[k] for k in ("total", "finished", "share")}  # noqa: E731
+    assert pick(o["assignments"]) == {"total": 5, "finished": 3, "share": 60}
+    assert pick(o["coaching"]) == {"total": 1, "finished": 0, "share": None}
+    # Day-by-day lines for the trend on the cards; empty days are None, never 0.
+    assert len(o["assignments"]["series"]) == len(o["coaching"]["series"])
+    assert 60 in o["assignments"]["series"] and o["coaching"]["open"] == 1
     missed = await get(c, "learners", days=7, status="missed_assignment", limit=100)
     assert {i["name"] for i in missed["items"]} == {"chitra", "asha"}
     assert [i["name"] for i in (await get(c, "learners", days=7, status="coaching_overdue", limit=100))["items"]] == ["asha"]

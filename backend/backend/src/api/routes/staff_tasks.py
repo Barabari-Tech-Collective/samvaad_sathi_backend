@@ -17,6 +17,7 @@ from src.api.dependencies.admin import get_current_admin_user, is_admin_user
 from src.api.dependencies.session import get_async_session
 from src.models.db.human_interview import HumanInterview
 from src.models.db.job_profile import JobProfile
+from src.models.db.opportunity import Opportunity
 from src.models.db.team import Team
 from src.models.db.team_member import TeamMember
 from src.models.db.user import User
@@ -211,8 +212,9 @@ async def _today(user, session, now):
     day_start, day_end = _day_bounds(now)
     rows = (
         await session.execute(
-            sa.select(HumanInterview, User.name)
+            sa.select(HumanInterview, User.name, Opportunity.title, Opportunity.organisation)
             .join(User, User.id == HumanInterview.student_id)
+            .outerjoin(Opportunity, Opportunity.id == HumanInterview.opportunity_id)
             .where(
                 *_interview_scope(user),
                 HumanInterview.status == "scheduled",
@@ -230,6 +232,9 @@ async def _today(user, session, now):
             "ends_at": row.ends_at.isoformat(),
             "student_name": name,
             "round": row.role_name or row.title,
+            # A round for a job opening counts as job work on the Overview.
+            "kind": "job" if row.opportunity_id else "interview",
+            "opening": f"{title} · {organisation}" if title else None,
             "can_join": interviews.joinable(row, now),
             # Joining happens on the interviews list; otherwise open the one record.
             "href": (
@@ -238,8 +243,55 @@ async def _today(user, session, now):
                 else f"/dashboard/samvaad/assessments/human/{row.id}"
             ),
         }
-        for row, name in rows
+        for row, name, title, organisation in rows
     ]
+
+
+async def _coaching_today(user, session, now):
+    """Coaching due today and overdue, in this person's courses and colleges. Counts only."""
+    from src.models.db.coaching_assignment import CoachingAssignment
+    from src.models.db.learning_plan import LearningPlanAssignment
+    from src.models.db.mock_assignment import MockInterviewAssignment
+    from src.services.course_access import grants_for
+    from src.services.feature_access import permits
+
+    admin = is_admin_user(user)
+    if not admin and not permits(getattr(user, "feature_permissions", None), "practice_coaching", "read"):
+        return None
+    grants = () if admin else await grants_for(user, session)
+    if not admin and not grants:
+        return None
+    today = now.astimezone(IST).date()
+    due = overdue = 0
+    for model, open_status in (
+        (CoachingAssignment, "assigned"),
+        (MockInterviewAssignment, "assigned"),
+        (LearningPlanAssignment, "active"),
+    ):
+        stmt = (
+            sa.select(
+                sa.func.count().filter(model.due_date == today),
+                sa.func.count().filter(model.due_date < today),
+            )
+            .select_from(model)
+            .join(User, User.id == model.student_id)
+            .where(model.status == open_status, model.due_date.is_not(None), model.due_date <= today)
+        )
+        if not admin:
+            clauses = []
+            for g in grants:
+                inside = model.course_id.in_(sorted(g.course_ids))
+                if g.colleges is None:
+                    clauses.append(inside)
+                elif g.colleges:
+                    clauses.append(sa.and_(inside, sa.func.lower(sa.func.trim(User.university)).in_(sorted(g.colleges))))
+            if not clauses:
+                continue
+            stmt = stmt.where(sa.or_(*clauses))
+        a, b = (await session.execute(stmt)).one()
+        due += a or 0
+        overdue += b or 0
+    return {"due_today": due, "overdue": overdue, "href": "/dashboard/samvaad/practice-coaching"}
 
 
 async def _support_tasks(user, session, now, directory):
@@ -501,5 +553,6 @@ async def my_tasks(
     return {
         "tasks": tasks,
         "today": await _today(user, session, now),
+        "coaching_today": await _coaching_today(user, session, now),
         "generated_at": now.isoformat(),
     }
