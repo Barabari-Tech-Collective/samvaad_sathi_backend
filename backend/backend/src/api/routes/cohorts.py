@@ -269,7 +269,7 @@ async def change_members(
     if row.request_key.startswith(GROUP_PREFIX):
         # Made from what learners chose for themselves: their choice is the only way in or out.
         raise fastapi.HTTPException(
-            409, "This group follows what learners chose for their batch, so its members cannot be edited here."
+            409, "This group follows what students chose for their batch, so its members cannot be edited here."
         )
     if row.archived_at is not None:
         raise fastapi.HTTPException(409, "Restore this cohort before changing its members.")
@@ -279,7 +279,7 @@ async def change_members(
     if not add and not remove:
         raise fastapi.HTTPException(422, "Choose someone to add or remove.")
     if add & remove:
-        raise fastapi.HTTPException(422, "A learner cannot be added and removed at once.")
+        raise fastapi.HTTPException(422, "A student cannot be added and removed at once.")
     # Only learners this person may see in this course can be added or removed.
     reachable = set(
         (
@@ -290,7 +290,7 @@ async def change_members(
     )
     if (add | remove) - reachable:
         raise fastapi.HTTPException(
-            422, "Some learners are not enrolled in this course within your access."
+            422, "Some students are not enrolled in this course within your access."
         )
     already = set(
         (

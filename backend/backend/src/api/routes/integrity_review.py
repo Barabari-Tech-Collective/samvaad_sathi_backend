@@ -76,7 +76,7 @@ async def staff_case(session, user, course, case_id, operation, *, lock=False):
     if row is None:
         raise fastapi.HTTPException(404, "Review case not found in your current scope.")
     if row.student_id == user.id:
-        raise fastapi.HTTPException(403, "Use the learner view for your own case.")
+        raise fastapi.HTTPException(403, "Use the student view for your own case.")
     return row
 
 

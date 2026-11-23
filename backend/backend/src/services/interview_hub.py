@@ -743,7 +743,7 @@ async def _group_out(session, key, rows, now, jobs) -> dict:
     first = records[0]
     cohort = await session.get(Cohort, first.cohort_id) if first.cohort_id else None
     states = [_member_state(r.status) for r in records if r.status != "cancelled"]
-    label = cohort.name if cohort else (rows[0][1] if len(rows) == 1 else f"{len(rows)} learners")
+    label = cohort.name if cohort else (rows[0][1] if len(rows) == 1 else f"{len(rows)} students")
     return {
         "key": key,
         "label": label,
@@ -981,7 +981,7 @@ async def _queue_author(viewer, session) -> tuple[list[dict], dict]:
             sa.select(sa.func.min(FeedbackIssue.created_at)).where(FeedbackIssue.status == "open")
         )
         out.append(_item(
-            "issues", "Issues learners reported", "Transcript or feedback looks wrong",
+            "issues", "Issues students reported", "Transcript or feedback looks wrong",
             issues, _days_since(oldest, now), "You", f"{BASE}/issues", "alert",
         ))
     return out, tallies

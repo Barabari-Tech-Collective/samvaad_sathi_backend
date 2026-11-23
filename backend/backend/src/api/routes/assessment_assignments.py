@@ -70,7 +70,7 @@ class Create(Window):
     @model_validator(mode="after")
     def who(self):
         if bool(self.student_ids) == (self.cohort_id is not None):
-            raise ValueError("Choose learners or a cohort, not both.")
+            raise ValueError("Choose students or a cohort, not both.")
         return self
 
 
@@ -234,7 +234,7 @@ async def create(
     )
     missing = [s for s in wanted if s not in allowed]
     if missing and body.cohort_id is None:
-        raise fastapi.HTTPException(404, "Some learners are not in your scope.")
+        raise fastapi.HTTPException(404, "Some students are not in your scope.")
     now = dt.datetime.now(UTC)
     skipped = len(missing)
     made, replayed = await service.create_for(

@@ -80,7 +80,7 @@ async def recommendations(
         "items": items,
         "counts": {k: sum(1 for i in items if i["status"] == k) for k in ORDER},
         "can_edit": _may_edit(user),
-        "notice": "A suggestion from your rules, not a decision. Look at each learner before acting.",
+        "notice": "A suggestion from your rules, not a decision. Look at each student before acting.",
     }
 
 

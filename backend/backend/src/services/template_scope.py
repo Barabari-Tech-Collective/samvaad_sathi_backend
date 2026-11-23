@@ -19,7 +19,7 @@ from src.services.people import student_only
 from src.services.sampark_enrollment_sync import fresh
 
 NOT_YOUR_COURSE = (
-    "This interview is for learners in a different course. "
+    "This interview is for students in a different course. "
     "Check your courses under Profile, or ask your program team."
 )
 

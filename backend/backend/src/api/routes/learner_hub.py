@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from src.api.dependencies.admin import get_current_admin_user
 from src.api.dependencies.session import get_async_session
 from src.api.routes import cohorts as cohort_routes
-from src.models.db.college_alias import CollegeAlias, LearnerImportCollege
+from src.models.db.college_alias import CollegeAlias, LearnerGroupEntry, LearnerImportCollege
 from src.models.db.notification import Notification, NotificationDelivery
 from src.models.db.practice_governance import PracticeDashboardAuditEvent
 from src.models.db.interview import Interview
@@ -104,6 +104,10 @@ async def groups(
     context = await hub.load_context(user, session, days, course or None)
     level = hub.effective_level(context, level_of(college, course, batch))
     rows, no_batch = hub.group_rows(context, of, level, q)
+    shown = {f"{r['course_id']}|{r['key']}" if of == "batches" else r["key"] for r in rows}
+    empty = await hub.added_groups(session, context, of, level, q, shown)
+    if empty:
+        rows = rows + empty
     response.headers["Cache-Control"] = "no-store"
     return {
         "lens": context.viewer.lens,
@@ -114,6 +118,96 @@ async def groups(
         "no_batch": no_batch,
         "can": hub.capabilities(context.viewer),
     }
+
+
+class NewGroup(BaseModel):
+    kind: Literal["college", "course", "batch"]
+    label: str = Field(min_length=2, max_length=200)
+    course_id: str | None = Field(default=None, max_length=128)
+
+    _trim = field_validator("label", mode="before")(
+        classmethod(lambda c, v: " ".join(v.split()) if isinstance(v, str) else v)
+    )
+
+
+def _require_create(viewer):
+    require_action(hub.capabilities(viewer)["create_groups"], "Only administrators can add colleges, courses and batches.")
+
+
+@router.post("/groups", status_code=201)
+async def add_group(
+    body: NewGroup,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Add a college, course or batch by hand. It is listed at once, with no students until some join."""
+    viewer = await hub.viewer_for(user, session)
+    _require_create(viewer)
+    course_key = ""
+    if body.kind == "college":
+        key = hub.college_key(body.label)
+    else:
+        key = f"added-{hub.slug(body.label)}"
+        if key == "added-":
+            raise fastapi.HTTPException(422, "Use letters or numbers in the name.")
+    if body.kind == "batch":
+        course_key = (body.course_id or "").strip()
+        if not course_key:
+            raise fastapi.HTTPException(422, "Choose the course this batch belongs to.")
+    elif body.course_id:
+        raise fastapi.HTTPException(422, "Only a batch belongs to a course.")
+    if body.kind == "course":
+        key = f"added-{hub.slug(body.label)}"
+    exists = (
+        await session.execute(
+            sa.select(LearnerGroupEntry.id).where(
+                LearnerGroupEntry.kind == body.kind,
+                LearnerGroupEntry.group_key == key,
+                LearnerGroupEntry.course_key == course_key,
+            )
+        )
+    ).first()
+    if exists:
+        raise fastapi.HTTPException(409, f"A {body.kind} called {body.label} is already added.")
+    if body.kind == "college":
+        context = await hub.load_context(user, session, 7)
+        if any(p.college_key == key for p in context.learners):
+            raise fastapi.HTTPException(409, f"{body.label} already has students, so it is listed already.")
+    entry = LearnerGroupEntry(kind=body.kind, group_key=key, label=body.label, course_key=course_key, created_by=user.id)
+    session.add(entry)
+    session.add(
+        PracticeDashboardAuditEvent(
+            actor_id=user.id, action="learner_hub_group_added", purpose="learner_records",
+            target_type=body.kind, target_id=key[:64], reason=f"Added {body.kind} {body.label}",
+            event_metadata={"course": course_key or None},
+        )
+    )
+    await session.commit()
+    hub._cache.clear()
+    return {"id": entry.id, "kind": body.kind, "key": key, "label": body.label, "course_id": course_key or None}
+
+
+@router.delete("/groups/{entry_id}", status_code=204)
+async def remove_group(
+    entry_id: int,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Take back a group that was added by hand and still has no students."""
+    _require_create(await hub.viewer_for(user, session))
+    entry = await session.get(LearnerGroupEntry, entry_id)
+    if entry is None:
+        raise fastapi.HTTPException(404, "This group was not found.")
+    session.add(
+        PracticeDashboardAuditEvent(
+            actor_id=user.id, action="learner_hub_group_removed", purpose="learner_records",
+            target_type=entry.kind, target_id=entry.group_key[:64], reason=f"Removed {entry.kind} {entry.label}",
+            event_metadata={},
+        )
+    )
+    await session.delete(entry)
+    await session.commit()
+    hub._cache.clear()
 
 
 @router.get("/learners")
@@ -194,7 +288,7 @@ class Selection(BaseModel):
     @model_validator(mode="after")
     def something(self):
         if not self.ids and not self.all_matching:
-            raise ValueError("Choose at least one learner.")
+            raise ValueError("Choose at least one student.")
         return self
 
 
@@ -245,12 +339,12 @@ async def export(
         "An administrator must explicitly enable export for your account.",
     )
     if len(people) > MAX_EXPORT:
-        raise fastapi.HTTPException(413, f"Export is limited to {MAX_EXPORT:,} learners. Narrow your filters.")
+        raise fastapi.HTTPException(413, f"Export is limited to {MAX_EXPORT:,} students. Narrow your filters.")
     out = io.StringIO()
     out.write("﻿")
     writer = csv.writer(out)
     writer.writerow(
-        ["Learner ID", "Name", "College", "Courses", "Batch", "Last active", "Latest score",
+        ["Student ID", "Name", "College", "Courses", "Batch", "Last active", "Latest score",
          "Assessment average", "Score change", "Interviews", "Status"]
     )
     for person in hub.sort_learners(context, people, "urgent"):
@@ -278,7 +372,7 @@ async def export(
         headers={
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
-            "Content-Disposition": 'attachment; filename="learners.csv"',
+            "Content-Disposition": 'attachment; filename="students.csv"',
         },
     )
 
@@ -307,9 +401,9 @@ async def nudge(
     context, _, people = await resolve(user, session, body.selection)
     require_action(hub.capabilities(context.viewer)["coach"], "Reminders need your coaching responsibility.")
     if not people:
-        raise fastapi.HTTPException(422, "No learners in your scope match this selection.")
+        raise fastapi.HTTPException(422, "No students in your scope match this selection.")
     if len(people) > MAX_ACTION:
-        raise fastapi.HTTPException(413, f"Remind up to {MAX_ACTION:,} learners at a time.")
+        raise fastapi.HTTPException(413, f"Remind up to {MAX_ACTION:,} students at a time.")
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=NUDGE_GAP_DAYS)
     recent = set(
         (
@@ -378,9 +472,9 @@ async def assign(
     """Assign one thing to the selected learners in one course, each checked on their own."""
     context, _, people = await resolve(user, session, body.selection)
     if not people:
-        raise fastapi.HTTPException(422, "No learners in your scope match this selection.")
+        raise fastapi.HTTPException(422, "No students in your scope match this selection.")
     if len(people) > MAX_ACTION:
-        raise fastapi.HTTPException(413, f"Assign to up to {MAX_ACTION:,} learners at a time.")
+        raise fastapi.HTTPException(413, f"Assign to up to {MAX_ACTION:,} students at a time.")
     inside = {p.id: p.name for p in people if body.course_id in p.courses}
     outside = [
         {"id": p.id, "name": p.name, "reason": "Not enrolled in this course."}
@@ -388,7 +482,7 @@ async def assign(
         if body.course_id not in p.courses
     ]
     if not inside:
-        raise fastapi.HTTPException(422, "None of the selected learners are enrolled in this course.")
+        raise fastapi.HTTPException(422, "None of the selected students are enrolled in this course.")
     if body.kind == "assessment":
         done, skipped = await _assign_assessment(session, user, body, inside)
     else:
@@ -467,11 +561,11 @@ async def set_college(
 ):
     """Record the college for learners who have none, or correct a wrong one."""
     context, _, people = await resolve(user, session, body.selection)
-    require_action(hub.capabilities(context.viewer)["set_college"], "Only administrators and team leads can change a learner's college.")
+    require_action(hub.capabilities(context.viewer)["set_college"], "Only administrators and team leads can change a student's college.")
     if not people:
-        raise fastapi.HTTPException(422, "No learners in your scope match this selection.")
+        raise fastapi.HTTPException(422, "No students in your scope match this selection.")
     if len(people) > MAX_ACTION:
-        raise fastapi.HTTPException(413, f"Update up to {MAX_ACTION:,} learners at a time.")
+        raise fastapi.HTTPException(413, f"Update up to {MAX_ACTION:,} students at a time.")
     ids = [p.id for p in people]
     await session.execute(sa.update(User).where(User.id.in_(ids)).values(university=body.college))
     session.add(
@@ -503,7 +597,7 @@ async def import_colleges(
 ):
     """Keep the college from an import sheet for learners who have not joined yet."""
     viewer = await hub.viewer_for(user, session)
-    require_action(hub.capabilities(viewer)["add_learners"], "Only administrators and team leads can import learners.")
+    require_action(hub.capabilities(viewer)["add_learners"], "Only administrators and team leads can import students.")
     seen = 0
     for row in body.rows:
         email = row.email.strip().lower()
@@ -604,7 +698,7 @@ async def learner_detail(
     context = await hub.load_context(user, session, 30)
     person = next((p for p in context.learners if p.id == student_id), None)
     if person is None:
-        raise fastapi.HTTPException(404, "This learner is not in your scope.")
+        raise fastapi.HTTPException(404, "This student is not in your scope.")
     counts = dict(
         (
             await session.execute(
@@ -642,7 +736,7 @@ async def learner_timeline(
 
     context = await hub.load_context(user, session, 30)
     if not any(p.id == student_id for p in context.learners):
-        raise fastapi.HTTPException(404, "This learner is not in your scope.")
+        raise fastapi.HTTPException(404, "This student is not in your scope.")
     when = lambda d: d.isoformat() if d else None  # noqa: E731
     events: list[dict] = []
     rows = await session.execute(
@@ -679,7 +773,7 @@ async def learner_timeline(
             "href": f"/dashboard/samvaad/assessments/human/{row.id}",
         })
     for item in await coaching.load_items(session, context, {student_id}):
-        by = "the learner" if item["self_started"] else (item["by"] or "staff")
+        by = "the student" if item["self_started"] else (item["by"] or "staff")
         events.append({
             "at": when(item["created_at"]), "kind": "coaching",
             "title": f"Given: {item['name']}", "detail": f"By {by}", "href": None,

@@ -13,9 +13,11 @@ from src.models.db.coaching_assignment import CoachingAssignment
 from src.models.db.cohort import Cohort, CohortMember
 from src.models.db.learning_plan import LearningPlanAssignment
 from src.models.db.mock_assignment import MockInterviewAssignment
+from src.models.db.practice_drill_completion import PracticeDrillCompletion
 from src.models.db.practice_governance import PracticeDashboardAuditEvent
 from src.models.db.user import User
 from src.services import coaching_hub as service
+from src.services import writing_assist
 from src.services import course_shortlists, learner_hub as hub, learning_plans as plans, notifications
 
 router = fastapi.APIRouter(prefix="/v2/coaching-hub", tags=["coaching-hub"])
@@ -217,7 +219,52 @@ async def drills(college: str = "", course: str = "", batch: str = "", user=fast
             )
         ).all()
     }
-    return {"items": [{"module": k, "name": v[0], "what": v[1], "why": v[2], "open": counts.get((k, "assigned"), 0), "finished": counts.get((k, "completed"), 0)} for k, v in service.DRILLS.items()]}
+    own = {
+        m: n
+        for m, n in (
+            await session.execute(
+                sa.select(PracticeDrillCompletion.module, sa.func.count(sa.distinct(PracticeDrillCompletion.user_id)))
+                .where(
+                    PracticeDrillCompletion.user_id.in_(ids),
+                    PracticeDrillCompletion.completed_at >= dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30),
+                )
+                .group_by(PracticeDrillCompletion.module)
+            )
+        ).all()
+    }
+    items = []
+    for k, v in service.DRILLS.items():
+        opened, done = counts.get((k, "assigned"), 0), counts.get((k, "completed"), 0)
+        items.append(
+            {
+                "module": k, "name": v[0], "what": v[1], "why": v[2], "open": opened, "finished": done,
+                "given": opened + done + counts.get((k, "cancelled"), 0),
+                "finish_share": round(done / (opened + done) * 100) if opened + done else None,
+                "practised_alone": own.get(k, 0),
+                **service.DRILL_GUIDE[k],
+            }
+        )
+    return {"items": items}
+
+
+class PlanDraftAsk(BaseModel):
+    goal: str = Field(min_length=10, max_length=1000)
+    weeks: int = Field(default=2, ge=1, le=8)
+
+
+@router.post("/plans/ai-draft")
+async def plan_ai_draft(
+    body: PlanDraftAsk,
+    response: fastapi.Response,
+    user=fastapi.Depends(get_current_admin_user),
+):
+    """Suggest a plan for a goal. Nothing is saved: staff read it, change it and create the plan themselves."""
+    plan_routes.require(user, "create")
+    response.headers["Cache-Control"] = "no-store"
+    draft = await writing_assist.plan_draft(goal=body.goal.strip(), weeks=body.weeks)
+    if draft is None:
+        raise fastapi.HTTPException(503, "AI planning is not available right now. You can still build the plan by hand.")
+    return draft
 
 
 @router.get("/plans")
@@ -268,7 +315,7 @@ async def learner_coaching(student_id: int, user=fastapi.Depends(get_current_adm
     context = await hub.load_context(user, session, 30)
     person = next((p for p in context.learners if p.id == student_id), None)
     if person is None:
-        raise fastapi.HTTPException(404, "This learner is not in your scope.")
+        raise fastapi.HTTPException(404, "This student is not in your scope.")
     items = await service.load_items(session, context, {student_id})
     items.sort(key=lambda i: i["created_at"], reverse=True)
     was = await service.reminded(session, items)

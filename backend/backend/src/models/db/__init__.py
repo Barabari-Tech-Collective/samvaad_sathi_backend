@@ -9,7 +9,7 @@ from .bulk_ats import (  # noqa: F401
     BulkATSHandoffMessage,
     BulkATSPitch,
 )
-from .college_alias import CollegeAlias, LearnerImportCollege  # noqa: F401
+from .college_alias import CollegeAlias, LearnerGroupEntry, LearnerImportCollege  # noqa: F401
 from .interview import Interview  # noqa: F401
 from .interview_question import InterviewQuestion  # noqa: F401
 from .job_profile import JobProfile  # noqa: F401

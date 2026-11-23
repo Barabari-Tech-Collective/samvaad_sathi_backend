@@ -53,7 +53,7 @@ router = fastapi.APIRouter(prefix="/v2/assessment-records", tags=["assessment-re
 
 NOT_FOUND = "Assessment not found within your access."
 
-RELEASE_NOTE = "Shared with the learner as soon as it is scored."
+RELEASE_NOTE = "Shared with the student as soon as it is scored."
 
 
 class Reasoned(BaseModel):

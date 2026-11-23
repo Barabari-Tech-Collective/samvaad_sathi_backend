@@ -25,12 +25,40 @@ DRILLS = {
     "structure": ("Plan your answers", "Give every answer a clear shape", "This will help you give answers a clear start, middle and end."),
     "pace": ("Speak at a good speed", "Speak at a steady speed, with pauses", "This will help you slow down and speak at a steady pace."),
 }
+# What each drill really is, in plain words, so staff know what a student will be asked to do.
+DRILL_GUIDE = {
+    "warm_up": {
+        "how": "The student has a relaxed, spoken chat with the AI about themselves: who they are, what they study and why this role. There are no right or wrong answers and no pressure.",
+        "minutes": 5,
+        "use_when": "A student has not started, has been away, or freezes when they speak.",
+    },
+    "think_fast": {
+        "how": "The AI asks a surprise question and the student has only a few seconds to start answering. It trains giving a clear beginning, one point and an ending without preparing.",
+        "minutes": 5,
+        "use_when": "A student goes blank on unexpected questions, or rambles before getting to the point.",
+    },
+    "pronunciation": {
+        "how": "The student hears difficult words, repeats them and sees which ones were unclear. They try again until each word comes through clearly.",
+        "minutes": 8,
+        "use_when": "Interviewers may struggle to understand the student's words.",
+    },
+    "structure": {
+        "how": "The student plans an answer with a clear start, middle and end before speaking it, then gets feedback on its shape.",
+        "minutes": 10,
+        "use_when": "Knowledge scores are weak or answers wander.",
+    },
+    "pace": {
+        "how": "The student speaks while watching their speed and pauses, and learns to slow down and breathe between ideas.",
+        "minutes": 8,
+        "use_when": "Speech scores are weak, or the student talks too fast or too slowly.",
+    },
+}
 REMIND_GAP_DAYS = 3
 SIGNALS = {
-    "session_blocked": ("Session blocked", "Check what stopped this session. On its own, this does not mean the learner did anything wrong."),
-    "report_delayed": ("Report not yet available", "The report is late. Check it is still being made before asking the learner to redo anything."),
-    "open_over_two_hours": ("Open for over two hours", "Ask the learner if they need help. A session left open is not always stuck."),
-    "answer_processing_failed": ("Answer processing failed", "The learner may need help saving an answer. Saved answers are kept while you check."),
+    "session_blocked": ("Session blocked", "Check what stopped this session. On its own, this does not mean the student did anything wrong."),
+    "report_delayed": ("Report not yet available", "The report is late. Check it is still being made before asking the student to redo anything."),
+    "open_over_two_hours": ("Open for over two hours", "Ask the student if they need help. A session left open is not always stuck."),
+    "answer_processing_failed": ("Answer processing failed", "The student may need help saving an answer. Saved answers are kept while you check."),
 }
 
 
