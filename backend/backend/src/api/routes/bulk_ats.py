@@ -253,6 +253,8 @@ def _candidate_summary(c: BulkATSCandidate) -> dict:
         "scoreUpperBound": c.score_upper_bound,
         "reviewerDecision": c.reviewer_decision,
         "interviewOutcome": c.interview_outcome,
+        "reviewerNotesPreview": (c.reviewer_notes or "").strip()[:240],
+        "hasReviewerNotes": bool((c.reviewer_notes or "").strip()),
         "assignedReviewerId": c.assigned_reviewer_id,
         "feedbackStatus": _feedback_states(c.deterministic_report),
     }
