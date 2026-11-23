@@ -517,3 +517,22 @@ async def test_knowledge_and_speech_need_enough_learners(hub_client):
         await s.commit()
     skills = (await get(c, "summary", days=7))["outcomes"]["skills"]
     assert (skills["knowledge"], skills["speech"]) == (70, 50)
+
+
+async def test_learner_timeline_is_scoped_and_newest_first(hub_client):
+    c, users, factory = hub_client
+    async with factory() as s:
+        s.add(CoachingAssignment(
+            student_id=users["asha"], assigned_by=users["coach"], course_id="course-a", module="pace",
+            reason="Slow down a little", request_key=str(uuid.uuid4()), request_hash="t",
+        ))
+        await s.commit()
+    got = (await get(c, f"learners/{users['asha']}/timeline", "coach"))["items"]
+    kinds = [e["kind"] for e in got]
+    assert kinds[0] == "coaching" and "interview" in kinds
+    assert got[0]["detail"] == "By coach"
+    assert any(e["title"].startswith("Assessment") and e["detail"] == "Scored 80 / 100" for e in got)
+    assert [e["at"] for e in got] == sorted((e["at"] for e in got), reverse=True)
+    # Outside the coach's course: refused, not empty.
+    r = await c.get(f"/v2/learner-hub/learners/{users['chitra']}/timeline", headers=as_("coach"))
+    assert r.status_code == 404
