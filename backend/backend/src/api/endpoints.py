@@ -21,6 +21,7 @@ from src.api.routes.speech_pacing import router as speech_pacing_router
 from src.api.routes.job_profiles_v2 import router as job_profiles_v2_router
 from src.api.routes.analytics import router as analytics_router
 from src.api.routes.analytics_v2 import router as analytics_v2_router
+from src.api.routes.analytics_v2 import usage_router as analytics_v2_usage_router
 from src.api.routes.ai_resume import router as ai_resume_router
 from src.api.routes.resume_builder import router as resume_builder_router
 from src.api.routes.bulk_ats import router as bulk_ats_router
@@ -57,6 +58,7 @@ router.include_router(router=speech_pacing_router)
 router.include_router(router=job_profiles_v2_router, dependencies=[fastapi.Depends(feature_gate("interview_authoring"))])
 router.include_router(router=analytics_router, dependencies=[fastapi.Depends(feature_gate("analytics"))])
 router.include_router(router=analytics_v2_router, dependencies=[fastapi.Depends(feature_gate("analytics"))])
+router.include_router(router=analytics_v2_usage_router)
 router.include_router(router=ai_resume_router)
 router.include_router(router=resume_builder_router)
 from src.api.routes.bulk_ats_handoff import router as bulk_ats_handoff_router
@@ -80,6 +82,8 @@ from src.api.routes.mock_assignments import router as mock_assignments_router
 router.include_router(router=mock_assignments_router)
 from src.api.routes.student_placement import router as student_placement_router
 router.include_router(router=student_placement_router)
+from src.api.routes.whatsapp_updates import router as whatsapp_updates_router
+router.include_router(router=whatsapp_updates_router)
 from src.api.routes.learning_plans import router as learning_plans_router
 router.include_router(router=learning_plans_router)
 from src.api.routes.student_home import router as student_home_router
@@ -92,6 +96,8 @@ from src.api.routes.human_interviews import router as human_interviews_router
 router.include_router(router=human_interviews_router)
 from src.api.routes.human_scorecards import router as human_scorecards_router
 router.include_router(router=human_scorecards_router)
+from src.api.routes.writing_assist import router as writing_assist_router
+router.include_router(router=writing_assist_router)
 from src.api.routes.notifications import router as notifications_router
 router.include_router(router=notifications_router)
 from src.api.routes.operations import router as operations_router

@@ -418,6 +418,13 @@ async def build_user_profile(current_user, summary_repo, session):
             skills=current_user.skills.get("items", []) if isinstance(getattr(current_user, "skills", None), dict) else [],
             company=current_user.company,
     )
+    if memberships or claims_data["is_admin"]:
+        from src.services.workspace_access import workspace_sections
+
+        profile.contact_number = getattr(current_user, "contact_number", None)
+        profile.workspace_sections = workspace_sections(
+            profile.model_dump() | {"can_use_bulk_ats": profile.can_use_bulk_ats}, None
+        )
     return profile, claims_data
 
 

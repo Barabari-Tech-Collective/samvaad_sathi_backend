@@ -115,3 +115,41 @@ async def test_tasks_follow_ownership_and_omit_empty(factory):
         # Things to act on come before things to know about.
         order = [t["id"] for t in (await my_tasks(fastapi.Response(), host, session))["tasks"]]
         assert order[-1] == "interviews_upcoming"
+
+
+async def test_today_splits_job_rounds_and_counts_coaching_due(factory):
+    import uuid
+
+    from src.models.db.coaching_assignment import CoachingAssignment
+    from src.models.db.opportunity import Opportunity
+
+    now = dt.datetime.now(dt.timezone.utc)
+    async with factory() as session:
+        admin = _person("boss@example.test", is_admin=True)
+        student = _person("kid@example.test")
+        plain = _person("plain@example.test")
+        session.add_all([admin, student, plain])
+        await session.flush()
+        job = Opportunity(course_id="c1", title="Analyst", organisation="Acme", created_by=admin.id,
+                          request_key=str(uuid.uuid4()), request_hash="h")
+        session.add(job)
+        await session.flush()
+        soon = now + dt.timedelta(minutes=5)
+        session.add_all([
+            _interview(1, student, admin, soon, opportunity_id=job.id),
+            _interview(2, student, admin, soon + dt.timedelta(minutes=1)),
+        ])
+        today = now.astimezone(dt.timezone(dt.timedelta(hours=5, minutes=30))).date()
+        for i, due in enumerate([today, today, today - dt.timedelta(days=2), today + dt.timedelta(days=3)]):
+            session.add(CoachingAssignment(
+                student_id=student.id, assigned_by=admin.id, course_id="c1", module="pace",
+                reason="Practise pacing", due_date=due, request_key=str(uuid.uuid4()), request_hash=str(i),
+            ))
+        await session.commit()
+        out = await my_tasks(fastapi.Response(), admin, session)
+        kinds = sorted(t["kind"] for t in out["today"])
+        assert kinds == ["interview", "job"]
+        assert [t["opening"] for t in out["today"] if t["kind"] == "job"] == ["Analyst · Acme"]
+        assert out["coaching_today"]["due_today"] == 2 and out["coaching_today"]["overdue"] == 1
+        # Someone with no coaching access gets no counts at all.
+        assert (await my_tasks(fastapi.Response(), plain, session))["coaching_today"] is None

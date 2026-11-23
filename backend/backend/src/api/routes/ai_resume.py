@@ -143,12 +143,15 @@ async def analyze_resume(
             await session.refresh(db_analysis)
 
             if current_user.student_id:
+                # Created once here and kept by arq across retries: Sampark ignores a repeat.
+                score_event_id = str(uuid.uuid4())
                 queued = await enqueue_job(
                     "submit_resume_score_task",
                     student_id=current_user.student_id,
                     resume_score=analysis_result["atsScore"],
                     request_id=analysis_id,
                     target_role=targetRole,
+                    event_id=score_event_id,
                 )
                 if not queued:
                     background_tasks.add_task(
@@ -157,6 +160,7 @@ async def analyze_resume(
                         resume_score=analysis_result["atsScore"],
                         request_id=analysis_id,
                         target_role=targetRole,
+                        event_id=score_event_id,
                     )
 
         return analysis_result

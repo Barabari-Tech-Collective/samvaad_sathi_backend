@@ -37,6 +37,9 @@ _session_factory: sqlalchemy_async_sessionmaker | None = None
 
 def _build_engine() -> SQLAlchemyAsyncEngine:
     connect_args = {}
+    if getattr(settings, "DB_BEHIND_PGBOUNCER", False):
+        connect_args["statement_cache_size"] = 0
+        connect_args["prepared_statement_cache_size"] = 0
     if settings.DB_SSL_ENABLED:
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False

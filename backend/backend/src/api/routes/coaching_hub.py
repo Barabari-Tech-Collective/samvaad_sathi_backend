@@ -117,7 +117,7 @@ async def learners(
         pool = groups.get(card, [])
         typed = lambda k: [i for i in pool if i["type"] == k]  # noqa: E731
         chips = [{"key": "all", "label": "All", "count": len(pool)}, {"key": "drill", "label": "Drills", "count": len(typed("drill"))},
-                 {"key": "plan", "label": "Learning Plans", "count": len(typed("plan"))}, {"key": "mock", "label": "Mock Interviews", "count": len(typed("mock"))}]
+                 {"key": "plan", "label": "Learning Plans", "count": len(typed("plan"))}, {"key": "mock", "label": "Mock interviews", "count": len(typed("mock"))}]
         rows = pool if sub == "all" else typed(sub)
     rows = sorted(rows, key=lambda i: (i["due_days"] is None, i["due_days"] or 0))
     total = len(rows)
@@ -279,3 +279,88 @@ async def learner_coaching(student_id: int, user=fastapi.Depends(get_current_adm
         "items": items, "learner": service.person_out(context, person, any(i["status"] == "assigned" for i in items), drills.get(student_id, 0), False),
         "can": can_of(context, user),
     }
+
+
+class ItemEdit(BaseModel):
+    expected_version: int = Field(ge=1)
+    reason: str | None = Field(None, min_length=10, max_length=1000)
+    note: str | None = Field(None, max_length=2000)
+    due_date: dt.date | None = None
+    clear_due_date: bool = False
+
+
+ITEM_MODELS = {
+    "c": (CoachingAssignment, "assigned"),
+    "m": (MockInterviewAssignment, "assigned"),
+    "p": (LearningPlanAssignment, "active"),
+}
+
+
+@router.patch("/items/{key}")
+async def edit_item(
+    key: str,
+    body: ItemEdit,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Change an open drill, mock or plan: why it was given, the note and the due date.
+
+    The learner is told it changed. Finished or cancelled work stays as it was.
+    """
+    from src.services.coaching_assignments import authorize_staff, lock_student
+
+    kind, raw = key[:1], key[1:]
+    if kind not in ITEM_MODELS or not raw.isdigit():
+        raise fastapi.HTTPException(404, "Assignment not found.")
+    model, open_status = ITEM_MODELS[kind]
+    row = await session.get(model, int(raw))
+    if row is None:
+        raise fastapi.HTTPException(404, "Assignment not found.")
+    await authorize_staff(session, user, row.course_id, row.student_id, "update")
+    await lock_student(session, row.student_id)
+    row = (
+        await session.execute(
+            sa.select(model).where(model.id == int(raw)).with_for_update().execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    if row.version != body.expected_version:
+        raise fastapi.HTTPException(409, "Someone changed this assignment. Close it and open it again.")
+    if row.status != open_status:
+        raise fastapi.HTTPException(409, "Only work that is still open can be changed.")
+    today = dt.datetime.now(dt.timezone.utc).date()
+    if body.due_date and body.due_date < today:
+        raise fastapi.HTTPException(422, "Choose today or a later due date.")
+    changed = []
+    if body.reason is not None and body.reason.strip() != (row.reason or ""):
+        row.reason = body.reason.strip()
+        changed.append("reason")
+    if hasattr(row, "note") and body.note is not None and (body.note.strip() or None) != row.note:
+        row.note = body.note.strip() or None
+        changed.append("note")
+    if body.clear_due_date and row.due_date is not None:
+        row.due_date = None
+        changed.append("due date")
+    elif body.due_date and body.due_date != row.due_date:
+        row.due_date = body.due_date
+        changed.append("due date")
+    if not changed:
+        return {"key": key, "version": row.version, "changed": []}
+    row.version += 1
+    session.add(
+        PracticeDashboardAuditEvent(
+            actor_id=user.id,
+            action="coaching_item_edited",
+            purpose="facilitator_coaching",
+            target_type={"c": "coaching_assignment", "m": "mock_assignment", "p": "learning_plan_assignment"}[kind],
+            target_id=str(row.id),
+            reason=f"Changed {', '.join(changed)}.",
+            event_metadata={"course_id": row.course_id, "student_id": row.student_id, "changed": changed},
+        )
+    )
+    notifications.notify(
+        session, row.student_id, "coaching_updated", "Your teacher updated your practice",
+        None, "/coaching",
+        ({"c": "coaching_assignment", "m": "mock_assignment", "p": "learning_plan_assignment"}[kind], row.id),
+    )
+    await session.commit()
+    return {"key": key, "version": row.version, "changed": changed}

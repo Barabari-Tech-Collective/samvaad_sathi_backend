@@ -59,6 +59,9 @@ class BackendBaseSettings(BaseSettings):
     # per request; with a far-away database turn it off and lower the recycle time.
     DB_POOL_PRE_PING: bool = decouple.config("DB_POOL_PRE_PING", cast=bool, default=True)  # type: ignore
     DB_POOL_RECYCLE_SECONDS: int = decouple.config("DB_POOL_RECYCLE_SECONDS", cast=int, default=3600)  # type: ignore
+    # Set when Postgres sits behind PgBouncer in transaction mode, the way past the
+    # 20-connection limit at 300 students. asyncpg's statement cache must be off there.
+    DB_BEHIND_PGBOUNCER: bool = decouple.config("DB_BEHIND_PGBOUNCER", cast=bool, default=False)
     # The arq worker keeps its own, smaller pool. It is sized for concurrent
     # jobs - a number we choose - rather than concurrent HTTP requests, and it
     # is spent from the same server-wide connection ceiling as the API pool
@@ -69,6 +72,25 @@ class BackendBaseSettings(BaseSettings):
     )  # type: ignore
     WORKER_DB_POOL_OVERFLOW: int = decouple.config(
         "WORKER_DB_POOL_OVERFLOW", cast=int, default=3
+    )  # type: ignore
+    # Concurrent jobs per worker process. Transcription and follow-ups run on the
+    # default queue; with WORKER_SLOW_QUEUE_ENABLED, reports, question writing and
+    # Bulk ATS move to a second queue served by samvaad-worker-slow.service, so a
+    # class finishing at once never delays the next student's transcript.
+    # Staff analytics requests allowed to run at once per API process; the rest
+    # wait (see api/bulkhead.py) so dashboards cannot take students' connections.
+    ANALYTICS_MAX_CONCURRENCY: int = decouple.config(
+        "ANALYTICS_MAX_CONCURRENCY", cast=int, default=4
+    )  # type: ignore
+    ANALYTICS_QUEUE_WAIT_SECONDS: float = decouple.config(
+        "ANALYTICS_QUEUE_WAIT_SECONDS", cast=float, default=20.0
+    )  # type: ignore
+    WORKER_MAX_JOBS: int = decouple.config("WORKER_MAX_JOBS", cast=int, default=10)  # type: ignore
+    WORKER_SLOW_MAX_JOBS: int = decouple.config(
+        "WORKER_SLOW_MAX_JOBS", cast=int, default=4
+    )  # type: ignore
+    WORKER_SLOW_QUEUE_ENABLED: bool = decouple.config(
+        "WORKER_SLOW_QUEUE_ENABLED", cast=bool, default=False
     )  # type: ignore
     DB_POSTGRES_PORT: int = decouple.config("POSTGRES_PORT", cast=int)  # type: ignore
     DB_POSTGRES_SCHEMA: str = decouple.config("POSTGRES_SCHEMA", cast=str)  # type: ignore
@@ -111,7 +133,8 @@ class BackendBaseSettings(BaseSettings):
         "https://samvaad-sathi.barabaricollective.org",  # Production frontend (without www)
         "https://www.samvaad-sathi.barabaricollective.org",  # Production frontend (with www)
         "https://dev-backend-samvaadsathi.barabaricollective.org",  # Dev backend (for local frontend testing)
-        "https://samvaad-saathi-dashboard.onrender.com",  # Dashboard frontend on Render
+        # Not used: nothing runs on Render (everything is on AWS).
+        # "https://samvaad-saathi-dashboard.onrender.com",
         "https://samvaad-dashboard.barabaricollective.org",
         "https://admin.barabaricollective.org",  # Sampark integrated staff dashboard
         "https://samvaad-saathi.barabaricollective.org",  # new domain for production
@@ -120,9 +143,9 @@ class BackendBaseSettings(BaseSettings):
         "https://master.d1ljdkppy5vau1.amplifyapp.com",  # new aws dashboard prod
         # staging
         "https://samvaad-saathi-staging.barabaricollective.org",
-        # Staging on render
-        "https://samvaad-sathi-backend-tdd0.onrender.com",
-        "https://samvaad-saathi-frontend.onrender.com",
+        # Not used: nothing runs on Render (everything is on AWS).
+        # "https://samvaad-sathi-backend-tdd0.onrender.com",
+        # "https://samvaad-saathi-frontend.onrender.com",
         # Sampark Saathi frontend staging on Amplify
         "https://staging.d1zdqqsxijaw3t.amplifyapp.com",
         # Samvaad Saathi Student frontend staging on Amplify
@@ -193,7 +216,7 @@ class BackendBaseSettings(BaseSettings):
     # ------------------------------
     # Sampark Saathi central auth (replaces Cognito as the source of student identity)
     # ------------------------------
-    # Public origin of the barabari-auth-service, e.g. https://barabari-auth-service.onrender.com
+    # Public origin of the barabari-auth-service, e.g. https://staging-auth.barabaricollective.org
     AUTH_SERVICE_BASE_URL: str = decouple.config("AUTH_SERVICE_BASE_URL", cast=str, default="")  # type: ignore
     # Optional browser-facing origin when server-to-server auth uses a private TLS endpoint.
     AUTH_SERVICE_PUBLIC_BASE_URL: str = decouple.config("AUTH_SERVICE_PUBLIC_BASE_URL", cast=str, default="")
@@ -264,6 +287,11 @@ class BackendBaseSettings(BaseSettings):
     # matches Redis's own fail-open-at-startup behavior - a stopped consumer just means
     # revocation isn't enforced, not that the app fails to start.
     RABBITMQ_ENABLED: bool = decouple.config("RABBITMQ_ENABLED", cast=bool, default=False)  # type: ignore
+    # Interview updates on WhatsApp through the Barabari messaging hub (phase 9). Comma list of
+    # events to send: scheduled,rescheduled,cancelled,reminder,result. Empty = none (default).
+    WHATSAPP_EVENTS: str = decouple.config("WHATSAPP_EVENTS", cast=str, default="")  # type: ignore
+    WHATSAPP_HUB_EXCHANGE: str = decouple.config("WHATSAPP_HUB_EXCHANGE", cast=str, default="whatsapp.message-exchange")  # type: ignore
+    WHATSAPP_HUB_ROUTING_KEY: str = decouple.config("WHATSAPP_HUB_ROUTING_KEY", cast=str, default="whatsapp.message-routing-key")  # type: ignore
     RABBITMQ_HOST: str = decouple.config("RABBITMQ_HOST", cast=str, default="localhost")  # type: ignore
     RABBITMQ_PORT: int = decouple.config("RABBITMQ_PORT", cast=int, default=5672)  # type: ignore
     RABBITMQ_USERNAME: str = decouple.config("RABBITMQ_USERNAME", cast=str, default="guest")  # type: ignore
@@ -429,6 +457,10 @@ class BackendBaseSettings(BaseSettings):
     SAMPARK_ENROLLMENT_MAX_AGE_SECONDS: int = decouple.config("SAMPARK_ENROLLMENT_MAX_AGE_SECONDS", cast=int, default=900)
     SAMPARK_SAATHI_API_KEY: str = decouple.config("SAMPARK_SAATHI_API_KEY", cast=str, default="")  # type: ignore
     SAMPARK_SAATHI_BASE_URL: str = decouple.config("SAMPARK_SAATHI_BASE_URL", cast=str, default="")  # type: ignore
+    # The resume-score and batch-choice callbacks to Sampark. When on (the default), the API and
+    # the worker refuse to start if SAMPARK_SAATHI_BASE_URL or SAMPARK_SAATHI_API_KEY is empty,
+    # instead of skipping every callback with only a log line. Turn off for local work and tests.
+    SAMPARK_INTEGRATION_ENABLED: bool = decouple.config("SAMPARK_INTEGRATION_ENABLED", cast=bool, default=True)  # type: ignore
     # Where Samvaad reads Sampark's open batches and reports a learner's batch choice. Optional:
     # when empty the SAMPARK_SAATHI_* pair above is used. Set these to point the batch list at
     # one Sampark while the resume-score callback stays on another.

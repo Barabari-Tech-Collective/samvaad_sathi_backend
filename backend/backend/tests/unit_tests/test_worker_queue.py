@@ -106,3 +106,31 @@ def test_hosted_redis_url_takes_precedence(monkeypatch):
     assert parsed.database == 4
     assert parsed.ssl is True
     assert parsed.conn_retries == 0
+
+
+@pytest.mark.asyncio
+async def test_long_jobs_go_to_the_slow_queue_only_when_it_is_enabled(monkeypatch):
+    pool = _FakePool()
+
+    async def _pool():
+        return pool
+
+    monkeypatch.setattr(queue_module, "_get_pool", _pool)
+    monkeypatch.setattr(queue_module.settings, "WORKER_SLOW_QUEUE_ENABLED", False)
+    await queue_module.enqueue_job("generate_summary_report_task", interview_id=1)
+    assert "_queue_name" not in pool.enqueued[-1][1]
+
+    monkeypatch.setattr(queue_module.settings, "WORKER_SLOW_QUEUE_ENABLED", True)
+    await queue_module.enqueue_job("generate_summary_report_task", interview_id=1)
+    assert pool.enqueued[-1][1]["_queue_name"] == queue_module.SLOW_QUEUE
+    # Transcription stays on the default queue so it is never behind a report.
+    await queue_module.enqueue_job("process_answer_transcription_task", attempt=1)
+    assert "_queue_name" not in pool.enqueued[-1][1]
+
+
+def test_slow_worker_serves_every_slow_job():
+    from src.worker.main import SlowWorkerSettings
+
+    names = {getattr(f, "name", getattr(f, "__name__", "")) for f in SlowWorkerSettings.functions}
+    assert queue_module.SLOW_JOBS <= names
+    assert SlowWorkerSettings.queue_name == queue_module.SLOW_QUEUE

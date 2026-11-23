@@ -178,3 +178,15 @@ async def test_operations_retries_a_failed_answer_once_with_the_same_recording(w
     # The state was reserved, so a second click cannot start a second job.
     assert (await c.post(f"/v2/operations/answers/{attempt_id}/retry", headers=as_("admin"))).status_code == 409
     assert len(queued) == 1
+
+
+async def test_older_notifications_page_with_before(world):
+    c, factory, ids = world
+    async with factory() as s:
+        for i in range(5):
+            notifications.notify(s, ids["plain"], "coaching_reminder", f"Note {i}")
+        await s.commit()
+    first = (await c.get("/v2/notifications/me?limit=2", headers=as_("plain"))).json()
+    assert [n["title"] for n in first["items"]] == ["Note 4", "Note 3"] and first["more"] is True
+    rest = (await c.get(f"/v2/notifications/me?limit=10&before={first['items'][-1]['id']}", headers=as_("plain"))).json()
+    assert [n["title"] for n in rest["items"]] == ["Note 2", "Note 1", "Note 0"] and rest["more"] is False

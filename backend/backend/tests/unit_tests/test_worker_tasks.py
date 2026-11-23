@@ -26,6 +26,7 @@ async def test_submit_resume_score_task_success_does_not_retry(monkeypatch):
         "resume_score": 80,
         "request_id": "req-1",
         "target_role": "Backend Engineer",
+        "event_id": None,
     }
 
 

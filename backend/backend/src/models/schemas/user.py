@@ -83,6 +83,9 @@ class SessionUserProfile(BaseSchemaModel):
     can_access_ats: bool = False
     team_name: str | None = None
     membership_roles: list[str] = pydantic.Field(default_factory=list)
+    # ADR-2: the staff sections this person may open, decided here, not in the dashboard.
+    workspace_sections: list[str] | None = None
+    contact_number: str | None = None
     can_edit: bool = False
     is_view_only: bool = False
     can_access_dashboard: bool = False

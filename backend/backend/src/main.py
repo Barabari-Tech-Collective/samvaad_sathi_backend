@@ -1,4 +1,5 @@
 import logging
+from src.config.json_logging import configure_root_logging
 import traceback
 
 import fastapi
@@ -9,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from src.services.barabari_integration import verify_sampark_integration_configuration
 from src.api.endpoints import router as api_endpoint_router
 from src.config.events import (
     execute_backend_server_event_handler,
@@ -79,11 +81,8 @@ def verify_central_auth_configuration() -> None:
 
 def initialize_backend_application() -> fastapi.FastAPI:
 
-    logging.basicConfig(
-        level=settings.LOGGING_LEVEL,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        force=True,
-    )
+    # LOG_FORMAT=json for one JSON line per record; phone numbers are masked either way.
+    configure_root_logging(settings.LOGGING_LEVEL)
 
      # Configure application logging
     logging.getLogger().setLevel(settings.LOGGING_LEVEL)
@@ -94,6 +93,7 @@ def initialize_backend_application() -> fastapi.FastAPI:
     load_dotenv()
     verify_sso_configuration()
     verify_central_auth_configuration()
+    verify_sampark_integration_configuration()
     app = fastapi.FastAPI(**settings.set_backend_app_attributes)  # type: ignore
 
     # Tags metadata for Swagger grouping
@@ -160,6 +160,17 @@ def initialize_backend_application() -> fastapi.FastAPI:
             if settings.EXPOSE_ERROR_DETAIL:
                 detail = f"{detail} (detail: {traceback.format_exc(limit=0).strip()})"
             return fastapi.responses.JSONResponse(status_code=500, content={"detail": detail})
+
+    # Inside CORS, so a "busy" 503 still carries CORS headers the browser can read.
+    from src.api.bulkhead import AnalyticsBulkhead, analytics_prefixes, cached_dashboard_prefixes
+
+    app.add_middleware(
+        AnalyticsBulkhead,
+        prefixes=analytics_prefixes(),
+        limit=settings.ANALYTICS_MAX_CONCURRENCY,
+        wait_seconds=settings.ANALYTICS_QUEUE_WAIT_SECONDS,
+        exempt=cached_dashboard_prefixes(),
+    )
 
     # Add middleware BEFORE including routers (middleware is applied in reverse order)
     # CORS middleware should be added first to handle preflight requests
