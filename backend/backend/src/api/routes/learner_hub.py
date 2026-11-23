@@ -620,3 +620,96 @@ async def learner_detail(
         "assessments": int(counts.get("assessment", 0)),
         "can": hub.capabilities(context.viewer),
     }
+
+
+@router.get("/learners/{student_id}/timeline")
+async def learner_timeline(
+    student_id: int,
+    response: fastapi.Response,
+    limit: int = fastapi.Query(60, ge=1, le=200),
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Everything that happened to one learner, newest first, under the same scope as their page.
+
+    One line per event: interviews taken, human interviews, coaching given and finished,
+    and openings they were put forward to. No answers, transcripts or feedback text.
+    """
+    from src.models.db.human_interview import HumanInterview
+    from src.models.db.job_profile import JobProfile
+    from src.models.db.opportunity import Opportunity, OpportunityCandidate
+    from src.services import coaching_hub as coaching
+
+    context = await hub.load_context(user, session, 30)
+    if not any(p.id == student_id for p in context.learners):
+        raise fastapi.HTTPException(404, "This learner is not in your scope.")
+    when = lambda d: d.isoformat() if d else None  # noqa: E731
+    events: list[dict] = []
+    rows = await session.execute(
+        sa.select(Interview, JobProfile.job_name)
+        .outerjoin(JobProfile, JobProfile.id == Interview.job_profile_id)
+        .where(Interview.user_id == student_id, Interview.status == "completed")
+        .order_by(Interview.completed_at.desc().nullslast())
+        .limit(limit)
+    )
+    for row, job in rows.all():
+        mode = "Assessment" if row.interview_mode == "assessment" else "Mock interview"
+        score = context.scores.get(row.id)
+        events.append({
+            "at": when(row.completed_at or row.created_at), "kind": "interview",
+            "title": f"{mode}: {job or row.track}",
+            "detail": f"Scored {round(score)} / 100" if score is not None else "Finished",
+            "href": f"/dashboard/samvaad/interviews/{row.id}",
+        })
+    rows = await session.execute(
+        sa.select(HumanInterview, Opportunity.title)
+        .outerjoin(Opportunity, Opportunity.id == HumanInterview.opportunity_id)
+        .where(HumanInterview.student_id == student_id)
+        .order_by(HumanInterview.starts_at.desc())
+        .limit(limit)
+    )
+    status_words = {"scheduled": "Scheduled", "completed": "Happened", "no_show": "Did not join",
+                    "technical_issue": "Technical problem", "cancelled": "Cancelled"}
+    for row, opening in rows.all():
+        events.append({
+            "at": when(row.starts_at), "kind": "job" if opening else "human",
+            "title": f"Human interview: {row.role_name or row.title}" + (f" for {opening}" if opening else ""),
+            "detail": status_words.get(row.status, row.status.replace("_", " ").capitalize())
+            + (f" · {row.result.replace('_', ' ')}" if row.result else ""),
+            "href": f"/dashboard/samvaad/assessments/human/{row.id}",
+        })
+    for item in await coaching.load_items(session, context, {student_id}):
+        by = "the learner" if item["self_started"] else (item["by"] or "staff")
+        events.append({
+            "at": when(item["created_at"]), "kind": "coaching",
+            "title": f"Given: {item['name']}", "detail": f"By {by}", "href": None,
+        })
+        if item["status"] in ("completed", "cancelled") and item["closed_at"]:
+            events.append({
+                "at": when(item["closed_at"]), "kind": "coaching",
+                "title": f"{'Finished' if item['status'] == 'completed' else 'Cancelled'}: {item['name']}",
+                "detail": f"{item['change']:+d} points after" if item.get("change") is not None else "",
+                "href": None,
+            })
+    from src.services import course_shortlists as shortlists
+
+    # Openings are Placement's: only people who may read openings see them here.
+    placement = shortlists.permission(user, "read")
+    courses = await shortlists.placement_course_ids(user, session) if placement else set()
+    stmt = (
+        sa.select(OpportunityCandidate.added_at, Opportunity.title, Opportunity.organisation, Opportunity.id)
+        .join(Opportunity, Opportunity.id == OpportunityCandidate.opportunity_id)
+        .where(OpportunityCandidate.student_id == student_id)
+    )
+    if courses is not None:
+        stmt = stmt.where(Opportunity.course_id.in_(sorted(courses) or [""]))
+    rows = await session.execute(stmt) if placement else None
+    for at, title, org, oid in (rows.all() if rows is not None else []):
+        events.append({
+            "at": when(at), "kind": "job", "title": f"Put forward to {title}",
+            "detail": org, "href": f"/dashboard/samvaad/opportunities/{oid}",
+        })
+    events = [e for e in events if e["at"]]
+    events.sort(key=lambda e: e["at"], reverse=True)
+    response.headers["Cache-Control"] = "no-store"
+    return {"items": events[:limit]}

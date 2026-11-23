@@ -19,6 +19,7 @@ async def my_notifications(
     response: fastapi.Response,
     unread_only: bool = False,
     limit: int = fastapi.Query(30, ge=1, le=100),
+    before: int | None = fastapi.Query(None, ge=1, description="Only items older than this id, for Load more."),
     user=fastapi.Depends(get_current_user),
     session=fastapi.Depends(get_async_session),
 ):
@@ -27,6 +28,8 @@ async def my_notifications(
     stmt = sa.select(Notification).where(mine)
     if unread_only:
         stmt = stmt.where(Notification.read_at.is_(None))
+    if before is not None:
+        stmt = stmt.where(Notification.id < before)
     rows = (
         await session.execute(stmt.order_by(Notification.created_at.desc(), Notification.id.desc()).limit(limit))
     ).scalars().all()
@@ -37,6 +40,7 @@ async def my_notifications(
     ).scalar_one()
     return {
         "unread": int(unread),
+        "more": len(rows) == limit,
         "items": [
             {
                 "id": n.id,
