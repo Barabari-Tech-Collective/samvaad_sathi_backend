@@ -1604,7 +1604,6 @@ async def rerun_candidate(
 @router.patch("/candidates/{candidate_id}/review")
 async def review_candidate(
     candidate_id: int,
-    request: fastapi.Request,
     reviewer_notes: str | None = Form(None),
     reviewer_decision: str | None = Form(None),
     decision_reason: str | None = Form(None),
@@ -1618,10 +1617,8 @@ async def review_candidate(
         repo, candidate_id=candidate_id, current_user=current_user
     )
 
-    form_data = await request.form()
-    has_decision_field = "reviewer_decision" in form_data
-    if has_decision_field:
-        raw_decision = str(form_data.get("reviewer_decision") or "").strip().lower()
+    if reviewer_decision is not None:
+        raw_decision = reviewer_decision.strip().lower()
         if raw_decision in {"", "none", "null", "not_decided", "pending"}:
             decision = None
         elif raw_decision in {"shortlist", "hold", "not_shortlisted"}:
