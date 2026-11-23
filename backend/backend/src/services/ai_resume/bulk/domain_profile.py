@@ -334,7 +334,24 @@ def explicit_link_requirements(
         if any(re.search(expression, text) for expression in expressions)
     ]
 
-    if require_project_links is True:
+    is_tech_role = any(
+        k in role_name.lower()
+        for k in (
+            "developer",
+            "engineer",
+            "backend",
+            "frontend",
+            "full stack",
+            "fullstack",
+            "software",
+            "data",
+            "analyst",
+            "scientist",
+            "sde",
+            "programmer",
+        )
+    )
+    if require_project_links is True or (require_project_links is None and is_tech_role):
         if "project_evidence" not in categories:
             categories.append("project_evidence")
 
