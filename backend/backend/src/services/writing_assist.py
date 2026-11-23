@@ -95,3 +95,62 @@ async def question_sheet(
         if 5 <= len(text) <= 500:
             out.append({"text": text, "area": (q.area or "").strip()[:60] or None})
     return out[:count] or None
+
+
+PLAN_MODULES = ("warm_up", "think_fast", "pronunciation", "structure", "pace")
+
+
+class PlanStepDraft(pydantic.BaseModel):
+    kind: str
+    title: str
+    instructions: str | None = None
+    module: str | None = None
+
+
+class PlanDraft(pydantic.BaseModel):
+    title: str
+    steps: list[PlanStepDraft]
+
+
+async def plan_draft(*, goal: str, weeks: int) -> dict | None:
+    """A short learning plan made only from the drills and reflections the product really has."""
+    result, *_ = await structured_output(
+        PlanDraft,
+        system_prompt=(
+            "You help a trainer at an Indian skilling programme plan interview preparation for freshers. "
+            "Write a short plan of 3 to 7 steps that moves from easy to harder. Each step is either a "
+            "'drill' or a 'reflection'. A drill step must set module to exactly one of: "
+            "warm_up (easy relaxed chat to start speaking), think_fast (quick answers to surprise "
+            "questions), pronunciation (say difficult words clearly), structure (give answers a clear "
+            "start, middle and end), pace (speak at a steady speed with pauses). A reflection step has "
+            "module null and asks the student to write what they will say differently. Titles are short "
+            "and plain, written to the student. Instructions are one or two simple sentences. "
+            'Reply as JSON: {"title": "...", "steps": [{"kind": "drill|reflection", "title": "...", '
+            '"instructions": "...", "module": "..."|null}]}.'
+        ),
+        user_content={"goal": goal, "plan_length_weeks": weeks},
+        temperature=0.4,
+        max_tokens=1500,
+    )
+    if result is None:
+        return None
+    steps = []
+    for step in result.steps:
+        title = (step.title or "").strip()[:160]
+        if len(title) < 3:
+            continue
+        kind = step.kind if step.kind in ("drill", "reflection") else None
+        if kind == "drill" and step.module not in PLAN_MODULES:
+            continue
+        steps.append(
+            {
+                "kind": kind or "reflection",
+                "title": title,
+                "instructions": ((step.instructions or "").strip()[:2000] or None),
+                "module": step.module if kind == "drill" else None,
+            }
+        )
+    title = (result.title or "").strip()[:160]
+    if len(steps) < 2 or len(title) < 3:
+        return None
+    return {"title": title, "steps": steps[:7]}

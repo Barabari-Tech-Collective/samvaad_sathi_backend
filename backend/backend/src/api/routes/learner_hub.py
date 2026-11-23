@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from src.api.dependencies.admin import get_current_admin_user
 from src.api.dependencies.session import get_async_session
 from src.api.routes import cohorts as cohort_routes
-from src.models.db.college_alias import CollegeAlias, LearnerImportCollege
+from src.models.db.college_alias import CollegeAlias, LearnerGroupEntry, LearnerImportCollege
 from src.models.db.notification import Notification, NotificationDelivery
 from src.models.db.practice_governance import PracticeDashboardAuditEvent
 from src.models.db.interview import Interview
@@ -104,6 +104,10 @@ async def groups(
     context = await hub.load_context(user, session, days, course or None)
     level = hub.effective_level(context, level_of(college, course, batch))
     rows, no_batch = hub.group_rows(context, of, level, q)
+    shown = {f"{r['course_id']}|{r['key']}" if of == "batches" else r["key"] for r in rows}
+    empty = await hub.added_groups(session, context, of, level, q, shown)
+    if empty:
+        rows = rows + empty
     response.headers["Cache-Control"] = "no-store"
     return {
         "lens": context.viewer.lens,
@@ -114,6 +118,96 @@ async def groups(
         "no_batch": no_batch,
         "can": hub.capabilities(context.viewer),
     }
+
+
+class NewGroup(BaseModel):
+    kind: Literal["college", "course", "batch"]
+    label: str = Field(min_length=2, max_length=200)
+    course_id: str | None = Field(default=None, max_length=128)
+
+    _trim = field_validator("label", mode="before")(
+        classmethod(lambda c, v: " ".join(v.split()) if isinstance(v, str) else v)
+    )
+
+
+def _require_create(viewer):
+    require_action(hub.capabilities(viewer)["create_groups"], "Only administrators can add colleges, courses and batches.")
+
+
+@router.post("/groups", status_code=201)
+async def add_group(
+    body: NewGroup,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Add a college, course or batch by hand. It is listed at once, with no students until some join."""
+    viewer = await hub.viewer_for(user, session)
+    _require_create(viewer)
+    course_key = ""
+    if body.kind == "college":
+        key = hub.college_key(body.label)
+    else:
+        key = f"added-{hub.slug(body.label)}"
+        if key == "added-":
+            raise fastapi.HTTPException(422, "Use letters or numbers in the name.")
+    if body.kind == "batch":
+        course_key = (body.course_id or "").strip()
+        if not course_key:
+            raise fastapi.HTTPException(422, "Choose the course this batch belongs to.")
+    elif body.course_id:
+        raise fastapi.HTTPException(422, "Only a batch belongs to a course.")
+    if body.kind == "course":
+        key = f"added-{hub.slug(body.label)}"
+    exists = (
+        await session.execute(
+            sa.select(LearnerGroupEntry.id).where(
+                LearnerGroupEntry.kind == body.kind,
+                LearnerGroupEntry.group_key == key,
+                LearnerGroupEntry.course_key == course_key,
+            )
+        )
+    ).first()
+    if exists:
+        raise fastapi.HTTPException(409, f"A {body.kind} called {body.label} is already added.")
+    if body.kind == "college":
+        context = await hub.load_context(user, session, 7)
+        if any(p.college_key == key for p in context.learners):
+            raise fastapi.HTTPException(409, f"{body.label} already has students, so it is listed already.")
+    entry = LearnerGroupEntry(kind=body.kind, group_key=key, label=body.label, course_key=course_key, created_by=user.id)
+    session.add(entry)
+    session.add(
+        PracticeDashboardAuditEvent(
+            actor_id=user.id, action="learner_hub_group_added", purpose="learner_records",
+            target_type=body.kind, target_id=key[:64], reason=f"Added {body.kind} {body.label}",
+            event_metadata={"course": course_key or None},
+        )
+    )
+    await session.commit()
+    hub._cache.clear()
+    return {"id": entry.id, "kind": body.kind, "key": key, "label": body.label, "course_id": course_key or None}
+
+
+@router.delete("/groups/{entry_id}", status_code=204)
+async def remove_group(
+    entry_id: int,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """Take back a group that was added by hand and still has no students."""
+    _require_create(await hub.viewer_for(user, session))
+    entry = await session.get(LearnerGroupEntry, entry_id)
+    if entry is None:
+        raise fastapi.HTTPException(404, "This group was not found.")
+    session.add(
+        PracticeDashboardAuditEvent(
+            actor_id=user.id, action="learner_hub_group_removed", purpose="learner_records",
+            target_type=entry.kind, target_id=entry.group_key[:64], reason=f"Removed {entry.kind} {entry.label}",
+            event_metadata={},
+        )
+    )
+    await session.delete(entry)
+    await session.commit()
+    hub._cache.clear()
 
 
 @router.get("/learners")

@@ -221,3 +221,29 @@ async def test_practice_board_numbers_and_signals(ctx):
     assert r["total"] == 2 and all(i["guidance"] for i in r["items"])
     only = (await c.get("/v2/coaching-hub/practice?signal=session_blocked", headers=as_("admin"))).json()
     assert only["total"] == 1
+
+
+async def test_drills_explain_themselves_and_ai_plan_draft_is_only_a_suggestion(ctx, monkeypatch):
+    c = ctx[0]
+    drills = (await c.get("/v2/coaching-hub/drills", headers=as_("admin"))).json()["items"]
+    by = {d["module"]: d for d in drills}
+    assert by["warm_up"]["minutes"] == 5 and "relaxed" in by["warm_up"]["how"]
+    assert by["think_fast"]["use_when"] and "finish_share" in by["think_fast"] and "practised_alone" in by["think_fast"]
+
+    from src.services import writing_assist
+
+    async def fake(goal, weeks):
+        return {"title": "Calm answers", "steps": [{"kind": "drill", "title": "Warm up", "instructions": None, "module": "warm_up"}, {"kind": "reflection", "title": "Look back", "instructions": None, "module": None}]}
+
+    monkeypatch.setattr(writing_assist, "plan_draft", lambda **kw: fake(**kw))
+    r = await c.post("/v2/coaching-hub/plans/ai-draft", headers=as_("admin"), json={"goal": "Speak calmly in HR rounds"})
+    assert r.status_code == 200 and r.json()["steps"][0]["module"] == "warm_up"
+    plans = (await c.get("/v2/coaching-hub/plans", headers=as_("admin"))).json()["items"]
+    assert plans == []  # a draft is never saved
+
+    async def none(goal, weeks):
+        return None
+
+    monkeypatch.setattr(writing_assist, "plan_draft", lambda **kw: none(**kw))
+    assert (await c.post("/v2/coaching-hub/plans/ai-draft", headers=as_("admin"), json={"goal": "Speak calmly in HR rounds"})).status_code == 503
+    assert (await c.post("/v2/coaching-hub/plans/ai-draft", headers=as_("admin"), json={"goal": "short"})).status_code == 422
