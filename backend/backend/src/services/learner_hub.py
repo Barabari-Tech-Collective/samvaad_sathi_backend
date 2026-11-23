@@ -231,14 +231,14 @@ async def viewer_for(user: User, session) -> Viewer:
     perms = calculate_user_permissions(user, memberships)
     # The same rule as the staff menu, so nobody is shown a page that then refuses them.
     if not (perms.get("can_access_students") or perms.get("is_team_lead")):
-        raise fastapi.HTTPException(403, "Learners is not part of your role.")
+        raise fastapi.HTTPException(403, "Students is not part of your role.")
     policy = user.feature_permissions
     if isinstance(policy, dict) and not (
         permits(policy, "analytics", "read")
         or permits(policy, "course_workspace", "read")
         or permits(policy, "placement_shortlists", "read")
     ):
-        raise fastapi.HTTPException(403, "Learners has been turned off for your account.")
+        raise fastapi.HTTPException(403, "Students has been turned off for your account.")
     placement = program = False
     for item in memberships:
         team = item[1] if isinstance(item, (tuple, list)) and len(item) > 1 else getattr(item, "team", None)
@@ -445,7 +445,7 @@ async def load_context(user: User, session, days: int, course_id: str | None = N
             spellings[ckey][" ".join(raw.split())] += 1
         learners[row.id] = Learner(
             id=row.id,
-            name=row.name or row.email or f"Learner {row.id}",
+            name=row.name or row.email or f"Student {row.id}",
             email=row.email,
             college_key=ckey,
             college_label="College not set",
@@ -949,7 +949,7 @@ def match_learners(
         ]
     predicates = status_filters(context)
     if status not in predicates:
-        raise fastapi.HTTPException(422, "Unknown learner status filter.")
+        raise fastapi.HTTPException(422, "Unknown student status filter.")
     return [p for p in people if predicates[status](p)]
 
 

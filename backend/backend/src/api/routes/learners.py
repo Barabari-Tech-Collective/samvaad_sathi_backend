@@ -195,7 +195,7 @@ async def record(
         )
     ).scalar_one_or_none()
     if student is None:
-        raise fastapi.HTTPException(404, "Learner not found within your access.")
+        raise fastapi.HTTPException(404, "Student not found within your access.")
     courses = await visible_courses(user, student, session)
     analytics = allowed(user, "analytics") and await college_scope_allows(
         user, student, session
@@ -203,7 +203,7 @@ async def record(
     # Someone with neither analytics reach nor a course covering this learner sees nothing,
     # not even the name.
     if not analytics and not courses:
-        raise fastapi.HTTPException(404, "Learner not found within your access.")
+        raise fastapi.HTTPException(404, "Student not found within your access.")
     now = dt.datetime.now(dt.timezone.utc)
     return {
         "student": {

@@ -194,7 +194,7 @@ class Selection(BaseModel):
     @model_validator(mode="after")
     def something(self):
         if not self.ids and not self.all_matching:
-            raise ValueError("Choose at least one learner.")
+            raise ValueError("Choose at least one student.")
         return self
 
 
@@ -245,12 +245,12 @@ async def export(
         "An administrator must explicitly enable export for your account.",
     )
     if len(people) > MAX_EXPORT:
-        raise fastapi.HTTPException(413, f"Export is limited to {MAX_EXPORT:,} learners. Narrow your filters.")
+        raise fastapi.HTTPException(413, f"Export is limited to {MAX_EXPORT:,} students. Narrow your filters.")
     out = io.StringIO()
     out.write("﻿")
     writer = csv.writer(out)
     writer.writerow(
-        ["Learner ID", "Name", "College", "Courses", "Batch", "Last active", "Latest score",
+        ["Student ID", "Name", "College", "Courses", "Batch", "Last active", "Latest score",
          "Assessment average", "Score change", "Interviews", "Status"]
     )
     for person in hub.sort_learners(context, people, "urgent"):
@@ -278,7 +278,7 @@ async def export(
         headers={
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
-            "Content-Disposition": 'attachment; filename="learners.csv"',
+            "Content-Disposition": 'attachment; filename="students.csv"',
         },
     )
 
@@ -307,9 +307,9 @@ async def nudge(
     context, _, people = await resolve(user, session, body.selection)
     require_action(hub.capabilities(context.viewer)["coach"], "Reminders need your coaching responsibility.")
     if not people:
-        raise fastapi.HTTPException(422, "No learners in your scope match this selection.")
+        raise fastapi.HTTPException(422, "No students in your scope match this selection.")
     if len(people) > MAX_ACTION:
-        raise fastapi.HTTPException(413, f"Remind up to {MAX_ACTION:,} learners at a time.")
+        raise fastapi.HTTPException(413, f"Remind up to {MAX_ACTION:,} students at a time.")
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=NUDGE_GAP_DAYS)
     recent = set(
         (
@@ -378,9 +378,9 @@ async def assign(
     """Assign one thing to the selected learners in one course, each checked on their own."""
     context, _, people = await resolve(user, session, body.selection)
     if not people:
-        raise fastapi.HTTPException(422, "No learners in your scope match this selection.")
+        raise fastapi.HTTPException(422, "No students in your scope match this selection.")
     if len(people) > MAX_ACTION:
-        raise fastapi.HTTPException(413, f"Assign to up to {MAX_ACTION:,} learners at a time.")
+        raise fastapi.HTTPException(413, f"Assign to up to {MAX_ACTION:,} students at a time.")
     inside = {p.id: p.name for p in people if body.course_id in p.courses}
     outside = [
         {"id": p.id, "name": p.name, "reason": "Not enrolled in this course."}
@@ -388,7 +388,7 @@ async def assign(
         if body.course_id not in p.courses
     ]
     if not inside:
-        raise fastapi.HTTPException(422, "None of the selected learners are enrolled in this course.")
+        raise fastapi.HTTPException(422, "None of the selected students are enrolled in this course.")
     if body.kind == "assessment":
         done, skipped = await _assign_assessment(session, user, body, inside)
     else:
@@ -467,11 +467,11 @@ async def set_college(
 ):
     """Record the college for learners who have none, or correct a wrong one."""
     context, _, people = await resolve(user, session, body.selection)
-    require_action(hub.capabilities(context.viewer)["set_college"], "Only administrators and team leads can change a learner's college.")
+    require_action(hub.capabilities(context.viewer)["set_college"], "Only administrators and team leads can change a student's college.")
     if not people:
-        raise fastapi.HTTPException(422, "No learners in your scope match this selection.")
+        raise fastapi.HTTPException(422, "No students in your scope match this selection.")
     if len(people) > MAX_ACTION:
-        raise fastapi.HTTPException(413, f"Update up to {MAX_ACTION:,} learners at a time.")
+        raise fastapi.HTTPException(413, f"Update up to {MAX_ACTION:,} students at a time.")
     ids = [p.id for p in people]
     await session.execute(sa.update(User).where(User.id.in_(ids)).values(university=body.college))
     session.add(
@@ -503,7 +503,7 @@ async def import_colleges(
 ):
     """Keep the college from an import sheet for learners who have not joined yet."""
     viewer = await hub.viewer_for(user, session)
-    require_action(hub.capabilities(viewer)["add_learners"], "Only administrators and team leads can import learners.")
+    require_action(hub.capabilities(viewer)["add_learners"], "Only administrators and team leads can import students.")
     seen = 0
     for row in body.rows:
         email = row.email.strip().lower()
@@ -604,7 +604,7 @@ async def learner_detail(
     context = await hub.load_context(user, session, 30)
     person = next((p for p in context.learners if p.id == student_id), None)
     if person is None:
-        raise fastapi.HTTPException(404, "This learner is not in your scope.")
+        raise fastapi.HTTPException(404, "This student is not in your scope.")
     counts = dict(
         (
             await session.execute(
@@ -642,7 +642,7 @@ async def learner_timeline(
 
     context = await hub.load_context(user, session, 30)
     if not any(p.id == student_id for p in context.learners):
-        raise fastapi.HTTPException(404, "This learner is not in your scope.")
+        raise fastapi.HTTPException(404, "This student is not in your scope.")
     when = lambda d: d.isoformat() if d else None  # noqa: E731
     events: list[dict] = []
     rows = await session.execute(
@@ -679,7 +679,7 @@ async def learner_timeline(
             "href": f"/dashboard/samvaad/assessments/human/{row.id}",
         })
     for item in await coaching.load_items(session, context, {student_id}):
-        by = "the learner" if item["self_started"] else (item["by"] or "staff")
+        by = "the student" if item["self_started"] else (item["by"] or "staff")
         events.append({
             "at": when(item["created_at"]), "kind": "coaching",
             "title": f"Given: {item['name']}", "detail": f"By {by}", "href": None,

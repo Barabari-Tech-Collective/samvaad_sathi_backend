@@ -268,7 +268,7 @@ async def learner_coaching(student_id: int, user=fastapi.Depends(get_current_adm
     context = await hub.load_context(user, session, 30)
     person = next((p for p in context.learners if p.id == student_id), None)
     if person is None:
-        raise fastapi.HTTPException(404, "This learner is not in your scope.")
+        raise fastapi.HTTPException(404, "This student is not in your scope.")
     items = await service.load_items(session, context, {student_id})
     items.sort(key=lambda i: i["created_at"], reverse=True)
     was = await service.reminded(session, items)

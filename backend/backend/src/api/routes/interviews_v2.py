@@ -1586,7 +1586,7 @@ async def advance_pronunciation_practice(
     path="/pronunciation/{practice_id}/complete",
     name="pronunciation:complete",
     status_code=fastapi.status.HTTP_200_OK,
-    summary="Mark a completed pronunciation session after the learner reaches its final word",
+    summary="Mark a completed pronunciation session after the student reaches its final word",
 )
 async def complete_pronunciation_practice(
     practice_id: int,
