@@ -682,12 +682,12 @@ async def learner_timeline(
         by = "the learner" if item["self_started"] else (item["by"] or "staff")
         events.append({
             "at": when(item["created_at"]), "kind": "coaching",
-            "title": f"{item['name']} given", "detail": f"By {by}", "href": None,
+            "title": f"Given: {item['name']}", "detail": f"By {by}", "href": None,
         })
         if item["status"] in ("completed", "cancelled") and item["closed_at"]:
             events.append({
                 "at": when(item["closed_at"]), "kind": "coaching",
-                "title": f"{item['name']} {'finished' if item['status'] == 'completed' else 'cancelled'}",
+                "title": f"{'Finished' if item['status'] == 'completed' else 'Cancelled'}: {item['name']}",
                 "detail": f"{item['change']:+d} points after" if item.get("change") is not None else "",
                 "href": None,
             })
