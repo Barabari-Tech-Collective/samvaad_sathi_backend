@@ -28,6 +28,11 @@ class HumanScorecard(Base):
     )
     # [{"name": str, "score": 0-5 | null, "evidence": str | null}]
     criteria: Mapped[list] = mapped_column(JSONB, server_default="[]")
+    # One row per question on the sheet:
+    # [{"question_id": str, "question": str, "score": 1-7 | null, "remarks": str | null}]
+    answers: Mapped[list] = mapped_column(JSONB, server_default="[]")
+    # Highest score on this card: 5 for cards made before per-answer scoring, 7 after.
+    scale: Mapped[int] = mapped_column(server_default="5")
     suggested_result: Mapped[str | None] = mapped_column(sa.String(24))
     internal_notes: Mapped[str | None] = mapped_column(sa.Text)
     student_comments: Mapped[str | None] = mapped_column(sa.Text)

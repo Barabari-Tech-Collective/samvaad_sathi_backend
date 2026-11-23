@@ -1,8 +1,10 @@
 """Membership-aware staff relationships and atomic scope configuration."""
 
+import re
+
 import fastapi
 import sqlalchemy as sa
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from src.api.dependencies.admin import (
     get_current_admin_user,
     get_user_active_memberships,
@@ -61,6 +63,54 @@ async def my_relationships(
         ),
         "notice": "Each team responsibility retains its own course and college boundaries. Unassigned scope grants no course access.",
     }
+
+
+class MyProfile(BaseModel):
+    name: str = Field(min_length=2, max_length=128)
+    contact_number: str | None = Field(None, max_length=20)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _name(cls, v):
+        return " ".join(v.split()) if isinstance(v, str) else v
+
+    @field_validator("contact_number", mode="before")
+    @classmethod
+    def _phone(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        v = v.strip()
+        if not re.fullmatch(r"\+?[0-9][0-9 -]{6,18}", v):
+            raise ValueError("Use digits, spaces or dashes, with an optional + in front.")
+        return v
+
+
+@router.patch("/me/profile")
+async def update_my_profile(
+    body: MyProfile,
+    user=fastapi.Depends(get_current_admin_user),
+    session=fastapi.Depends(get_async_session),
+):
+    """A staff member changes their own display name and contact number."""
+    row = await session.get(User, user.id)
+    if row is None:
+        raise fastapi.HTTPException(404, "Account not found.")
+    if row.name != body.name:
+        row.name, row.name_edited = body.name, True
+    row.contact_number = body.contact_number
+    session.add(
+        PracticeDashboardAuditEvent(
+            actor_id=user.id,
+            action="staff_profile_updated",
+            purpose="staff_profile",
+            target_type="user",
+            target_id=str(user.id),
+            reason="Updated their own profile.",
+            event_metadata={},
+        )
+    )
+    await session.commit()
+    return {"name": row.name, "email": row.email, "contact_number": row.contact_number}
 
 
 @router.get("/memberships")

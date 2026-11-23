@@ -244,6 +244,8 @@ async def board(
         base.append(c.batch_id == run)
     toshare = sa.and_(c.handoff_status.in_(SCREENED), c.reviewer_decision == "shortlist")
     conditions = {"toshare": toshare, **{k: c.handoff_status == v for k, v in CARD.items()}}
+    # Everyone Program has ever handed to Placement, whatever happened next.
+    conditions["handed"] = c.handoff_status.in_(list(CARD.values()))
     counts = {}
     for key, condition in conditions.items():
         if key == "toshare" and not who.program:
@@ -268,7 +270,10 @@ async def board(
     rows = (
         await session.execute(
             sa.select(c, BulkATSBatch).join(BulkATSBatch, BulkATSBatch.id == c.batch_id).where(*where).order_by(
-                c.final_score.desc().nulls_last() if card == "toshare" else c.handoff_shared_at.asc().nulls_last(), c.id
+                c.final_score.desc().nulls_last() if card == "toshare"
+                else c.handoff_shared_at.desc().nulls_last() if card == "handed"
+                else c.handoff_shared_at.asc().nulls_last(),
+                c.id,
             ).offset((page - 1) * limit).limit(limit)
         )
     ).all()
