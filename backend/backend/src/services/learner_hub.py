@@ -133,8 +133,8 @@ class Context:
     course_names: dict[str, str]
     candidates_at: dict[int, dt.datetime]
     drills: list  # (user_id, completed_at)
-    assignments: list[tuple[int, bool]]  # (student_id, finished) for windows closed in the period
-    coaching: list[tuple[int, bool]]  # (student_id, finished) for drills due in the period
+    assignments: list[tuple]  # (student_id, finished, IST day it closed) for windows closed in the period
+    coaching: list[tuple]  # (student_id, finished, IST day it fell due) for drills due in the period
     active_ids: set[int]
     interviewed_ids: set[int]
     assessed_ids: set[int]
@@ -386,7 +386,7 @@ async def _due_work(session, base, course_id, start, now):
         clauses.append(AssessmentAssignment.course_id == course_id)
     rows = (await session.execute(sa.select(AssessmentAssignment).where(*clauses))).scalars().all()
     await settle_assignments(session, rows)
-    assigned = [(r.student_id, r.status == "completed") for r in rows]
+    assigned = [(r.student_id, r.status == "completed", r.closes_at.astimezone(IST).date()) for r in rows]
 
     clauses = [CoachingAssignment.student_id.in_(base), CoachingAssignment.status != "cancelled"]
     if course_id and course_id != NO_COURSE:
@@ -396,7 +396,7 @@ async def _due_work(session, base, course_id, start, now):
     for row in (await session.execute(sa.select(CoachingAssignment).where(*clauses))).scalars():
         due = row.due_date or (row.created_at.astimezone(IST).date() + dt.timedelta(days=DEFAULT_DUE_DAYS))
         if start <= due <= today:
-            coached.append((row.student_id, row.status == "completed"))
+            coached.append((row.student_id, row.status == "completed", due))
     return assigned, coached
 
 
@@ -752,8 +752,18 @@ def _ratio(done: int, total: int) -> int | None:
 def outcomes(context: Context, people: list[Learner], figures: dict) -> dict:
     """The figures that say whether learners are progressing. Every one links to its people."""
     ids = {p.id for p in people}
-    assigned = [done for sid, done in context.assignments if sid in ids]
-    coached = [done for sid, done in context.coaching if sid in ids]
+    assigned = [done for sid, done, _ in context.assignments if sid in ids]
+    coached = [done for sid, done, _ in context.coaching if sid in ids]
+
+    def daily_share(rows):
+        """Per day of the period: the share finished of what fell due that day (None if nothing did)."""
+        out = []
+        for n in range(context.days):
+            day = context.start + dt.timedelta(days=n)
+            due = [done for sid, done, on in rows if sid in ids and on == day]
+            out.append(share(sum(due), len(due)) if due else None)
+        return out
+
     compared = [p for p in people if p.improvement is not None]
     improving = sum(1 for p in compared if p.improvement >= IMPROVED_POINTS)
     scored = [p for p in people if p.last_score is not None]
@@ -770,8 +780,15 @@ def outcomes(context: Context, people: list[Learner], figures: dict) -> dict:
         "min_evidence": MIN_EVIDENCE,
         "scored_attempts": figures["scored"],
         "active_share": share(figures["active"], len(people)),
-        "assignments": {"total": len(assigned), "finished": sum(assigned), "share": _ratio(sum(assigned), len(assigned))},
-        "coaching": {"total": len(coached), "finished": sum(coached), "share": _ratio(sum(coached), len(coached))},
+        "assignments": {
+            "total": len(assigned), "finished": sum(assigned), "share": _ratio(sum(assigned), len(assigned)),
+            "series": daily_share(context.assignments),
+        },
+        "coaching": {
+            "total": len(coached), "finished": sum(coached), "share": _ratio(sum(coached), len(coached)),
+            "open": len(coached) - sum(coached),
+            "series": daily_share(context.coaching),
+        },
         "improving": {"compared": len(compared), "improving": improving, "share": _ratio(improving, len(compared))},
         "bands": [
             {"label": label, "status": key, "count": n, "share": share(n, len(scored))} for label, key, n in bands
@@ -879,8 +896,8 @@ def group_rows(context: Context, of: str, level: Level, q: str = "") -> tuple[li
 
 
 def status_filters(context: Context) -> dict:
-    missed = {sid for sid, done in context.assignments if not done}
-    overdue = {sid for sid, done in context.coaching if not done}
+    missed = {sid for sid, done, _ in context.assignments if not done}
+    overdue = {sid for sid, done, _ in context.coaching if not done}
     return {
         "all": lambda p: True,
         "need": lambda p: p.status in NEEDS_ACTION,
