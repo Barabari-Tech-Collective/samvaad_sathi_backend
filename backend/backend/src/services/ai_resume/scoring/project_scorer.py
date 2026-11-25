@@ -151,8 +151,8 @@ class ProjectScorer:
                 "evidenceScore": 4.0,
                 "title": "Live Demo Inactive or Sleeping",
                 "reason": f"The deployment hosting server timed out or returned a temporary server error ({code_label}).",
-                "actionableFix": "Visit your live demo URL in a browser to spin up or wake up the server, or deploy to an always-on host like Vercel, Netlify, or Cloudflare Pages.",
-                "scoreImpact": "Partial credit awarded (4.0/7.0). Keeping the site active will unlock full 7.0 evidence points.",
+                "actionableFix": "Server timed out or is inactive (free-tier spin-down). Ask candidate to spin up or wake up the live demo for interview review.",
+                "scoreImpact": "Partial credit awarded (4.0/7.0). Site is unverified until active or demonstrated live in interview.",
             }
 
         # 3. PRIVATE_REPO
@@ -173,9 +173,9 @@ class ProjectScorer:
                 "isWorking": False,
                 "evidenceScore": 2.5,
                 "title": "GitHub Repository is Private",
-                "reason": "We verified your GitHub account, but this repository cannot be viewed publicly (returns 404). Recruiters cannot inspect your code.",
-                "actionableFix": "Open your GitHub repository → Click 'Settings' → Scroll down to 'Danger Zone' → Click 'Change visibility' → Choose 'Make public'.",
-                "scoreImpact": "Partial credit awarded (2.5/7.0). Making your repository public will increase your score by up to +20 points.",
+                "reason": "GitHub account verified, but this repository cannot be viewed publicly (returns 404). Evaluators cannot inspect the code.",
+                "actionableFix": "Repository exists but is set to private. Ask candidate to Make public or present their codebase during the technical interview.",
+                "scoreImpact": "Partial credit awarded (2.5/7.0). Repository code remains unverified until reviewed in interview.",
             }
 
         # URL provided but not working
@@ -198,8 +198,8 @@ class ProjectScorer:
                         "evidenceScore": 1.0,
                         "title": "Generic Platform Link",
                         "reason": f"The link ({submitted_url}) points to a platform root rather than the specific project repository or demo.",
-                        "actionableFix": "Provide the direct URL to your specific project repository (e.g. github.com/username/project-name) instead of the homepage.",
-                        "scoreImpact": "Minimal evidence credit (1.0/7.0). Direct project links unlock full verification.",
+                        "actionableFix": "Link points to a platform root rather than this specific project. Request the direct URL or repository during the interview.",
+                        "scoreImpact": "Minimal evidence credit (1.0/7.0). Direct project links are required for verification.",
                     }
             except Exception:
                 pass
@@ -216,8 +216,8 @@ class ProjectScorer:
                     "evidenceScore": 1.0,
                     "title": "Malformed URL",
                     "reason": f"'{submitted_url}' is not a valid web link format.",
-                    "actionableFix": "Ensure your project link starts with https:// and has no extra spaces or invalid characters.",
-                    "scoreImpact": "Minimal credit (1.0/7.0). Correcting the URL format will enable verification.",
+                    "actionableFix": "Project link format is invalid. Request the correct URL directly from the candidate during screening.",
+                    "scoreImpact": "Minimal credit (1.0/7.0). Correct URL format required for verification.",
                 }
 
             # 4. BROKEN_404
@@ -242,16 +242,16 @@ class ProjectScorer:
                 "evidenceScore": 1.5,
                 "title": "Broken Link (404 Not Found)",
                 "reason": f"The submitted project link ({submitted_url}) returned 404 Not Found or is unreachable.",
-                "actionableFix": "Check your résumé for URL typos, ensure the repository/site name is accurate, or update it with an active link.",
-                "scoreImpact": "Low evidence score (1.5/7.0). Fixing this link will restore full verification points.",
+                "actionableFix": "Project link returned 404 or is unreachable. Confirm with candidate if the repository was renamed or moved.",
+                "scoreImpact": "Low evidence score (1.5/7.0). Link is unverified.",
             }
 
         # 7. NO_LINK_PROVIDED
         evidence_score = 0.5 if is_tech_or_data else 2.5
         fix_msg = (
-            "Add a public GitHub repository link or a live demo URL directly under this project in your résumé."
+            "No public code or demo was detected in the résumé. Ask candidate to demonstrate implementation or Add a public GitHub repository link / live demo."
             if is_tech_or_data
-            else "Add an appropriate work sample or enough detail for a recruiter to verify the outcome."
+            else "No work sample provided. Ask candidate for work samples or evidence during interview."
         )
         return {
             "status": "NO_LINK_PROVIDED",
@@ -269,9 +269,9 @@ class ProjectScorer:
             ),
             "actionableFix": fix_msg,
             "scoreImpact": (
-                "Unverified project score is capped at 60%. Adding a verified public link will allow this project to score up to 90+."
+                "Unverified project score is capped at 60% without public code or live demo verification."
                 if is_tech_or_data
-                else "Adding a work sample will provide supporting evidence for this project."
+                else "Work sample is unverified."
             ),
         }
 
