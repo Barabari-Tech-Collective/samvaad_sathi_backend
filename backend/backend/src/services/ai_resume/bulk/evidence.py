@@ -319,7 +319,7 @@ def build_category_evidence(
         if answer.get("value") is not None:
             evidence[category].append(with_location({
                     "source": f"jev.{question}",
-                    "text": f"Jev assessment: {answer['value']} (confidence {answer.get('confidence')})",
+                    "text": f"AI assessment: {answer['value']} (confidence {answer.get('confidence')})",
                 }))
     return evidence
 
