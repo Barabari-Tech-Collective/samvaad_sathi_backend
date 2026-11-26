@@ -19,6 +19,7 @@ from src.models.schemas.teams_v2 import (
     TeamMemberCreate,
     TeamMemberUpdate,
     TeamMemberRecycleBinResponse,
+    TeamsSummaryResponse,
 )
 from src.repository.crud.team_v2 import TeamCRUDRepository, TeamDeleteStatus
 from src.models.db.user import User
@@ -77,6 +78,20 @@ async def create_team(
 ) -> TeamResponse:
     team = await team_repo.create_team(team_data)
     return TeamResponse(**team)
+
+@router.get(
+    path="/summary",
+    name="teams:get_summary",
+    response_model=TeamsSummaryResponse,
+    status_code=fastapi.status.HTTP_200_OK,
+    summary="Get teams governance summary",
+)
+async def get_teams_summary(
+    current_user: User = fastapi.Depends(get_current_user),
+    team_repo: TeamCRUDRepository = fastapi.Depends(get_repository(repo_type=TeamCRUDRepository)),
+) -> TeamsSummaryResponse:
+    summary = await team_repo.get_teams_summary()
+    return TeamsSummaryResponse(**summary)
 
 @router.delete(
     path="/{team_id}",

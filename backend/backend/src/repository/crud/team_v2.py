@@ -12,6 +12,7 @@ from src.models.schemas.teams_v2 import TeamCreate, TeamMemberCreate, TeamMember
 from src.securities.hashing.password import pwd_generator
 from src.utilities.exceptions.database import EntityDoesNotExist, EntityAlreadyExists
 from src.api.dependencies.admin import is_admin_user, is_super_admin_user
+from src.services.staff_roles import ALIASES
 from src.services.central_auth_service import (
     provision_or_invite_staff,
     revoke_provisioning,
@@ -29,6 +30,33 @@ class TeamDeleteStatus(str, enum.Enum):
     SUCCESS = "success"
     HAS_MEMBERS = "has_members"
     NOT_FOUND = "not_found"
+
+
+def format_access_role_display(role: str | None) -> str:
+    cleaned = (role or "").strip().replace("_", " ").lower()
+    cleaned = ALIASES.get(cleaned, cleaned)
+    if "creator" in cleaned or cleaned == "lead":
+        return "Creator"
+    elif cleaned in ("senior facilitator", "sr facilitator"):
+        return "Sr Facilitator"
+    elif cleaned in ("junior facilitator", "jr facilitator"):
+        return "Jr Facilitator"
+    elif cleaned in ("member", "team member"):
+        return "Team Member"
+    return role.strip().title() if role and role.strip() else "Team Member"
+
+
+def categorize_role(raw_role: str | None) -> str:
+    cleaned = (raw_role or "").strip().replace("_", " ").lower()
+    cleaned = ALIASES.get(cleaned, cleaned)
+    if "creator" in cleaned or cleaned == "lead":
+        return "creator"
+    elif cleaned in ("senior facilitator", "sr facilitator"):
+        return "sr_facilitator"
+    elif cleaned in ("junior facilitator", "jr facilitator"):
+        return "jr_facilitator"
+    else:
+        return "team_member"
 
 
 class TeamCRUDRepository(BaseCRUDRepository):
@@ -52,36 +80,75 @@ class TeamCRUDRepository(BaseCRUDRepository):
         )
         result = await self.async_session.execute(stmt)
         rows = result.all()
+
+        team_ids = [team.id for team, _ in rows]
+        team_purposes_map: dict[int, list[str]] = {t_id: [] for t_id in team_ids}
+        if team_ids:
+            mem_stmt = select(TeamMember.team_id, TeamMember.purposes).where(
+                TeamMember.team_id.in_(team_ids),
+                TeamMember.status == 'active'
+            )
+            mem_result = await self.async_session.execute(mem_stmt)
+            for t_id, m_purposes in mem_result.all():
+                if isinstance(m_purposes, list):
+                    for p in m_purposes:
+                        if isinstance(p, str) and p.strip() and p.strip() not in team_purposes_map[t_id]:
+                            team_purposes_map[t_id].append(p.strip())
         
         teams = []
         for team, member_count in rows:
+            purposes = list(team_purposes_map.get(team.id, []))
+            if team.description:
+                for part in team.description.split(","):
+                    p = part.strip()
+                    if p and p not in purposes:
+                        purposes.append(p)
+
             teams.append({
                 "id": team.id,
                 "name": team.name,
                 "description": team.description,
                 "status": team.status,
                 "created_at": team.created_at,
-                "memberCount": member_count
+                "createdAt": team.created_at,
+                "memberCount": member_count,
+                "member_count": member_count,
+                "purposes": purposes,
+                "created_by_name": "Super Admin",
+                "createdByName": "Super Admin",
             })
         return teams
 
     async def create_team(self, team_data: TeamCreate) -> dict:
+        desc = team_data.description
+        if not desc and team_data.purposes:
+            desc = ", ".join(team_data.purposes)
+
         new_team = Team(
             name=team_data.name,
-            description=team_data.description,
+            description=desc,
             status="active"
         )
         self.async_session.add(new_team)
         await self.async_session.commit()
         await self.async_session.refresh(new_team)
-        
+
+        purposes = list(team_data.purposes) if team_data.purposes else []
+        if not purposes and new_team.description:
+            purposes = [p.strip() for p in new_team.description.split(",") if p.strip()]
+
         return {
             "id": new_team.id,
             "name": new_team.name,
             "description": new_team.description,
             "status": new_team.status,
             "created_at": new_team.created_at,
-            "memberCount": 0
+            "createdAt": new_team.created_at,
+            "memberCount": 0,
+            "member_count": 0,
+            "purposes": purposes,
+            "created_by_name": "Super Admin",
+            "createdByName": "Super Admin",
         }
 
     async def delete_team(self, team_id: int) -> TeamDeleteStatus:
@@ -140,21 +207,41 @@ class TeamCRUDRepository(BaseCRUDRepository):
         result = await self.async_session.execute(stmt)
         rows = result.all()
         
+        # Identify team lead or creator if present
+        lead_name = "Super Admin"
+        for member, user in rows:
+            r = (member.access_role or "").lower()
+            if "lead" in r or "creator" in r:
+                lead_name = user.name
+                break
+
         members = []
         for member, user in rows:
+            clean_r = (member.access_role or "").lower()
+            is_lead = "lead" in clean_r or "creator" in clean_r
+            created_by = "Super Admin" if is_lead else (lead_name or "Super Admin")
+
             members.append({
                 "id": member.id,
                 "user_id": user.id,
+                "userId": user.id,
                 "team_id": member.team_id,
+                "teamId": member.team_id,
                 "name": user.name,
                 "email": user.email,
                 "avatar": None,
-                "access_role": member.access_role,
-                "purposes": member.purposes,
+                "access_role": format_access_role_display(member.access_role),
+                "accessRole": format_access_role_display(member.access_role),
+                "purposes": member.purposes if isinstance(member.purposes, list) else [],
                 "domain": member.domain,
-                "colleges": member.colleges,
+                "colleges": member.colleges if isinstance(member.colleges, list) else [],
                 "status": member.status,
-                "removed_date": member.removed_date
+                "created_at": member.created_at,
+                "createdAt": member.created_at,
+                "created_by_name": created_by,
+                "createdByName": created_by,
+                "removed_date": member.removed_date,
+                "removedDate": member.removed_date,
             })
         return members
 
@@ -358,16 +445,24 @@ class TeamCRUDRepository(BaseCRUDRepository):
         return {
             "id": new_member.id,
             "user_id": user.id,
+            "userId": user.id,
             "team_id": new_member.team_id,
+            "teamId": new_member.team_id,
             "name": user.name,
             "email": user.email,
             "avatar": None,
-            "access_role": new_member.access_role,
-            "purposes": new_member.purposes,
+            "access_role": format_access_role_display(new_member.access_role),
+            "accessRole": format_access_role_display(new_member.access_role),
+            "purposes": new_member.purposes if isinstance(new_member.purposes, list) else [],
             "domain": new_member.domain,
-            "colleges": new_member.colleges,
+            "colleges": new_member.colleges if isinstance(new_member.colleges, list) else [],
             "status": new_member.status,
-            "removed_date": new_member.removed_date
+            "created_at": new_member.created_at,
+            "createdAt": new_member.created_at,
+            "created_by_name": "Super Admin",
+            "createdByName": "Super Admin",
+            "removed_date": new_member.removed_date,
+            "removedDate": new_member.removed_date,
         }
 
     async def soft_delete_member(self, team_id: int, member_id: int) -> bool:
@@ -576,14 +671,129 @@ class TeamCRUDRepository(BaseCRUDRepository):
         return {
             "id": member.id,
             "user_id": member.user_id,
+            "userId": member.user_id,
             "team_id": member.team_id,
+            "teamId": member.team_id,
             "name": user.name if user else "",
             "email": user.email if user else "",
             "avatar": None,
-            "access_role": member.access_role,
-            "purposes": member.purposes,
+            "access_role": format_access_role_display(member.access_role),
+            "accessRole": format_access_role_display(member.access_role),
+            "purposes": member.purposes if isinstance(member.purposes, list) else [],
             "domain": member.domain,
-            "colleges": member.colleges,
+            "colleges": member.colleges if isinstance(member.colleges, list) else [],
             "status": member.status,
-            "removed_date": member.removed_date
+            "created_at": member.created_at,
+            "createdAt": member.created_at,
+            "created_by_name": "Super Admin",
+            "createdByName": "Super Admin",
+            "removed_date": member.removed_date,
+            "removedDate": member.removed_date,
+        }
+
+    async def get_teams_summary(self) -> dict:
+        """Fetch consolidated summary of teams, active members, role distribution, and team details."""
+        # 1. Total active teams
+        team_count_stmt = select(func.count(Team.id)).where(Team.status == "active")
+        total_teams = (await self.async_session.execute(team_count_stmt)).scalar() or 0
+
+        # 2. Total active members across active teams
+        member_count_stmt = (
+            select(func.count(TeamMember.id))
+            .join(Team, TeamMember.team_id == Team.id)
+            .where(Team.status == "active", TeamMember.status == "active")
+        )
+        total_active_members = (await self.async_session.execute(member_count_stmt)).scalar() or 0
+
+        # 3. Role distribution across active members in active teams
+        role_stmt = (
+            select(TeamMember.access_role, func.count(TeamMember.id))
+            .join(Team, TeamMember.team_id == Team.id)
+            .where(Team.status == "active", TeamMember.status == "active")
+            .group_by(TeamMember.access_role)
+        )
+        role_rows = (await self.async_session.execute(role_stmt)).all()
+        role_dist = {
+            "creator": 0,
+            "sr_facilitator": 0,
+            "jr_facilitator": 0,
+            "team_member": 0,
+        }
+        for role_name, count in role_rows:
+            category = categorize_role(role_name)
+            role_dist[category] = role_dist.get(category, 0) + count
+
+        # 4. Teams details with member counts, purposes, and lead info
+        teams_stmt = (
+            select(
+                Team,
+                func.count(TeamMember.id).filter(TeamMember.status == 'active').label("memberCount")
+            )
+            .outerjoin(TeamMember, Team.id == TeamMember.team_id)
+            .where(Team.status == "active")
+            .group_by(Team.id)
+            .order_by(Team.created_at.desc())
+        )
+        team_rows = (await self.async_session.execute(teams_stmt)).all()
+        team_ids = [t.id for t, _ in team_rows]
+
+        # Load active members to extract leads and purposes
+        team_leads: dict[int, tuple[str | None, str | None]] = {}
+        team_purposes: dict[int, list[str]] = {t_id: [] for t_id in team_ids}
+
+        if team_ids:
+            members_stmt = (
+                select(TeamMember, User)
+                .join(User, TeamMember.user_id == User.id)
+                .where(TeamMember.team_id.in_(team_ids), TeamMember.status == "active")
+                .order_by(TeamMember.created_at.asc())
+            )
+            mem_rows = (await self.async_session.execute(members_stmt)).all()
+            for member, user in mem_rows:
+                t_id = member.team_id
+                if isinstance(member.purposes, list):
+                    for p in member.purposes:
+                        if isinstance(p, str) and p.strip() and p.strip() not in team_purposes[t_id]:
+                            team_purposes[t_id].append(p.strip())
+                clean_r = (member.access_role or "").lower()
+                is_lead_role = "lead" in clean_r or "creator" in clean_r
+                if t_id not in team_leads or is_lead_role:
+                    existing_lead = team_leads.get(t_id)
+                    if not existing_lead or is_lead_role:
+                        team_leads[t_id] = (user.name, user.email)
+
+        team_items = []
+        for team, member_count in team_rows:
+            lead_name, lead_email = team_leads.get(team.id, (None, None))
+            purposes = list(team_purposes.get(team.id, []))
+            if team.description:
+                for part in team.description.split(","):
+                    p = part.strip()
+                    if p and p not in purposes:
+                        purposes.append(p)
+
+            team_items.append({
+                "id": team.id,
+                "name": team.name,
+                "lead_name": lead_name,
+                "leadName": lead_name,
+                "lead_email": lead_email,
+                "leadEmail": lead_email,
+                "purposes": purposes,
+                "member_count": member_count,
+                "memberCount": member_count,
+                "created_by_name": "Super Admin",
+                "createdByName": "Super Admin",
+                "created_at": team.created_at,
+                "createdAt": team.created_at,
+            })
+
+        return {
+            "total_teams": total_teams,
+            "totalTeams": total_teams,
+            "total_active_members": total_active_members,
+            "totalActiveMembers": total_active_members,
+            "role_distribution": role_dist,
+            "roleDistribution": role_dist,
+            "teams": team_items,
         }
