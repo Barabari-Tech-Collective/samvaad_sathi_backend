@@ -238,6 +238,7 @@
  "GET /api/v2/summary-report/{interview_id}",
  "GET /api/v2/teams",
  "GET /api/v2/teams/recycle-bin",
+ "GET /api/v2/teams/summary",
  "GET /api/v2/teams/{team_id}/members",
  "GET /api/v2/teams/{team_id}/recycle-bin",
  "GET /api/v2/template-courses",
