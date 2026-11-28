@@ -57,9 +57,9 @@ class TeamResponse(TeamBase):
 
 class TeamMemberBase(BaseSchemaModel):
     access_role: str = Field(..., description="Access role for the user (e.g., Creator, Facilitator)")
-    purposes: Optional[List[str]] = Field(default_factory=list, description="Granular access purposes")
+    purposes: Optional[List[str]] = Field(None, description="Granular access purposes")
     domain: Optional[str] = Field(None, description="Assigned domain")
-    colleges: Optional[List[str]] = Field(default_factory=list, description="Assigned colleges")
+    colleges: Optional[List[str]] = Field(None, description="Assigned colleges")
 
 
 class TeamMemberCreate(TeamMemberBase):
